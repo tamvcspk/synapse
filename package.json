@@ -11,6 +11,10 @@
     "build:browser": "vite build",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@picocss/pico": "^2.1.1",
+    "vanjs-core": "^1.5.3"
+  },
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.0.0-beta.31",
     "@types/chrome": "^0.0.287",

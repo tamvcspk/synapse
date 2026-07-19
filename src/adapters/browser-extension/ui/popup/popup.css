@@ -1,0 +1,68 @@
+:root {
+  --pico-font-size: 90%;
+}
+
+body {
+  width: 340px;
+  margin: 0;
+}
+
+.banner {
+  font-size: 0.85em;
+  background: var(--pico-mark-background-color);
+  color: var(--pico-mark-color);
+  border-radius: var(--pico-border-radius);
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.module-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.module-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  gap: 0.5rem;
+}
+
+.module-row.disabled {
+  opacity: 0.5;
+}
+
+.module-label-link {
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.reason {
+  font-size: 0.75em;
+  color: var(--pico-del-color);
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.row-actions button,
+.module-gear {
+  width: auto;
+  padding: 0.25rem 0.6rem;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.action-result-form.is-error p {
+  color: var(--pico-del-color);
+}

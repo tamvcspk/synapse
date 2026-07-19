@@ -1,3 +1,7 @@
+import van from 'vanjs-core';
+
+const { div, p, textarea, button } = van.tags;
+
 /**
  * In-flow result view for Action-schema modules (docs/ROADMAP.md #1/#2). Renders directly into
  * #root instead of a native <dialog> — a Chrome MV3 popup auto-sizes to document.body's normal
@@ -20,39 +24,28 @@ export function renderActionResultView(
   props: ActionResultViewProps,
   callbacks: ActionResultViewCallbacks,
 ): void {
-  root.innerHTML = '';
+  root.replaceChildren();
 
-  const container = document.createElement('div');
-  container.className = 'action-result-form' + (props.isError ? ' is-error' : '');
-
-  const title = document.createElement('p');
-  title.textContent = props.title;
-
-  const textarea = document.createElement('textarea');
-  textarea.readOnly = true;
-  textarea.rows = 10;
-  textarea.value = props.content;
-
-  const menu = document.createElement('menu');
-
-  const copyBtn = document.createElement('button');
-  copyBtn.type = 'button';
-  copyBtn.textContent = 'Copy';
-  copyBtn.addEventListener('click', () => {
+  const copyBtn = button({ type: 'button', class: 'secondary' }, 'Copy');
+  copyBtn.onclick = () => {
     void navigator.clipboard.writeText(props.content);
     copyBtn.textContent = 'Copied!';
     setTimeout(() => {
       copyBtn.textContent = 'Copy';
     }, 1200);
-  });
+  };
 
-  const backBtn = document.createElement('button');
-  backBtn.type = 'button';
-  backBtn.textContent = '←';
-  backBtn.title = 'Back';
-  backBtn.addEventListener('click', callbacks.onBack);
-
-  menu.append(copyBtn, backBtn);
-  container.append(title, textarea, menu);
-  root.append(container);
+  van.add(
+    root,
+    div(
+      { class: 'action-result-form' + (props.isError ? ' is-error' : '') },
+      p(props.title),
+      textarea({ readonly: true, rows: 10 }, props.content),
+      div(
+        { class: 'form-actions' },
+        button({ type: 'button', class: 'secondary', onclick: callbacks.onBack }, '← Back'),
+        copyBtn,
+      ),
+    ),
+  );
 }

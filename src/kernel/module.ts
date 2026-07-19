@@ -30,6 +30,14 @@ export interface Module<In = unknown, Out = unknown> {
   /** Declarative UI Schema (docs/ROADMAP.md #2) — presence of this field is what makes the
    * popup show a Gear/Arrow icon for this Module; its `kind` decides the icon's behavior. */
   uiSchema?: UISchema;
+  /**
+   * Read-side counterpart to a `'collection'` uiSchema's write path (CollectionCommand, handled
+   * inside `run()`) — the Module's own storage read, self-registered here instead of the
+   * Management View (docs/ROADMAP.md #2/#2.5) importing a specific module's storage file by name.
+   * The Module owns its storage shape, so it's the only place allowed to cast it down to
+   * `Record<string, unknown>[]` for the generic renderer.
+   */
+  listCollection?(): Promise<Record<string, unknown>[]>;
   run(input: In, ctx: ModuleContext): Promise<Out>;
 }
 

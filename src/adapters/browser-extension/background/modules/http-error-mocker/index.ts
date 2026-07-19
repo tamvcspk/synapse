@@ -34,6 +34,10 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
       { key: 'delayMs', label: 'Delay (ms)', type: 'number' },
     ],
   },
+  // Read-side counterpart to the CollectionCommand write path below — lets the Dashboard's generic
+  // Management View (docs/ROADMAP.md #2.5) read this Module's data without importing
+  // mock-config-store.ts directly (see kernel/module.ts's listCollection doc comment).
+  listCollection: async () => (await getMockConfigs()) as unknown as Record<string, unknown>[],
   async run(command) {
     // Module-level Slide Toggle gate — mirrors relay.ts's dom-module active check. Inactive means
     // both "ignore CRUD commands" and "tear down the interceptor", not just a cosmetic toggle.
