@@ -1,4 +1,5 @@
 import { registerDomModule } from './relay';
+import { buildDomModuleServices } from './rpc-client';
 import { BUNDLED_MODULES } from '../module-registry/bundled-modules';
 import { isModuleActive } from '../module-registry/storage';
 
@@ -14,7 +15,7 @@ for (const mod of domModules) {
   void (async () => {
     if (!(await isModuleActive(mod.id))) return;
     try {
-      await mod.run(undefined, { services: {} });
+      await mod.run(undefined, { services: buildDomModuleServices(mod.id, mod.needs) });
     } catch (err) {
       console.error(`Synapse: module "${mod.id}" failed on auto-run`, err);
     }

@@ -6,6 +6,7 @@ const KEYS = {
   grants: 'synapse:grants',
   uploaded: 'synapse:uploaded',
   manifestReports: 'synapse:manifest-reports',
+  userScriptsPermission: 'synapse:user-scripts-permission',
 } as const;
 
 export type StoredManifestReport = Omit<ManifestReport, 'type'>;
@@ -75,4 +76,17 @@ export async function deleteManifestReport(moduleId: string): Promise<void> {
   const map = await getManifestReports();
   delete map[moduleId];
   await setStored(KEYS.manifestReports, map);
+}
+
+/**
+ * Whether chrome.userScripts.configureWorld({ messaging: true }) last succeeded — set once from
+ * background/index.ts at startup. Defaults to true (assume ok) so the popup doesn't flash a
+ * warning before the background has had a chance to report in.
+ */
+export async function isUserScriptsPermissionGranted(): Promise<boolean> {
+  return getStored(KEYS.userScriptsPermission, true);
+}
+
+export async function setUserScriptsPermissionGranted(granted: boolean): Promise<void> {
+  await setStored(KEYS.userScriptsPermission, granted);
 }

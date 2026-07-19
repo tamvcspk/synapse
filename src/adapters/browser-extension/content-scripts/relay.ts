@@ -1,5 +1,6 @@
 import type { Module } from '../../../kernel/module';
 import { isModuleActive } from '../module-registry/storage';
+import { buildDomModuleServices } from './rpc-client';
 
 export function registerDomModule(mod: Module): void {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -11,7 +12,8 @@ export function registerDomModule(mod: Module): void {
         return;
       }
       try {
-        sendResponse(await mod.run(message.input, { services: {} }));
+        const services = buildDomModuleServices(mod.id, mod.needs);
+        sendResponse(await mod.run(message.input, { services }));
       } catch (err) {
         sendResponse({ error: err instanceof Error ? err.message : String(err) });
       }

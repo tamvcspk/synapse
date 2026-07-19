@@ -1,5 +1,6 @@
 import type { RegistryEntry } from '../../../kernel/module-registry';
 import { ChromeModuleRegistryService } from '../module-registry/chrome-module-registry';
+import { isUserScriptsPermissionGranted } from '../module-registry/storage';
 import { confirmCapabilities } from './capability-dialog';
 import { renderPopup } from './render';
 
@@ -20,13 +21,21 @@ fileInput.addEventListener('change', async () => {
 document.body.append(fileInput);
 
 async function load(): Promise<void> {
-  const entries = await registry.list();
-  renderPopup(root, entries, {
-    onToggle: handleToggle,
-    onGrant: handleGrant,
-    onUpload: () => fileInput.click(),
-    onRefresh: handleRefresh,
-  });
+  const [entries, userScriptsPermissionGranted] = await Promise.all([
+    registry.list(),
+    isUserScriptsPermissionGranted(),
+  ]);
+  renderPopup(
+    root,
+    entries,
+    {
+      onToggle: handleToggle,
+      onGrant: handleGrant,
+      onUpload: () => fileInput.click(),
+      onRefresh: handleRefresh,
+    },
+    { userScriptsPermissionGranted },
+  );
 }
 
 async function handleGrant(entry: RegistryEntry): Promise<void> {

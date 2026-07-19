@@ -46,10 +46,31 @@ genuinely missing and the user has asked for activate/deactivate, uploads, or a 
   `globalThis.__synapseModule`, reports it, auto-runs once, registers a dispatcher).
 - `rpc-handler.ts` — background-side authority. Re-checks every `synapse:rpc` call against
   persisted activation + grant state before forwarding to the real Service. **The shim is never
-  trusted to self-limit — this file is the actual enforcement point.**
+  trusted to self-limit — this file is the actual enforcement point.** It's source-agnostic: the
+  same handler serves both the uploaded-module shim and the bundled-dom-module RPC client below,
+  since both send the same `RpcRequest` shape keyed by `moduleId`.
 - `storage.ts` — `chrome.storage.local`-backed helpers (activation map, grants map, uploaded
-  source map, manifest-report cache). All registry state lives here, not in memory (MV3 background
+  source map, manifest-report cache, `isUserScriptsPermissionGranted`/
+  `setUserScriptsPermissionGranted`). All registry state lives here, not in memory (MV3 background
   can restart at any time — same constraint as `kernel-bootstrap`).
+
+**Content-script RPC client (`src/adapters/browser-extension/content-scripts/rpc-client.ts`):**
+Bundled `dom` Modules get real `ai`/`cache` services, not an empty `ModuleContext` — `relay.ts`
+calls `buildDomModuleServices(mod.id, mod.needs)` and passes the result into `mod.run()`. This
+mirrors `user-script-shim.ts`'s RPC pattern (same `RpcRequest`/`RpcResponse` contracts, same
+`rpc-handler.ts` on the other end) so a bundled dom Module and an uploaded module get equivalent
+treatment instead of the bundled path being a dead end. **`bus` is deliberately not proxied here**
+— it's pub/sub, and a handler function can't cross `chrome.runtime.sendMessage`'s structured-clone
+boundary. A dom Module that truly needs `bus` still has to hand-roll its own messaging inside
+`run()` (see `kernel-bootstrap`'s note on this) — don't try to add a generic `bus.on` proxy without
+first deciding how a remote handler registration would actually be delivered.
+
+**Popup permission banner:** `background/index.ts` persists the outcome of
+`chrome.userScripts.configureWorld(...)` via `storage.ts` (not just `console.warn`), and
+`popup/main.ts`'s `load()` reads it and passes `{ userScriptsPermissionGranted }` into
+`renderPopup` (`render.ts`), which renders a warning banner when it's `false`. If you change the
+`configureWorld` call site, keep this persistence — the popup has no other way to know why
+uploaded modules silently fail to reach Services.
 
 **Popup (`src/adapters/browser-extension/popup/`):** single list view by design — no separate
 settings screen. `main.ts` (bootstrap + handlers), `render.ts` (DOM rendering, no framework),

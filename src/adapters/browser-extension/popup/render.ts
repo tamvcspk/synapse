@@ -7,9 +7,26 @@ export interface RenderCallbacks {
   onRefresh(): void;
 }
 
+export interface RenderOptions {
+  /** false when chrome.userScripts.configureWorld failed — see background/index.ts + storage.ts. */
+  userScriptsPermissionGranted?: boolean;
+}
+
 /** Single list view — no separate settings screen/navigation by design. */
-export function renderPopup(root: HTMLElement, entries: RegistryEntry[], callbacks: RenderCallbacks): void {
+export function renderPopup(
+  root: HTMLElement,
+  entries: RegistryEntry[],
+  callbacks: RenderCallbacks,
+  options: RenderOptions = {},
+): void {
   root.innerHTML = '';
+
+  if (options.userScriptsPermissionGranted === false) {
+    const banner = document.createElement('div');
+    banner.className = 'banner';
+    banner.textContent = 'Enable "Allow User Scripts" for this extension in chrome://extensions to run uploaded modules.';
+    root.append(banner);
+  }
 
   const header = document.createElement('div');
   header.className = 'header';
