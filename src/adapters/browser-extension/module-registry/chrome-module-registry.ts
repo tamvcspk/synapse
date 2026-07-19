@@ -3,6 +3,7 @@ import { assertEnvSupported, EnvironmentMismatchError } from '../../../kernel/en
 import type { Capability, Module, RuntimeEnv } from '../../../kernel/module';
 import type { ModuleRegistryService, RegistryEntry, UploadResult } from '../../../kernel/module-registry';
 import { BUNDLED_MODULES } from './bundled-modules';
+import { BACKGROUND_MODULES } from './background-modules';
 import { buildShimSource } from './user-script-shim';
 import {
   getActivationMap,
@@ -115,7 +116,10 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     grants: Record<string, Capability[]>,
   ): Promise<RegistryEntry[]> {
     const entries: RegistryEntry[] = [];
-    for (const mod of BUNDLED_MODULES) {
+    // Merges dom Modules (bundled-modules.ts) with browser-specific non-dom Modules
+    // (background-modules.ts, e.g. http-error-mocker) — both are trusted build-time code and get
+    // the same RegistryEntry treatment (Navigation Flow's Gear/Arrow icon applies to either).
+    for (const mod of [...BUNDLED_MODULES, ...BACKGROUND_MODULES]) {
       const needs = mod.needs ?? [];
       const supportedEnvs = mod.supportedEnvs ?? ['browser-extension'];
       const envSupported = isEnvSupported(mod);
@@ -138,6 +142,7 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
         grantedCapabilities,
       };
       if (!envSupported) entry.reason = `not supported in ${CURRENT_ENV} (supports: ${supportedEnvs.join(', ')})`;
+      if (mod.uiSchema) entry.uiSchema = mod.uiSchema;
 
       entries.push(entry);
     }

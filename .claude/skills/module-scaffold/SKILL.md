@@ -36,10 +36,20 @@ would.
 
 ## Placement convention
 
-- **No `dom`:** `src/modules/<kebab-case-name>.module.ts` — runs in the background service worker.
-  This location is Adapter-agnostic on purpose (docs/design.md §7 Project Structure): it depends
-  only on `kernel/module` Ports, not on `chrome.*`, so it stays put even if a second Adapter is
-  ever added.
+- **No `dom`, and genuinely portable:** `src/modules/<kebab-case-name>.module.ts` — runs in the
+  background service worker. This location is Adapter-agnostic on purpose (docs/design.md §7
+  Project Structure): it depends only on `kernel/module` Ports, not on `chrome.*` — not even
+  transitively through an imported util — so it stays put even if a second Adapter is ever added.
+  If the module's logic would need to change for a hypothetical second Adapter, it isn't portable —
+  use the next option instead, even though this one also has no `dom`.
+- **No `dom`, but browser-specific** (e.g. it orchestrates `chrome.scripting`, or otherwise calls
+  browser-extension-only infra even though it doesn't touch the page's DOM itself):
+  `src/adapters/browser-extension/background/modules/<kebab-case-name>/index.ts` — a folder with an
+  `index.ts` entry (plus any colocated support files the module needs, e.g. a MAIN-world
+  composition root — see the `main-world-interceptor` skill for that specific case). Still runs in
+  the background service worker; the folder-per-module shape exists because these modules tend to
+  need more than one file. Auto-discovered the same way as bundled `dom` Modules (see below), via a
+  separate glob (`module-registry/background-modules.ts`) scoped to this folder.
 - **With `dom`:** `src/adapters/browser-extension/content-scripts/modules/<kebab-case-name>.module.ts`
   — runs in the page context, which is specific to the browser-extension Adapter. It cannot call
   `ai`/`net`/`cache` services directly (background owns those, and content scripts are subject to

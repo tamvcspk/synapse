@@ -2,6 +2,13 @@ import { registerDomModule } from './relay';
 import { buildDomModuleServices } from './rpc-client';
 import { BUNDLED_MODULES } from '../module-registry/bundled-modules';
 import { isModuleActive } from '../module-registry/storage';
+import { installStorageToMainWorldRelay } from '../utils/main-world/storage-relay';
+import { MOCK_CONFIG_CHANNEL_ID, MOCK_CONFIG_STORAGE_KEY } from '../background/modules/http-error-mocker/constants';
+
+// Generic infra call (not a Module — see main-world-interceptor skill): forwards
+// http-error-mocker's persisted MockConfig list into its MAIN-world interceptor whenever it's
+// registered. Kept explicit rather than auto-discovered — only one feature needs this today.
+installStorageToMainWorldRelay(MOCK_CONFIG_STORAGE_KEY, MOCK_CONFIG_CHANNEL_ID);
 
 const domModules = BUNDLED_MODULES.filter((mod) => mod.needs?.includes('dom'));
 

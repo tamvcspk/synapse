@@ -8,7 +8,7 @@
     "moduleResolution": "Bundler",
     "target": "ES2022",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["chrome", "vite/client"],
+    "types": ["chrome", "vite/client", "@crxjs/vite-plugin/client"],
     "skipLibCheck": true,
     "isolatedModules": true,
     "noEmit": true

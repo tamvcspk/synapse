@@ -1,27 +1,30 @@
-import type { RegistryEntry } from '../../../kernel/module-registry';
+import type { RegistryEntry } from '../../../../kernel/module-registry';
 
-export interface RenderCallbacks {
+export interface ListViewCallbacks {
   onToggle(entry: RegistryEntry): void;
   onGrant(entry: RegistryEntry): void;
   onUpload(): void;
   onRefresh(): void;
+  /** Navigation Flow (docs/ROADMAP.md #2): row/icon click for any entry carrying a uiSchema —
+   * router.ts decides whether that means "open Management View" or "trigger run() directly". */
+  onOpenModule(entry: RegistryEntry): void;
 }
 
-export interface RenderOptions {
+export interface ListViewProps {
   /** false when chrome.userScripts.configureWorld failed — see background/index.ts + storage.ts. */
   userScriptsPermissionGranted?: boolean;
 }
 
-/** Single list view — no separate settings screen/navigation by design. */
-export function renderPopup(
+/** Main Registry View — single list view by design. */
+export function renderListView(
   root: HTMLElement,
   entries: RegistryEntry[],
-  callbacks: RenderCallbacks,
-  options: RenderOptions = {},
+  callbacks: ListViewCallbacks,
+  props: ListViewProps = {},
 ): void {
   root.innerHTML = '';
 
-  if (options.userScriptsPermissionGranted === false) {
+  if (props.userScriptsPermissionGranted === false) {
     const banner = document.createElement('div');
     banner.className = 'banner';
     banner.textContent = 'Enable "Allow User Scripts" for this extension in chrome://extensions to run uploaded modules.';
@@ -34,12 +37,17 @@ export function renderPopup(
   const title = document.createElement('h1');
   title.textContent = 'Synapse Modules';
 
+  const uploadBtn = document.createElement('button');
+  uploadBtn.textContent = '⬆';
+  uploadBtn.title = 'Upload module';
+  uploadBtn.addEventListener('click', callbacks.onUpload);
+
   const refreshBtn = document.createElement('button');
   refreshBtn.textContent = '⟳';
   refreshBtn.title = 'Refresh';
   refreshBtn.addEventListener('click', callbacks.onRefresh);
 
-  header.append(title, refreshBtn);
+  header.append(title, uploadBtn, refreshBtn);
   root.append(header);
 
   const list = document.createElement('ul');
@@ -49,24 +57,20 @@ export function renderPopup(
     list.append(renderModuleRow(entry, callbacks));
   }
 
-  const uploadRow = document.createElement('li');
-  uploadRow.className = 'module-row upload-row';
-  const uploadBtn = document.createElement('button');
-  uploadBtn.textContent = 'Upload module';
-  uploadBtn.addEventListener('click', callbacks.onUpload);
-  uploadRow.append(uploadBtn);
-  list.append(uploadRow);
-
   root.append(list);
 }
 
-function renderModuleRow(entry: RegistryEntry, callbacks: RenderCallbacks): HTMLLIElement {
+function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks): HTMLLIElement {
   const row = document.createElement('li');
   row.className = 'module-row';
   if (entry.status !== 'ok') row.classList.add('disabled');
 
   const label = document.createElement('span');
   label.textContent = entry.label ?? entry.id;
+  if (entry.uiSchema) {
+    label.classList.add('module-label-link');
+    label.addEventListener('click', () => callbacks.onOpenModule(entry));
+  }
   row.append(label);
 
   // Same grey-out + reason treatment for both 'invalid' and 'env-mismatch'.
@@ -89,12 +93,31 @@ function renderModuleRow(entry: RegistryEntry, callbacks: RenderCallbacks): HTML
     row.append(grantBtn);
   }
 
+  // Action-icon + toggle grouped together, visually adjacent, separate from label/reason/grant.
+  const actions = document.createElement('div');
+  actions.className = 'row-actions';
+
+  // Gear/Arrow icon (Navigation Flow, docs/ROADMAP.md #2) — only when the module declares a
+  // uiSchema. Its behavior (open Management View vs trigger run()) is decided by router.ts based
+  // on the schema's shape, not here. Long-term this action moves to the extension toolbar icon
+  // (docs/ROADMAP.md #4) — until then it stays here with a native `title` tooltip.
+  if (entry.status === 'ok' && entry.uiSchema) {
+    const openBtn = document.createElement('button');
+    openBtn.className = 'module-gear';
+    openBtn.textContent = entry.uiSchema.kind === 'collection' ? '⚙' : '▶';
+    openBtn.title = entry.uiSchema.kind === 'collection' ? 'Manage' : entry.uiSchema.actionLabel;
+    openBtn.addEventListener('click', () => callbacks.onOpenModule(entry));
+    actions.append(openBtn);
+  }
+
   const toggle = document.createElement('input');
   toggle.type = 'checkbox';
   toggle.checked = entry.active;
   toggle.disabled = entry.status !== 'ok';
   toggle.addEventListener('change', () => callbacks.onToggle(entry));
-  row.append(toggle);
+  actions.append(toggle);
+
+  row.append(actions);
 
   return row;
 }

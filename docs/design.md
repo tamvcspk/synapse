@@ -49,6 +49,14 @@ Module {
 
 * **Simple Modules** (`needs: ['net']` or empty): Pure functions, invoked directly by the Kernel—no Decision Engine, no Bus. Example: `AngularDocAggregator` — fetches, parses, chunks, and writes to a KB file.
 * **Complex Modules** (`needs: ['ai', 'bus', 'cache']`): Can be structured as Mini-Agents—deciding autonomously whether to run pure logic or invoke the AI Adapter (via an internal Decision Engine), communicating via the Bus, and utilizing Cache/Session State provided by the Kernel.
+* **Modules needing page-JS-level access** (e.g. intercepting `fetch`/`XMLHttpRequest`) are not a
+  new Capability — they're a browser-specific *background* Module (`needs: ['bus']`, no `dom`) that
+  owns validation/persistence/orchestration, composed with generic MAIN-world infra
+  (`src/adapters/browser-extension/utils/`: a dynamic `chrome.scripting` injector, a `CustomEvent`
+  channel, a fetch/XHR interception mechanism) that has zero knowledge of the Module's domain
+  schema. Such Modules live in `background/modules/<name>/index.ts`, not `src/modules/` — they're
+  not portable (they call `chrome.scripting`/`chrome.storage`), even though they don't declare
+  `dom`. See the `main-world-interceptor` and `sdk-layers` skills.
 
 ### C. Service Layer (Opt-in, Provisioned on-demand)
 
@@ -133,10 +141,17 @@ The Kernel initializes an AI Adapter, Bus, and Cache specifically for this modul
   src/
     kernel/                              # Core — platform-agnostic, no chrome.* imports
       index.ts, module.ts, service-injector.ts, scheduler.ts, environment-guard.ts
-    modules/                             # portable Modules (no `dom`) — depend only on kernel/module Ports
+    shared/                              # Global SDK — pure functions, zero side-effects (§9)
+    modules/                             # portable Modules (no `dom`, zero chrome.* even transitively)
+                                          # — depend only on kernel/module Ports
     adapters/
       browser-extension/                 # the only Adapter implemented today
-        background/index.ts              # Kernel bootstrap: constructs Kernel + Service factories
+        utils/                           # Environment SDK — generic infra helpers local to this
+                                          # Adapter, no domain knowledge (§9)
+        background/
+          index.ts                       # Kernel bootstrap: constructs Kernel + Service factories
+          modules/<name>/index.ts         # browser-specific, non-portable, non-`dom` Modules —
+                                          # e.g. ones orchestrating chrome.scripting/chrome.storage
         content-scripts/index.ts, relay.ts, modules/*.module.ts   # `dom`-declaring Modules
   ```
 
@@ -152,7 +167,7 @@ The Kernel initializes an AI Adapter, Bus, and Cache specifically for this modul
 * **Execution Contexts:**
 * **Background (Service Worker):** Home of the Kernel. Runs all modules *not* declaring `dom` (`net`, `ai`, `cache`, `bus`).
 * **Content Script:** Mandatory for modules declaring `dom`. Cannot securely invoke the AI Gateway directly (due to host page CSP)—all `ai`/`net` intensive tasks must be delegated to the background via the Bus.
-* **Popup:** Hosts the Module Registry UI (§3.D) — list/toggle/upload/grant. Talks to `ChromeModuleRegistryService` directly (popup pages have full extension API access, so registry reads/writes don't need the Bus); only the RPC bridge to `USER_SCRIPT`-world uploaded Modules crosses a real isolation boundary. No separate settings screen — a single list view by design.
+* **Popup:** Hosts the Module Registry UI (§3.D) — list/toggle/upload/grant. Talks to `ChromeModuleRegistryService` directly (popup pages have full extension API access, so registry reads/writes don't need the Bus); only the RPC bridge to `USER_SCRIPT`-world uploaded Modules crosses a real isolation boundary. No separate settings window — one popup page, showing exactly one view at a time via in-DOM view-swapping (list / management / item-form / action-result / capability-consent — `popup/router.ts`'s `View` union), never multiple windows or native `<dialog>`s. (A Chrome MV3 popup auto-sizes to `document.body`'s normal-flow layout; a `<dialog>`'s top-layer content is excluded from that calculation, so it can render outside the popup's actual on-screen bounds — every popup "modal" is an in-flow view for this reason.)
 
 
 * **Storage:** `chrome.storage.local` / `chrome.storage.session` for Cache and Session State; IndexedDB for large payloads.
@@ -175,6 +190,39 @@ This section is a **roadmap, not a build spec.** It records the intended shape o
   | `IAIAdapterPort` (→ `AiService`) | `fetch()` from the background service worker | Node HTTP client or local model runner | Node HTTP client or local model runner |
 
 * **Why this is deferred, not abandoned:** the Core (`src/kernel/`) already has zero `chrome.*` imports — Modules only depend on the `Module`/`AiService`/`CacheService`/`BusService` contracts in `src/kernel/module.ts`, and Services are injected via `ServiceInjector` rather than imported directly. The project structure (§7) already reserves `src/adapters/<env>/` as a sibling location — `src/adapters/browser-extension/` is the only one populated today. That's the Hexagonal boundary that would let a second Adapter be added later without touching the Core. What's missing is simply the second Adapter itself, plus its own build target (a `build:<env>` script and bundler config, per §7), and neither should be built until there's an actual second target to run against.
+
+## 9. Utility/SDK Layering
+
+Beyond Modules and Services, Synapse code that isn't itself a Module (helpers, matchers, formatters) is
+split into two layers, so a helper's placement always signals how portable it is:
+
+* **Global SDK (`src/shared/`):** Pure functions only — no DOM, no `chrome.*`, no I/O, no side effects.
+  The litmus test isn't "is this reusable across features," it's **"does this survive being imported into
+  the most restrictive execution context Synapse has"** — today that's a MAIN-world page-injection
+  payload (§3.B, `main-world-interceptor` skill), which has zero `chrome.*` access and doesn't share a JS
+  heap with the extension. Importable from `src/kernel/`, `src/modules/`, any Adapter, and MAIN-world
+  payloads alike.
+* **Environment-Specific SDK (`src/adapters/<env>/utils/`):** Infra helpers that do the "dirty work" for
+  one Adapter — DOM injection/registration, storage wiring, messaging bridges. Never imported by
+  `src/kernel/` or `src/modules/`; a second Adapter (§8) gets its own sibling `utils/` and shares nothing
+  with this one except the `Module`/Service contracts.
+* A Global SDK file may still be Adapter-specific in *subject matter* (e.g. `src/shared/http-mock.ts`
+  models an HTTP mock rule, which only makes sense for the browser-extension Adapter today) — what makes
+  it "Global" is the absence of side effects, not the absence of domain-specificity. Don't create
+  `src/shared/` entries speculatively for logic only one call site uses unless that call site is a
+  restrictive-environment bundle like the MAIN-world case above; otherwise keep it colocated with the
+  Module that needs it (Progressive Complexity, §5).
+* **Mechanism vs policy, for deciding a given function's layer, not just a whole file's:** would this
+  logic still make sense if the domain type it's next to were swapped for something unrelated? If yes,
+  it's a *mechanism* — infra (`utils/`), expressed as a generic hook/callback parameter with no
+  knowledge of the caller's schema. If it encodes what the domain type *means* or *what should happen*
+  (validation rules, matching/routing decisions, what counts as a valid state), it's *policy* — business,
+  owned by a Module or `src/shared/`. Worked example:
+  `utils/main-world/network-interceptor.ts`'s `installNetworkInterceptor(evaluate)` is pure mechanism
+  (fetch/XHR patch plumbing, would work for any `evaluate` callback); the `evaluate` callback it's given
+  — built from `src/shared/http-mock.ts`'s `matchMockConfig`/`buildFakeResponseInit` inside
+  `background/modules/http-error-mocker/main-world-payload.ts` — is the policy. When a file mixes both,
+  split it: keep the mechanism in `utils/`, move the policy to where the Module composes the two.
 
 ---
 

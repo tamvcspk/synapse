@@ -2,4 +2,3 @@ node_modules/
 dist/
 .vite/
 *.log
-src/adapters/browser-extension/content-scripts/modules/

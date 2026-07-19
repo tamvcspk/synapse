@@ -3,17 +3,33 @@ import type { Module } from '../../../kernel/module';
 import { ServiceInjector } from '../../../kernel/service-injector';
 import { resolveWorkflowSteps, type Workflow } from '../../../kernel/workflow';
 import { registerRpcHandler } from '../module-registry/rpc-handler';
+import { BACKGROUND_MODULES } from '../module-registry/background-modules';
 import { setUserScriptsPermissionGranted } from '../module-registry/storage';
-// import concrete factories once a Module actually declares ai/cache/bus — see kernel-bootstrap skill
+import { chromeRuntimeBus } from './services/bus';
+// import concrete ai/cache factories once a Module actually declares them — see kernel-bootstrap skill
 
 const injector = new ServiceInjector({
   // ai: () => chromeAiAdapter,
   // cache: () => chromeStorageCache,
-  // bus: () => chromeRuntimeBus,
+  bus: () => chromeRuntimeBus,
 });
 const kernel = new Kernel(injector);
 
 registerRpcHandler(injector);
+
+// Registers every background/modules/*/index.ts Module onto the Bus (needs: ['bus']) or runs it
+// once (pipeline). A bus-only Module never gets an initial call from kernel.run() itself — it's
+// only registered as a listener — so http-error-mocker also needs an explicit startup 'sync' so
+// configs left active from a previous session resume being registered after a service-worker
+// restart. Awaited (not fire-and-forget) so the 'sync' emit below is guaranteed to run after bus
+// registration has actually happened, rather than relying on Kernel.run's internal ordering.
+void kernel
+  .run(BACKGROUND_MODULES, undefined, (failure) => {
+    console.error(`Synapse: background module "${failure.moduleId}" failed`, failure.error);
+  })
+  .then(() => {
+    chromeRuntimeBus.emit('http-error-mocker', { op: 'sync' });
+  });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   kernel.run(/* resolve modules for message.workflowId */ [], message.input, (failure) => {

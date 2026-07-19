@@ -1,4 +1,5 @@
 import type { Capability, RuntimeEnv } from './module';
+import type { UISchema } from './ui-schema';
 
 export type ModuleSource = 'bundled' | 'uploaded';
 export type ModuleStatus = 'ok' | 'invalid' | 'env-mismatch';
@@ -17,6 +18,8 @@ export interface RegistryEntry {
   status: ModuleStatus;
   reason?: string;
   grantedCapabilities: Capability[];
+  /** Mirrors Module.uiSchema — presence drives the popup's Gear/Arrow icon (docs/ROADMAP.md #2). */
+  uiSchema?: UISchema;
 }
 
 export interface UploadResult {

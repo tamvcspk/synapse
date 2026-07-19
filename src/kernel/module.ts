@@ -1,3 +1,5 @@
+import type { UISchema } from './ui-schema';
+
 export type Capability = 'net' | 'ai' | 'cache' | 'bus' | 'dom';
 export const CAPABILITIES: Capability[] = ['net', 'ai', 'cache', 'bus', 'dom'];
 
@@ -25,6 +27,9 @@ export interface Module<In = unknown, Out = unknown> {
    * that's the only Adapter Synapse currently ships — see environment-guard.ts.
    */
   supportedEnvs?: RuntimeEnv[];
+  /** Declarative UI Schema (docs/ROADMAP.md #2) — presence of this field is what makes the
+   * popup show a Gear/Arrow icon for this Module; its `kind` decides the icon's behavior. */
+  uiSchema?: UISchema;
   run(input: In, ctx: ModuleContext): Promise<Out>;
 }
 

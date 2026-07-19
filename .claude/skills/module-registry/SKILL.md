@@ -24,8 +24,15 @@ genuinely missing and the user has asked for activate/deactivate, uploads, or a 
 **Core (`src/kernel/`, zero `chrome.*` imports):**
 - `module-registry.ts` — the `ModuleRegistryService` Port: `RegistryEntry { id, label?, source:
   'bundled'|'uploaded', needs, supportedEnvs, active, envSupported, status: 'ok'|'invalid'|
-  'env-mismatch', reason?, grantedCapabilities }`, and the service interface (`list`, `activate`,
-  `deactivate`, `uploadModule`, `grantCapabilities`, `refresh`).
+  'env-mismatch', reason?, grantedCapabilities, uiSchema? }`, and the service interface (`list`,
+  `activate`, `deactivate`, `uploadModule`, `grantCapabilities`, `refresh`).
+- `ui-schema.ts` — the Declarative UI Schema a `Module` optionally self-declares (`Module.uiSchema`,
+  mirrored onto `RegistryEntry.uiSchema`): `UISchema = UICollectionSchema | UIActionSchema`,
+  discriminated by `kind` (never a boolean `hasConfig`-style flag) — `'collection'` means a
+  persisted list with CRUD (drives the popup's generic Management View), `'action'` means an
+  on-demand `run()` trigger with no persisted state (e.g. `reader-mode-converter`). Also
+  `CollectionCommand<T>` — the generic `{op:'upsert'|'delete'|'sync', ...}` Bus wire shape any
+  collection-schema Module's `run()` should accept, instead of hand-rolling its own command type.
 - `manifest-validator.ts` — hand-rolled shape check (no schema lib — the input is `unknown` that
   never passed through TypeScript) for `id`/`needs`/`supportedEnvs` on an uploaded module's
   self-reported manifest.
@@ -38,9 +45,13 @@ genuinely missing and the user has asked for activate/deactivate, uploads, or a 
 - `bundled-modules.ts` — `import.meta.glob('../content-scripts/modules/**/*.module.ts', { eager:
   true })`, filtered through `validateModuleManifestShape` as a sanity check. This is what makes
   `module-scaffold` no longer require manual registration for `dom` Modules.
-- `chrome-module-registry.ts` — the `ModuleRegistryService` implementation. Merges bundled +
-  uploaded entries; bundled Modules auto-grant their declared `needs[]` (trusted, build-time code);
-  uploaded Modules start with no grants.
+- `chrome-module-registry.ts` — the `ModuleRegistryService` implementation. Builds "bundled"
+  entries from **both** `bundled-modules.ts` (`dom` Modules) and `background-modules.ts`
+  (browser-specific non-`dom` Modules, e.g. `http-error-mocker`) — a Module needs a `RegistryEntry`
+  from either source for the popup's Slide Toggle/Gear icon to apply to it at all — merged with
+  uploaded entries; bundled Modules auto-grant their declared `needs[]` (trusted, build-time code)
+  and carry over `mod.uiSchema` verbatim; uploaded Modules start with no grants and no `uiSchema`
+  support (not built — their manifest isn't known until first run).
 - `user-script-shim.ts` — wraps uploaded source with a header (defines `globalThis.synapse.
   {ai,cache,bus}` proxies that relay via `chrome.runtime.sendMessage`) and a trailer (reads
   `globalThis.__synapseModule`, reports it, auto-runs once, registers a dispatcher).
@@ -67,16 +78,30 @@ first deciding how a remote handler registration would actually be delivered.
 
 **Popup permission banner:** `background/index.ts` persists the outcome of
 `chrome.userScripts.configureWorld(...)` via `storage.ts` (not just `console.warn`), and
-`popup/main.ts`'s `load()` reads it and passes `{ userScriptsPermissionGranted }` into
-`renderPopup` (`render.ts`), which renders a warning banner when it's `false`. If you change the
-`configureWorld` call site, keep this persistence — the popup has no other way to know why
-uploaded modules silently fail to reach Services.
+`popup/main.ts`'s `load()` reads it and passes `{ userScriptsPermissionGranted }` through
+`router.ts` into `views/list-view.ts`'s `renderListView`, which renders a warning banner when it's
+`false`. If you change the `configureWorld` call site, keep this persistence — the popup has no
+other way to know why uploaded modules silently fail to reach Services.
 
-**Popup (`src/adapters/browser-extension/popup/`):** single list view by design — no separate
-settings screen. `main.ts` (bootstrap + handlers), `render.ts` (DOM rendering, no framework),
-`capability-dialog.ts` (native `<dialog>` consent prompt). Talks to `ChromeModuleRegistryService`
-directly — popup has full extension API access, so registry reads/writes don't need messaging;
-only the RPC bridge to `USER_SCRIPT`-world code crosses a real isolation boundary.
+**Popup (`src/adapters/browser-extension/popup/`):** one popup page, no separate settings window —
+but internally a small view-router, not a single static list. `main.ts` (bootstrap + module-level
+state `entries`/`view` + all handler functions — business logic, "what happens on each user
+action"), `router.ts` (the `View` union — `list` | `management` | `item-form` | `action-result` |
+`capability-consent` — plus the `render()` dispatch function: "given state, what's on screen,"
+including per-view read-side data fetching via `module-data-sources.ts`), `views/*.ts` (one file
+per view, each exporting `render<Name>View(root, props, callbacks): void` — plain callbacks, no
+Promises). Talks to `ChromeModuleRegistryService` directly — popup has full extension API access,
+so registry reads/writes don't need messaging; only the RPC bridge to `USER_SCRIPT`-world code
+crosses a real isolation boundary.
+
+**Never use `<dialog>.showModal()` anywhere in this popup.** A Chrome MV3 popup auto-sizes to
+`document.body`'s normal-flow layout — proven to resize correctly by the `list`/`management` view
+swap — but a native `<dialog>` renders in the browser's "top layer," which is excluded from that
+flow-size calculation, so the popup window's on-screen bounds don't grow for it. The dialog
+(including its Close/Cancel button) can end up rendered outside the actual visible/clickable area,
+looking like it can't be closed. This project shipped exactly that bug (three separate dialog
+files) before replacing all of them with `views/*` in-flow views — any new "modal" UI (confirm
+prompts, forms, result viewers) must be a `views/*` entry in the `View` union, never a `<dialog>`.
 
 ## Rules — read before extending
 
@@ -109,9 +134,12 @@ only the RPC bridge to `USER_SCRIPT`-world code crosses a real isolation boundar
 
 - **New registry method:** add to the `ModuleRegistryService` Port first (`kernel/module-registry.ts`),
   then implement in `chrome-module-registry.ts`. Keep the Port `chrome.*`-free.
-- **New popup feature:** `render.ts`/`main.ts` only — don't introduce a UI framework unless the
-  user explicitly asks (current implementation is plain DOM, matching the project's zero-UI-dependency
-  footprint).
+- **New popup feature:** if it's a new "screen" (a form, a confirm step, a result viewer), add a
+  `kind` to `router.ts`'s `View` union and a matching `views/<name>-view.ts` following the
+  `render<Name>View(root, props, callbacks): void` convention — never a `<dialog>` (see above). If
+  it's a new action on an existing view, extend that view's callbacks + `RouterHandlers` and
+  implement the handler in `main.ts`. Don't introduce a UI framework unless the user explicitly
+  asks (current implementation is plain DOM, matching the project's zero-UI-dependency footprint).
 - **New capability surfaced to uploaded scripts** (beyond `ai`/`cache`/`bus`): extend
   `RpcRequest.service`'s union in `kernel/rpc.ts`, add the proxy in `user-script-shim.ts`'s header,
   and add the corresponding check in `rpc-handler.ts` — all three, or the bridge silently no-ops.
