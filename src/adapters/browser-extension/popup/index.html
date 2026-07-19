@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Synapse</title>
+    <style>
+      body { font-family: system-ui, sans-serif; width: 280px; margin: 0; padding: 8px; }
+      .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+      .header h1 { font-size: 14px; margin: 0; }
+      .header button { border: none; background: none; cursor: pointer; font-size: 14px; }
+      .module-list { list-style: none; margin: 0; padding: 0; }
+      .module-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #eee; gap: 8px; }
+      .module-row.disabled { opacity: 0.5; }
+      .reason { font-size: 11px; color: #b00; }
+      .upload-row { justify-content: center; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

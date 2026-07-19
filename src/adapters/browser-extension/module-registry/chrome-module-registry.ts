@@ -1,0 +1,206 @@
+import { validateModuleManifestShape } from '../../../kernel/manifest-validator';
+import { assertEnvSupported, EnvironmentMismatchError } from '../../../kernel/environment-guard';
+import type { Capability, Module, RuntimeEnv } from '../../../kernel/module';
+import type { ModuleRegistryService, RegistryEntry, UploadResult } from '../../../kernel/module-registry';
+import { BUNDLED_MODULES } from './bundled-modules';
+import { buildShimSource } from './user-script-shim';
+import {
+  getActivationMap,
+  getGrantsMap,
+  getManifestReports,
+  getUploadedSources,
+  setGrants,
+  setModuleActive,
+  setUploadedSource,
+  type StoredManifestReport,
+} from './storage';
+
+const CURRENT_ENV: RuntimeEnv = 'browser-extension';
+
+function isEnvSupported(mod: Pick<Module, 'id' | 'supportedEnvs'>): boolean {
+  try {
+    assertEnvSupported(mod as Module, CURRENT_ENV);
+    return true;
+  } catch (err) {
+    if (err instanceof EnvironmentMismatchError) return false;
+    throw err;
+  }
+}
+
+async function registerUploadedScript(id: string, source: string): Promise<void> {
+  const shimmed = buildShimSource(id, source);
+  await chrome.userScripts.register([
+    { id, js: [{ code: shimmed }], matches: ['<all_urls>'], world: 'USER_SCRIPT' },
+  ]);
+}
+
+/**
+ * ModuleRegistryService (docs/design.md §1 Port pattern) backed by chrome.storage +
+ * chrome.userScripts, merging build-time bundled Modules with runtime-uploaded ones.
+ */
+export class ChromeModuleRegistryService implements ModuleRegistryService {
+  async list(): Promise<RegistryEntry[]> {
+    return this.buildEntries();
+  }
+
+  async refresh(): Promise<RegistryEntry[]> {
+    return this.buildEntries();
+  }
+
+  async activate(id: string): Promise<void> {
+    const uploaded = await getUploadedSources();
+    if (id in uploaded) {
+      try {
+        await registerUploadedScript(id, uploaded[id]!);
+      } catch {
+        // Already registered (e.g. re-activating without a prior deactivate) — best-effort, ignore.
+      }
+    }
+    await setModuleActive(id, true);
+  }
+
+  async deactivate(id: string): Promise<void> {
+    const uploaded = await getUploadedSources();
+    if (id in uploaded) {
+      await chrome.userScripts.unregister({ ids: [id] });
+    }
+    await setModuleActive(id, false);
+  }
+
+  async grantCapabilities(id: string, capabilities: Capability[]): Promise<void> {
+    await setGrants(id, capabilities);
+  }
+
+  async uploadModule(source: string): Promise<UploadResult> {
+    const id = crypto.randomUUID();
+    try {
+      await registerUploadedScript(id, source);
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+    await setUploadedSource(id, source);
+    await setModuleActive(id, true);
+
+    const entries = await this.buildEntries();
+    const entry = entries.find((e) => e.id === id);
+    return entry ? { ok: true, entry } : { ok: true };
+  }
+
+  private async buildEntries(): Promise<RegistryEntry[]> {
+    const [activation, grants, uploaded, reports] = await Promise.all([
+      getActivationMap(),
+      getGrantsMap(),
+      getUploadedSources(),
+      getManifestReports(),
+    ]);
+
+    const bundled = await this.buildBundledEntries(activation, grants);
+    const uploadedEntries = await this.buildUploadedEntries(uploaded, reports, activation, grants);
+    const entries = [...bundled, ...uploadedEntries];
+
+    const idCounts = new Map<string, number>();
+    for (const entry of entries) idCounts.set(entry.id, (idCounts.get(entry.id) ?? 0) + 1);
+    for (const entry of entries) {
+      if ((idCounts.get(entry.id) ?? 0) > 1) {
+        entry.status = 'invalid';
+        entry.reason = `duplicate id "${entry.id}"`;
+      }
+    }
+
+    return entries;
+  }
+
+  private async buildBundledEntries(
+    activation: Record<string, boolean>,
+    grants: Record<string, Capability[]>,
+  ): Promise<RegistryEntry[]> {
+    const entries: RegistryEntry[] = [];
+    for (const mod of BUNDLED_MODULES) {
+      const needs = mod.needs ?? [];
+      const supportedEnvs = mod.supportedEnvs ?? ['browser-extension'];
+      const envSupported = isEnvSupported(mod);
+
+      // Bundled = trusted build-time code: auto-grant declared needs the first time we see it.
+      let grantedCapabilities = grants[mod.id];
+      if (grantedCapabilities === undefined) {
+        grantedCapabilities = needs;
+        await setGrants(mod.id, grantedCapabilities);
+      }
+
+      const entry: RegistryEntry = {
+        id: mod.id,
+        source: 'bundled',
+        needs,
+        supportedEnvs,
+        active: activation[mod.id] ?? true,
+        envSupported,
+        status: envSupported ? 'ok' : 'env-mismatch',
+        grantedCapabilities,
+      };
+      if (!envSupported) entry.reason = `not supported in ${CURRENT_ENV} (supports: ${supportedEnvs.join(', ')})`;
+
+      entries.push(entry);
+    }
+    return entries;
+  }
+
+  private async buildUploadedEntries(
+    uploaded: Record<string, string>,
+    reports: Record<string, StoredManifestReport>,
+    activation: Record<string, boolean>,
+    grants: Record<string, Capability[]>,
+  ): Promise<RegistryEntry[]> {
+    const entries: RegistryEntry[] = [];
+    for (const id of Object.keys(uploaded)) {
+      entries.push(this.buildUploadedEntry(id, reports[id], activation, grants));
+    }
+    return entries;
+  }
+
+  private buildUploadedEntry(
+    id: string,
+    report: StoredManifestReport | undefined,
+    activation: Record<string, boolean>,
+    grants: Record<string, Capability[]>,
+  ): RegistryEntry {
+    const grantedCapabilities = grants[id] ?? [];
+    const active = activation[id] ?? true;
+
+    // No report yet (script hasn't run on a matching page since upload) — optimistic 'ok',
+    // graceful-fail layer 2/3 (run-time + shape) resolve once a report arrives.
+    if (!report) {
+      return { id, source: 'uploaded', needs: [], supportedEnvs: ['browser-extension'], active, envSupported: true, status: 'ok', grantedCapabilities };
+    }
+
+    if (report.runError) {
+      return { id, source: 'uploaded', needs: [], supportedEnvs: [], active, envSupported: true, status: 'invalid', reason: report.runError, grantedCapabilities };
+    }
+    if (!report.hasRun) {
+      return { id, source: 'uploaded', needs: [], supportedEnvs: [], active, envSupported: true, status: 'invalid', reason: 'globalThis.__synapseModule.run is not a function', grantedCapabilities };
+    }
+
+    const shapeCheck = validateModuleManifestShape({ id: id, needs: report.needs, supportedEnvs: report.supportedEnvs });
+    if (!shapeCheck.valid) {
+      return { id, source: 'uploaded', needs: [], supportedEnvs: [], active, envSupported: true, status: 'invalid', reason: shapeCheck.reason, grantedCapabilities };
+    }
+
+    const needs = shapeCheck.manifest.needs;
+    const supportedEnvs = shapeCheck.manifest.supportedEnvs ?? ['browser-extension'];
+    const envSupported = isEnvSupported({ id, supportedEnvs });
+
+    const entry: RegistryEntry = {
+      id,
+      source: 'uploaded',
+      needs,
+      supportedEnvs,
+      active,
+      envSupported,
+      status: envSupported ? 'ok' : 'env-mismatch',
+      grantedCapabilities,
+    };
+    if (typeof report.id === 'string' && report.id.length > 0) entry.label = report.id;
+    if (!envSupported) entry.reason = `not supported in ${CURRENT_ENV} (supports: ${supportedEnvs.join(', ')})`;
+
+    return entry;
+  }
+}

@@ -1,4 +1,5 @@
 export type Capability = 'net' | 'ai' | 'cache' | 'bus' | 'dom';
+export const CAPABILITIES: Capability[] = ['net', 'ai', 'cache', 'bus', 'dom'];
 
 /**
  * Runtime environments Synapse's Hexagonal Core can be deployed into (docs/design.md §1).
@@ -6,6 +7,7 @@ export type Capability = 'net' | 'ai' | 'cache' | 'bus' | 'dom';
  * are reserved enum values for future Adapters and must not be treated as usable.
  */
 export type RuntimeEnv = 'browser-extension' | 'vscode' | 'electron' | 'node';
+export const RUNTIME_ENVS: RuntimeEnv[] = ['browser-extension', 'vscode', 'electron', 'node'];
 
 export interface ModuleContext {
   services: Partial<{
@@ -38,4 +40,10 @@ export interface CacheService {
 export interface BusService {
   emit(event: string, payload: unknown): void;
   on(event: string, handler: (payload: unknown) => void): void;
+}
+
+/** Reported by the Scheduler when a Module's run() throws, instead of crashing the pipeline/bus. */
+export interface ModuleFailure {
+  moduleId: string;
+  error: string;
 }

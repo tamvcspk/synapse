@@ -69,6 +69,12 @@ export interface BusService {
   emit(event: string, payload: unknown): void;
   on(event: string, handler: (payload: unknown) => void): void;
 }
+
+// Reported by the Scheduler when a Module's run() throws, instead of crashing the pipeline/bus.
+export interface ModuleFailure {
+  moduleId: string;
+  error: string;
+}
 ```
 
 ### `src/kernel/service-injector.ts` — lazy, opt-in service instantiation
@@ -135,26 +141,46 @@ export function assertEnvSupported(mod: Module, currentEnv: RuntimeEnv): void {
 ### `src/kernel/scheduler.ts` — sync pipeline vs bus dispatch
 
 ```ts
-import type { Module } from './module';
+import type { Module, ModuleFailure } from './module';
 import type { ServiceInjector } from './service-injector';
+
+function toFailure(mod: Module, err: unknown): ModuleFailure {
+  return { moduleId: mod.id, error: err instanceof Error ? err.message : String(err) };
+}
 
 export class Scheduler {
   constructor(private injector: ServiceInjector) {}
 
-  /** Direct pipeline: modules without 'bus' run in sequence, output feeds the next input. */
-  async runPipeline(modules: Module[], initialInput: unknown): Promise<unknown> {
+  /**
+   * Direct pipeline: modules without 'bus' run in sequence, output feeds the next input.
+   * A throwing module is reported via onFailure and treated as a pass-through no-op (the
+   * previous value flows to the next module) rather than aborting the pipeline — this must
+   * hold uniformly regardless of Module source (bundled or uploaded, see the module-registry
+   * skill), since there's no compile-time guarantee for uploaded code.
+   */
+  async runPipeline(modules: Module[], initialInput: unknown, onFailure?: (f: ModuleFailure) => void): Promise<unknown> {
     let value = initialInput;
     for (const mod of modules) {
       const ctx = this.injector.resolve(mod.needs);
-      value = await mod.run(value, ctx);
+      try {
+        value = await mod.run(value, ctx);
+      } catch (err) {
+        onFailure?.(toFailure(mod, err));
+      }
     }
     return value;
   }
 
   /** Bus dispatch: modules declaring 'bus' get registered instead of called directly. */
-  registerOnBus(mod: Module, bus: { on: Function }): void {
+  registerOnBus(mod: Module, bus: { on: Function }, onFailure?: (f: ModuleFailure) => void): void {
     const ctx = this.injector.resolve(mod.needs);
-    bus.on(mod.id, (payload: unknown) => mod.run(payload, ctx));
+    bus.on(mod.id, async (payload: unknown) => {
+      try {
+        await mod.run(payload, ctx);
+      } catch (err) {
+        onFailure?.(toFailure(mod, err));
+      }
+    });
   }
 }
 ```
@@ -165,7 +191,7 @@ export class Scheduler {
 import { ServiceInjector } from './service-injector';
 import { Scheduler } from './scheduler';
 import { assertEnvSupported } from './environment-guard';
-import type { Module, RuntimeEnv } from './module';
+import type { Module, ModuleFailure, RuntimeEnv } from './module';
 
 export class Kernel {
   private scheduler: Scheduler;
@@ -174,15 +200,15 @@ export class Kernel {
     this.scheduler = new Scheduler(injector);
   }
 
-  async run(modules: Module[], input: unknown): Promise<unknown> {
+  async run(modules: Module[], input: unknown, onFailure?: (f: ModuleFailure) => void): Promise<unknown> {
     for (const mod of modules) assertEnvSupported(mod, this.currentEnv);
 
     const [pipelineModules, busModules] = partition(modules, (m) => !m.needs?.includes('bus'));
     for (const mod of busModules) {
       const ctx = this.injector.resolve(mod.needs);
-      if (ctx.services.bus) this.scheduler.registerOnBus(mod, ctx.services.bus);
+      if (ctx.services.bus) this.scheduler.registerOnBus(mod, ctx.services.bus, onFailure);
     }
-    return this.scheduler.runPipeline(pipelineModules, input);
+    return this.scheduler.runPipeline(pipelineModules, input, onFailure);
   }
 }
 
@@ -194,7 +220,9 @@ function partition<T>(arr: T[], pred: (x: T) => boolean): [T[], T[]] {
 ```
 
 The Environment Guard runs first, over *all* modules passed to `run()`, before any pipeline/bus
-split — a Module targeting the wrong runtime should never reach the Service Injector.
+split — a Module targeting the wrong runtime should never reach the Service Injector. `onFailure`
+is optional and purely additive — omitting it preserves the original (pre-graceful-fail) contract
+for any caller that doesn't care about per-Module failure reporting.
 
 ## Placement: background entry point + content-script relay
 
@@ -211,24 +239,32 @@ import { Kernel } from '../../../kernel';
 import { ServiceInjector } from '../../../kernel/service-injector';
 // import concrete factories once the user actually needs ai/cache/bus — see below
 
-const kernel = new Kernel(new ServiceInjector({
+const injector = new ServiceInjector({
   // ai: () => chromeAiAdapter,
   // cache: () => chromeStorageCache,
   // bus: () => chromeRuntimeBus,
-}));
+});
+const kernel = new Kernel(injector);
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  kernel.run(/* resolve modules for message.workflowId */ [], message.input)
-    .then(sendResponse);
+  kernel.run(/* resolve modules for message.workflowId */ [], message.input, (failure) => {
+    console.error(`Synapse: module "${failure.moduleId}" failed`, failure.error);
+  }).then(sendResponse);
   return true; // keep the message channel open for the async sendResponse
 });
 ```
 
+If the user also wants Module activate/deactivate, uploaded modules, or a popup UI, that's the
+separate **`module-registry`** skill — it layers `registerRpcHandler(injector)` and
+`chrome.userScripts.configureWorld(...)` onto this same `background/index.ts`. Don't add those
+calls here unless asked; this skill only bootstraps the baseline Kernel.
+
 ### `src/adapters/browser-extension/content-scripts/relay.ts` — thin relay for `dom`-declaring Modules
 
 Content scripts don't run the Kernel — they only host Modules that need `document`/`window`. A
-content-script Module still gets invoked *from* the background via the Bus; the relay just
-forwards background → content-script calls and returns results:
+content-script Module still gets invoked *from* the background via messaging; the relay forwards
+the call and returns the result. Wrap the call in try/catch (a throwing Module must not leave the
+message channel hanging — same graceful-fail principle as the Scheduler above):
 
 ```ts
 import type { Module } from '../../../kernel/module';
@@ -236,11 +272,21 @@ import type { Module } from '../../../kernel/module';
 export function registerDomModule(mod: Module) {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.moduleId !== mod.id) return; // not for us
-    mod.run(message.input, { services: {} }).then(sendResponse);
+    (async () => {
+      try {
+        sendResponse(await mod.run(message.input, { services: {} }));
+      } catch (err) {
+        sendResponse({ error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
     return true;
   });
 }
 ```
+
+If the `module-registry` skill has already been applied, `registerDomModule` also gates on the
+persisted active flag (`module-registry/storage.ts`'s `isModuleActive`) before dispatching — check
+whether that file exists before assuming this bare version is current.
 
 A `dom` Module typically doesn't need `ai`/`cache`/`bus` *itself* — if it does, route through the
 background via `chrome.runtime.sendMessage` from inside `run()`, don't reimplement those services
@@ -280,14 +326,19 @@ export const chromeRuntimeBus: BusService = {
 ```
 
 Don't write these until a Module actually declares the corresponding capability — an empty
-`factories: {}` is the correct state for a project with only `net`-only Modules so far.
+`factories: {}` is the correct state for a project with only `net`-only Modules so far. When a
+factory does end up wrapping a specific third-party SDK (e.g. a particular AI provider's client),
+check the `doc-sync` skill's "Auto-invocation from other skills" checklist first — the same
+version-drift risk applies here as in any Module.
 
 ## After scaffolding
 
 - Don't wire real `ai`/`cache`/`bus` factory implementations yet unless the user asks — leave
   `Kernel` construction with factories the user supplies, so a Module-only project never needs to
   configure services it doesn't use.
-- Point the user at the `module-scaffold` skill for creating Modules against this `Module` type.
+- Point the user at the `module-scaffold` skill for creating Modules against this `Module` type,
+  and at the `module-registry` skill if they want auto-discovery, activate/deactivate, or
+  runtime-uploaded Modules (a separate, optional layer on top of this baseline Kernel).
 - Don't build a `vscode`/`electron`/`node` Adapter, factory, or entry point even if the user
   mentions one in passing — those `RuntimeEnv` values are reserved placeholders only (docs/design.md
   §8). Confirm explicitly before starting any work on a second Adapter.

@@ -25,11 +25,26 @@ no Node.js runtime in production: nothing in `src/` may import Node-only APIs (`
   Modules. This matters more here than in a typical app: Bus messages that cross the
   background/content-script boundary go through `chrome.runtime` serialization, so validate
   after deserialization, not just at the call site.
+  - **Exception:** validating a runtime-uploaded module's self-reported manifest (see the
+    `module-registry` skill) uses a hand-rolled checker (`kernel/manifest-validator.ts`), not
+    `zod` — that input is `unknown` from outside the build entirely (no `zod` dependency exists in
+    the project yet), and the check is small/stable enough not to justify adding one. If `zod`
+    does get added for Bus/Context Frame validation later, reconsider whether it's worth
+    consolidating.
 - **Lint/format:** ESLint + Prettier, no custom rule authoring until there's enough code to know
   what actually needs enforcing.
 
 If any of these conflict with a choice the user has already made elsewhere in the project, defer
 to the existing choice and flag the mismatch rather than silently overriding it.
+
+## External library docs before implementation
+
+If a code plan under this skill introduces or touches a specific external library/SDK/API (beyond
+the toolchain assumptions above), evaluate the `doc-sync` skill's "Auto-invocation from other
+skills" checklist before writing implementation code against it — that skill owns the criteria for
+when a local KB (`kb/<library>/<version>/`) is warranted and how to confirm with the user first.
+Don't apply this to the stack already named above (chrome APIs, zod, ESLint/Prettier) — it's for
+new, version-sensitive dependencies entering the plan.
 
 ## tsconfig baseline
 

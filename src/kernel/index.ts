@@ -1,7 +1,7 @@
 import { ServiceInjector } from './service-injector';
 import { Scheduler } from './scheduler';
 import { assertEnvSupported } from './environment-guard';
-import type { Module, RuntimeEnv } from './module';
+import type { Module, ModuleFailure, RuntimeEnv } from './module';
 
 export class Kernel {
   private scheduler: Scheduler;
@@ -10,15 +10,15 @@ export class Kernel {
     this.scheduler = new Scheduler(injector);
   }
 
-  async run(modules: Module[], input: unknown): Promise<unknown> {
+  async run(modules: Module[], input: unknown, onFailure?: (f: ModuleFailure) => void): Promise<unknown> {
     for (const mod of modules) assertEnvSupported(mod, this.currentEnv);
 
     const [pipelineModules, busModules] = partition(modules, (m) => !m.needs?.includes('bus'));
     for (const mod of busModules) {
       const ctx = this.injector.resolve(mod.needs);
-      if (ctx.services.bus) this.scheduler.registerOnBus(mod, ctx.services.bus);
+      if (ctx.services.bus) this.scheduler.registerOnBus(mod, ctx.services.bus, onFailure);
     }
-    return this.scheduler.runPipeline(pipelineModules, input);
+    return this.scheduler.runPipeline(pipelineModules, input, onFailure);
   }
 }
 

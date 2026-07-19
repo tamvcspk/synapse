@@ -21,6 +21,11 @@ Ask (only what's missing from context):
      DOM). Confirm this is really needed — a Module that only *reads* page content already
      fetched via `net` doesn't need `dom`.
 3. **Input/output shape** — rough idea of what `run()` receives and returns.
+4. **External dependency check** — if the module's purpose centers on a specific third-party
+   library/SDK/API (not a platform primitive like `fetch`/`chrome.*`), run the checklist in the
+   `doc-sync` skill's "Auto-invocation from other skills" section before writing the module body.
+   That skill owns the criteria for when a local KB is actually warranted and how to confirm with
+   the user before crawling — don't re-derive that logic here, just defer to it.
 
 Don't ask about `supportedEnvs` / target runtime unless the user brings it up themselves — Synapse
 only ships the browser-extension Adapter today (docs/design.md §1, §8), so every Module implicitly
@@ -45,6 +50,16 @@ Create the relevant folder if it doesn't exist yet. If `src/kernel/` doesn't exi
 bootstrapped — see `kernel-bootstrap` skill), still scaffold the module against the
 `Module`/`Capability` shape below as a local type stub; don't block module creation on the Kernel
 existing.
+
+**If `src/adapters/browser-extension/module-registry/bundled-modules.ts` exists** (the
+`module-registry` skill has been applied), placing a `.module.ts` file in
+`content-scripts/modules/` is *all* that's needed — it's auto-discovered via
+`import.meta.glob` and auto-registered in `content-scripts/index.ts`. Do **not** manually add an
+import/`registerDomModule(...)` call anywhere; that file no longer hand-registers Modules and
+adding a duplicate registration would double-dispatch. The new Module also appears in the popup
+automatically, with its declared `needs[]` auto-granted (bundled Modules are trusted build-time
+code). Only fall back to the manual `registerDomModule(YourModule)` pattern described below if
+`bundled-modules.ts` doesn't exist yet.
 
 ## Template — simple module (needs: [] or ['net'] only)
 
@@ -102,9 +117,11 @@ export const <Name>Module: Module<InputT, OutputT> = {
 };
 ```
 
-Register it with the content-script relay from `kernel-bootstrap` (`registerDomModule(...)`), not
+If `content-scripts/modules/bundled-modules.ts` (glob auto-discovery) doesn't exist yet, register
+it manually with the content-script relay from `kernel-bootstrap` (`registerDomModule(...)`), not
 by calling it directly — the background Kernel invokes it via messaging, it never runs in-process
-with other Modules.
+with other Modules. If auto-discovery *does* exist (the `module-registry` skill has been applied),
+skip this — see the note above.
 
 ## Rules
 
@@ -117,4 +134,5 @@ with other Modules.
   `src/kernel/environment-guard.ts` handles this), which is correct for every Module today.
 - Keep `run()` `async` even if the body is fully sync, for uniform Kernel scheduling.
 - After scaffolding, report which capabilities were declared and why, so the user can catch an
-  over-declared module early.
+  over-declared module early. For a `dom` module under auto-discovery, also mention that no manual
+  wiring is needed and that it'll show up in the popup once the extension reloads.

@@ -16,5 +16,8 @@ export default defineManifest({
       js: ['src/adapters/browser-extension/content-scripts/index.ts'],
     },
   ],
-  permissions: ['storage'],
+  action: {
+    default_popup: 'src/adapters/browser-extension/popup/index.html',
+  },
+  permissions: ['storage', 'userScripts'],
 });

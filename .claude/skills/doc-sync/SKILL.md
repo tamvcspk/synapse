@@ -42,6 +42,29 @@ If `kb/<library>/<version>/index.json` already exists:
 - Never silently delete existing chunks for pages that disappeared from the source without
   telling the user first.
 
+## Auto-invocation from other skills
+
+Other skills that produce a code plan (`module-scaffold`, `ts-standards`, `kernel-bootstrap`) check
+against this section before writing code that leans on a specific external library/framework/API
+— they don't duplicate this logic, they just link here. Use this checklist whenever *you* (acting
+under one of those skills) are about to implement against a named third-party dependency:
+
+1. **Is a KB actually warranted?** Only for a *specific* external library/framework/SDK/API whose
+   correct usage is version-sensitive (e.g. "Stripe SDK", "Notion API", "Angular 18") — not for
+   platform primitives already covered by `ts-standards` (`chrome.*`, `fetch`, DOM, `zod`), and not
+   for a library used in one trivial, stable call (e.g. one `lodash` helper). When in doubt, skip —
+   this is a cost/benefit call, not a default-on step.
+2. **Check `kb/<library>/<version>/index.json`.** If it exists and covers the version in play,
+   nothing to do — proceed with the code plan using that KB as context.
+3. **If missing (or the user is targeting a version it doesn't cover):** don't silently crawl the
+   web mid-plan. Surface it in one line — e.g. "No local KB for Stripe v14 yet — build one before I
+   scaffold this module? (~2 min)" — and only run the steps above once the user confirms. This
+   preserves the "confirm before crawling if ambiguous" rule above even when the trigger is another
+   skill instead of a direct user request.
+4. **If the user declines or the task is exploratory/low-stakes:** proceed without a KB, but note in
+   your final report that the implementation leaned on training-data knowledge of `<library>`
+   rather than a synced source, so the user can sanity-check version drift.
+
 ## Notes
 
 - This produces static files, not a running Module. If the project's Kernel exists

@@ -1,18 +1,23 @@
 {
-  // Makes Copilot Chat load .github/copilot-instructions.md on every request.
-  "github.copilot.chat.codeGeneration.useInstructionFiles": true,
+  // .claude/skills is the single source of truth — no more .github/instructions or
+  // .github/prompts mirrors to keep in sync by hand.
 
-  // Enables path-scoped "instructions" files (auto-applied by glob, no invocation needed) —
-  // mirrors the always-on Claude skills like ts-standards.
+  // Enables path-scoped "instructions" files (auto-applied automatically, no invocation needed).
+  // Note: SKILL.md files here don't use `applyTo:` globs the way *.instructions.md did, so — unlike
+  // before, when only ts-standards was always-on — every skill's content loads as ambient context
+  // on every request. Revisit if that proves too costly.
   "chat.instructionsFilesLocations": {
-    ".github/instructions": true
+    ".claude/skills": true
   },
 
-  // Enables reusable "prompt" files, invoked in Copilot Chat via /name —
-  // mirrors the action-style Claude skills (doc-sync, module-scaffold, kernel-bootstrap).
+  // Enables reusable "prompt" files, invoked in Copilot Chat via /name.
+  // Untested: SKILL.md frontmatter (name/description) differs from Copilot's expected prompt
+  // frontmatter (mode/description) — confirm /doc-sync, /kernel-bootstrap, /module-scaffold still
+  // resolve as slash commands in VS Code; if Copilot ignores non-conforming frontmatter, this may
+  // silently degrade to instructions-only.
   "chat.promptFiles": true,
   "chat.promptFilesLocations": {
-    ".github/prompts": true
+    ".claude/skills": true
   }
 
   // NOTE: these VS Code / Copilot setting keys have changed across versions before and may again.
