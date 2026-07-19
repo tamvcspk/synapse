@@ -1,0 +1,21 @@
+{
+  // Makes Copilot Chat load .github/copilot-instructions.md on every request.
+  "github.copilot.chat.codeGeneration.useInstructionFiles": true,
+
+  // Enables path-scoped "instructions" files (auto-applied by glob, no invocation needed) —
+  // mirrors the always-on Claude skills like ts-standards.
+  "chat.instructionsFilesLocations": {
+    ".github/instructions": true
+  },
+
+  // Enables reusable "prompt" files, invoked in Copilot Chat via /name —
+  // mirrors the action-style Claude skills (doc-sync, module-scaffold, kernel-bootstrap).
+  "chat.promptFiles": true,
+  "chat.promptFilesLocations": {
+    ".github/prompts": true
+  }
+
+  // NOTE: these VS Code / Copilot setting keys have changed across versions before and may again.
+  // If Copilot Chat doesn't pick these up, check Settings (Ctrl+,) for the current equivalents —
+  // search "copilot instructions" and "chat prompt files".
+}

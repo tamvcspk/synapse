@@ -1,0 +1,41 @@
+export type Capability = 'net' | 'ai' | 'cache' | 'bus' | 'dom';
+
+/**
+ * Runtime environments Synapse's Hexagonal Core can be deployed into (docs/design.md §1).
+ * Only 'browser-extension' has an Adapter implementation today — 'vscode' | 'electron' | 'node'
+ * are reserved enum values for future Adapters and must not be treated as usable.
+ */
+export type RuntimeEnv = 'browser-extension' | 'vscode' | 'electron' | 'node';
+
+export interface ModuleContext {
+  services: Partial<{
+    ai: AiService;
+    cache: CacheService;
+    bus: BusService;
+  }>;
+}
+
+export interface Module<In = unknown, Out = unknown> {
+  id: string;
+  needs?: Capability[];
+  /**
+   * Environments this Module may run in. Defaults to ['browser-extension'] when omitted, since
+   * that's the only Adapter Synapse currently ships — see environment-guard.ts.
+   */
+  supportedEnvs?: RuntimeEnv[];
+  run(input: In, ctx: ModuleContext): Promise<Out>;
+}
+
+export interface AiService {
+  ask(input: unknown): Promise<unknown>;
+}
+
+export interface CacheService {
+  get(key: string): Promise<unknown | undefined>;
+  set(key: string, value: unknown): Promise<void>;
+}
+
+export interface BusService {
+  emit(event: string, payload: unknown): void;
+  on(event: string, handler: (payload: unknown) => void): void;
+}
