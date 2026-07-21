@@ -25,7 +25,13 @@ export default defineManifest({
   action: {
     default_popup: 'src/adapters/browser-extension/ui/popup/index.html',
   },
-  permissions: ['storage', 'userScripts', 'scripting'],
+  // 'debugger' is required by http-error-mocker's 'debugger' mechanism (docs/ROADMAP.md #2.6) —
+  // it attaches Chrome's remote debugging protocol (CDP) to tabs so mocked requests/responses
+  // are real network-stack traffic (visible in DevTools' Network tab, catches non-fetch/XHR
+  // requests like images/files), instead of the MAIN-world fetch/XHR patch's synthetic Response.
+  // Chrome shows a persistent "Synapse is debugging this browser" banner on any tab it's attached
+  // to — an unavoidable trade-off of this permission, not a bug.
+  permissions: ['storage', 'userScripts', 'scripting', 'debugger'],
   // chrome.scripting.registerContentScripts (used for the MAIN-world interceptor) needs its own
   // host permission grant — a static content_scripts.matches entry doesn't satisfy it, even though
   // both show the same install-time warning. Without this, registerContentScripts resolves with no

@@ -21,7 +21,7 @@ createMainWorldChannel<MockConfig[]>(MOCK_CONFIG_CHANNEL_ID).onUpdate((next) => 
 });
 
 installNetworkInterceptor(({ method, url }): InterceptDecision => {
-  const match = matchMockConfig(configs, url, method);
+  const match = matchMockConfig(configs, url, method, 'main-world');
   if (!match) return { intercept: false };
 
   const fake = buildFakeResponseInit(match);

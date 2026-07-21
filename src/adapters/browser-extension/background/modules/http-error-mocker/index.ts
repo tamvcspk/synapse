@@ -1,6 +1,16 @@
 import type { CacheService, Module } from '../../../../../kernel/module';
 import type { CollectionCommand } from '../../../../../kernel/ui-schema';
-import { HTTP_METHODS, hasActiveMockConfig, validateMockConfig, type MockConfig } from '../../../../../shared/http-mock';
+import {
+  HTTP_METHODS,
+  MECHANISMS,
+  buildFakeResponseInit,
+  hasActiveMockConfig,
+  matchMockConfig,
+  validateMockConfig,
+  type MockConfig,
+} from '../../../../../shared/http-mock';
+import type { EvaluateRequest, InterceptDecision } from '../../../utils/main-world/network-interceptor';
+import { ensureDebuggerInterceptor, teardownDebuggerInterceptor } from '../../../utils/debugger-network-interceptor';
 import { isModuleActive } from '../../../module-registry/storage';
 import {
   isMainWorldScriptRegistered,
@@ -36,6 +46,13 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
     fields: [
       { key: 'endpointPattern', label: 'Endpoint pattern (use * as wildcard)', type: 'string', required: true },
       { key: 'method', label: 'Method', type: 'enum', options: HTTP_METHODS, required: true },
+      {
+        key: 'mechanism',
+        label: 'Mechanism (debugger = visible in Network tab + catches file/image requests, shows a debugging banner)',
+        type: 'enum',
+        options: MECHANISMS,
+        required: true,
+      },
       { key: 'fakeStatus', label: 'Fake status', type: 'number', required: true, min: 100, max: 599 },
       { key: 'fakeResponse', label: 'Fake response', type: 'string', multiline: true },
       { key: 'delayMs', label: 'Delay (ms)', type: 'number' },
@@ -52,6 +69,7 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
       if (await isMainWorldScriptRegistered(MAIN_WORLD_SCRIPT_ID)) {
         await unregisterMainWorldScript(MAIN_WORLD_SCRIPT_ID);
       }
+      await teardownDebuggerInterceptor();
       return;
     }
 
@@ -76,12 +94,11 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
 
 async function syncRegistration(cache: CacheService): Promise<void> {
   const [configs, registered] = await Promise.all([getMockConfigs(cache), isMainWorldScriptRegistered(MAIN_WORLD_SCRIPT_ID)]);
-  const shouldBeRegistered = hasActiveMockConfig(configs);
 
   // Always (re-)register while active, not just when nothing is registered yet — registerMainWorldScript
   // now updates in place, so this keeps the registration pointing at the current build's jsPath
   // instead of trusting a stale one left over from a previous build's content-hashed filename.
-  if (shouldBeRegistered) {
+  if (hasActiveMockConfig(configs, 'main-world')) {
     await registerMainWorldScript({
       id: MAIN_WORLD_SCRIPT_ID,
       matches: ['<all_urls>'],
@@ -91,4 +108,28 @@ async function syncRegistration(cache: CacheService): Promise<void> {
   } else if (registered) {
     await unregisterMainWorldScript(MAIN_WORLD_SCRIPT_ID);
   }
+
+  // Same (re-)attach-every-time policy as the MAIN-world branch above, so `evaluateDebuggerRequest`'s
+  // closure always sees the current config list rather than one snapshotted at first attach.
+  if (hasActiveMockConfig(configs, 'debugger')) {
+    await ensureDebuggerInterceptor((req) => evaluateDebuggerRequest(configs, req));
+  } else {
+    await teardownDebuggerInterceptor();
+  }
+}
+
+function evaluateDebuggerRequest(configs: MockConfig[], { method, url }: Parameters<EvaluateRequest>[0]): InterceptDecision {
+  const match = matchMockConfig(configs, url, method, 'debugger');
+  if (!match) return { intercept: false };
+
+  const fake = buildFakeResponseInit(match);
+  return {
+    intercept: true,
+    response: {
+      status: fake.status,
+      statusText: fake.statusText,
+      bodyText: fake.bodyText,
+      ...(match.delayMs !== undefined ? { delayMs: match.delayMs } : {}),
+    },
+  };
 }
