@@ -163,7 +163,17 @@ style for its own add/edit form.)
 - **`chrome.userScripts.configureWorld({ messaging: true })` must be called once** (from
   `background/index.ts`, wrapped in try/catch — it throws if the user hasn't enabled "Allow User
   Scripts" for the extension in `chrome://extensions`). Don't let that failure crash the service
-  worker; log/surface it instead.
+  worker; log/surface it instead. **A bare `.then(...).catch(...)` chain does NOT satisfy this.**
+  When "Allow User Scripts" has never been granted, `chrome.userScripts` itself is `undefined` —
+  not just a rejecting call — so `chrome.userScripts.configureWorld(...)` throws synchronously on
+  the property access, before `.then()`/`.catch()` ever attach. An uncaught throw during a service
+  worker's top-level script evaluation fails the *entire* registration (Chrome reports this as
+  "Service worker registration failed. Status code: 15"), silently discarding every other listener
+  in the file — including the Bus registration any bundled Module depends on. This one shipped and
+  broke every Module's messaging, not just uploaded-module support, until caught. The call needs an
+  actual synchronous `try { chrome.userScripts.configureWorld(...).then(...).catch(...) } catch
+  (err) { ...same handling... }` — the outer `try` around the property access + call itself, not
+  just around the promise.
 
 ## Extending this layer
 

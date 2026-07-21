@@ -25,6 +25,13 @@ export type InterceptDecision = { intercept: false } | { intercept: true; respon
 
 export type EvaluateRequest = (req: InterceptRequest) => InterceptDecision;
 
+/** Resolves a possibly-relative URL (e.g. a page calling `fetch('/api/x')`) against the current
+ * page so `evaluate`/pattern matching always sees an absolute URL — a no-op for already-absolute
+ * input. */
+function toAbsoluteUrl(url: string): string {
+  return new URL(url, window.location.href).href;
+}
+
 /** Patches window.fetch and XMLHttpRequest.prototype in-place. Idempotent-by-convention: call once. */
 export function installNetworkInterceptor(evaluate: EvaluateRequest): void {
   patchFetch(evaluate);
@@ -35,7 +42,8 @@ function patchFetch(evaluate: EvaluateRequest): void {
   const originalFetch = window.fetch.bind(window);
 
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const url = toAbsoluteUrl(rawUrl);
     const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
     const decision = evaluate({ method, url, body: init?.body });
     if (!decision.intercept) return originalFetch(input, init);
@@ -66,7 +74,7 @@ function patchXhr(evaluate: EvaluateRequest): void {
     username?: string | null,
     password?: string | null,
   ): void {
-    state.set(this, { method, url: url.toString() });
+    state.set(this, { method, url: toAbsoluteUrl(url.toString()) });
     // `async` defaults to true per the XHR spec when omitted — normalize so every call goes
     // through the same overload (TypeScript's `.call()` typing only exposes one overload of
     // `open()` when the method is read off the prototype as a value).

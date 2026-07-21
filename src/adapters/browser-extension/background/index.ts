@@ -6,11 +6,12 @@ import { registerRpcHandler } from '../module-registry/rpc-handler';
 import { BACKGROUND_MODULES } from '../module-registry/background-modules';
 import { setUserScriptsPermissionGranted } from '../module-registry/storage';
 import { chromeRuntimeBus } from './services/bus';
-// import concrete ai/cache factories once a Module actually declares them — see kernel-bootstrap skill
+import { chromeStorageCache } from './services/cache';
+// import a concrete ai factory once a Module actually declares it — see kernel-bootstrap skill
 
 const injector = new ServiceInjector({
   // ai: () => chromeAiAdapter,
-  // cache: () => chromeStorageCache,
+  cache: () => chromeStorageCache,
   bus: () => chromeRuntimeBus,
 });
 const kernel = new Kernel(injector);
@@ -42,13 +43,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 // chrome.runtime.sendMessage — throws if the user hasn't enabled "Allow User Scripts" for this
 // extension in chrome://extensions, so this must not crash the service worker on failure. The
 // result is persisted (not just logged) so the popup can surface it — see storage.ts and
-// popup/main.ts.
-chrome.userScripts.configureWorld({ messaging: true })
-  .then(() => setUserScriptsPermissionGranted(true))
-  .catch((err) => {
-    console.warn('Synapse: chrome.userScripts.configureWorld failed — enable "Allow User Scripts" for this extension in chrome://extensions to use uploaded modules.', err);
-    void setUserScriptsPermissionGranted(false);
-  });
+// popup/main.ts. When "Allow User Scripts" has never been granted, `chrome.userScripts` itself is
+// `undefined` (not just a rejecting call) — a bare `.then()/.catch()` chain doesn't cover that,
+// since the property access throws synchronously before either ever attaches. An uncaught throw
+// during a service worker's top-level evaluation fails the *entire* registration (Chrome status
+// code 15), discarding every listener in this file — hence the outer try/catch.
+try {
+  chrome.userScripts.configureWorld({ messaging: true })
+    .then(() => setUserScriptsPermissionGranted(true))
+    .catch((err) => {
+      console.warn('Synapse: chrome.userScripts.configureWorld failed — enable "Allow User Scripts" for this extension in chrome://extensions to use uploaded modules.', err);
+      void setUserScriptsPermissionGranted(false);
+    });
+} catch (err) {
+  console.warn('Synapse: chrome.userScripts is unavailable — enable "Allow User Scripts" for this extension in chrome://extensions to use uploaded modules.', err);
+  void setUserScriptsPermissionGranted(false);
+}
 
 // Smoke-test for Workflow (kernel/workflow.ts): 'append-a' sorts before 'append-b' alphabetically,
 // but the Workflow explicitly orders b-then-a — proving execution order comes from Workflow.steps,

@@ -60,11 +60,23 @@ export function validateMockConfig(candidate: unknown): MockConfigValidation {
   return { valid: true, config };
 }
 
-/** First active config whose method + endpointPattern (substring match) matches the request. */
+/**
+ * Compiles an endpointPattern into a RegExp: `*` is a wildcard (any run of characters, same
+ * convention as Chrome match patterns / most request-blocking extensions), every other character
+ * is matched literally — so a URL containing `?`/`.`/etc. doesn't need escaping by the user. Not
+ * anchored, matching the old substring-`includes` behavior for a plain (no `*`) pattern.
+ */
+function compileEndpointPattern(pattern: string): RegExp {
+  const escaped = pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*');
+  return new RegExp(escaped);
+}
+
+/** First active config whose method + endpointPattern (glob match, see compileEndpointPattern)
+ * matches the request URL. */
 export function matchMockConfig(configs: MockConfig[], url: string, method: string): MockConfig | undefined {
   const upperMethod = method.toUpperCase();
   return configs.find(
-    (c) => c.active && (c.method === 'ALL' || c.method === upperMethod) && url.includes(c.endpointPattern),
+    (c) => c.active && (c.method === 'ALL' || c.method === upperMethod) && compileEndpointPattern(c.endpointPattern).test(url),
   );
 }
 

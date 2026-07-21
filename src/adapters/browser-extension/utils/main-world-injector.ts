@@ -19,16 +19,27 @@ export async function isMainWorldScriptRegistered(id: string): Promise<boolean> 
   return scripts.length > 0;
 }
 
+/**
+ * Registers, or if `id` is already registered, updates in place — Vite content-hashes the built
+ * `jsPath` on every rebuild, so a stale "already registered" check would keep pointing at a
+ * filename that no longer exists in the current build. `updateContentScripts` replaces the entry
+ * atomically instead of erroring on a duplicate id.
+ */
 export async function registerMainWorldScript(spec: MainWorldScriptSpec): Promise<void> {
-  await chrome.scripting.registerContentScripts([
-    {
-      id: spec.id,
-      matches: spec.matches,
-      js: [spec.jsPath],
-      world: 'MAIN',
-      runAt: spec.runAt ?? 'document_start',
-    },
-  ]);
+  const scriptDef: chrome.scripting.RegisteredContentScript = {
+    id: spec.id,
+    matches: spec.matches,
+    js: [spec.jsPath],
+    world: 'MAIN',
+    runAt: spec.runAt ?? 'document_start',
+  };
+
+  const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [spec.id] });
+  if (existing.length > 0) {
+    await chrome.scripting.updateContentScripts([scriptDef]);
+  } else {
+    await chrome.scripting.registerContentScripts([scriptDef]);
+  }
 }
 
 export async function unregisterMainWorldScript(id: string): Promise<void> {

@@ -59,6 +59,14 @@ rule). All under `src/adapters/browser-extension/utils/`:**
      call `.json()`/`.text()`/check `.ok`.
    - Always delegate to the original `fetch`/`open`/`send` when `evaluate` returns "don't
      intercept" — never assume every request on the page should be touched.
+   - Resolve the captured URL to absolute (`new URL(url, window.location.href).href`) before
+     handing it to `evaluate` — a page calling `fetch('/api/x')` with a bare relative path is
+     common, and a pattern/URL matcher comparing that against an absolute pattern will never match
+     otherwise. Do this here (this file already has `window`), not in the pure matching function.
+   - Don't match endpoint patterns with a plain substring `url.includes(pattern)` — it silently
+     treats a documented `*` wildcard as a literal asterisk, and forces users to escape `?`/`.` in
+     real URLs. Compile the pattern into a `RegExp` (escape everything except `*`, turn `*` into
+     `.*`) instead.
 4. **`utils/main-world/storage-relay.ts`** — `installStorageToMainWorldRelay<T>(storageKey,
    channelId)`. ISOLATED-world-only (needs `chrome.storage`): forwards a storage key's value (and
    every future `chrome.storage.onChanged` for it) into a MAIN-world channel. This is what feeds
@@ -89,19 +97,57 @@ rule). All under `src/adapters/browser-extension/utils/`:**
 
 `chrome.scripting.registerContentScripts`'s `jsPath` wants a path relative to the extension root,
 but Vite/crxjs hashes output filenames — you don't know the built filename in source. Use
-`@crxjs/vite-plugin`'s dynamic-script resource import:
+`@crxjs/vite-plugin`'s dynamic-script resource import, with **`&iife`, not `&module`**:
 
 ```ts
-import payloadPath from './main-world-payload?script&module';
+import payloadPath from './main-world-payload?script&iife';
 // payloadPath is a build-time string: the resolved, extension-root-relative output path.
 ```
 
-This is crxjs's "Auto Web-Accessible Resources" feature (confirmed by reading
-`node_modules/@crxjs/vite-plugin/client.d.ts` and `dist/index.mjs`, and by grepping the actual built
-`manifest.json`/background chunk in the worked example — the emitted `web_accessible_resources`
-entry and the literal resolved path string both check out). Requires
-`"@crxjs/vite-plugin/client"` in `tsconfig.json`'s `compilerOptions.types` for the `?script&module`
-import to typecheck. Don't try to construct this path manually or guess a filename.
+**This was previously documented (and built) as `?script&module` — that is wrong and was confirmed
+broken in practice, not just in theory.** `chrome.scripting`'s `js` array always injects as a
+*classic* script, never a module. `?script&module` tags the file as crxjs's `"module"` script type,
+which (per `finalizeBuildContentScripts` in `@crxjs/vite-plugin/dist/index.mjs`) is left completely
+unwrapped — a raw ESM chunk with real top-level `import` statements to whatever other chunks it
+shares with the rest of the build (e.g. a `shared/`-SDK file also used by the background bundle).
+Injected as a classic script, that throws `SyntaxError: Cannot use import statement outside a
+module` immediately, before a single line of the payload runs — silently, with no error surfaced
+anywhere reachable from the page or the extension's own consoles. `?script&iife` instead resolves
+to crxjs's dedicated IIFE bundler (`collectIifeEntries`/`bundleIife`), which inlines every
+dependency into one self-contained file with zero `import` statements — the only variant that
+actually executes when injected this way. If a symptom looks like "the registered script produces
+literally zero observable side effects, not even a top-of-file `console.log`, despite
+`chrome.scripting.getRegisteredContentScripts()` showing it correctly registered" — check this
+first, by grepping the built output file for the string `import{` before looking anywhere else.
+
+Requires `"@crxjs/vite-plugin/client"` in `tsconfig.json`'s `compilerOptions.types` for the
+`?script&iife` import to typecheck. Don't try to construct this path manually or guess a filename.
+
+## Manifest permission this pattern needs beyond `scripting`
+
+`chrome.scripting.registerContentScripts`/`updateContentScripts` needs its own host permission
+grant to actually inject anything — a static `content_scripts.matches` entry does **not** satisfy
+this for the dynamic API, even though both show the same install-time permission warning to the
+user. Add `host_permissions: ['<all_urls>']` (or your narrower match list) to
+`manifest.config.ts`. Without it, `registerContentScripts` resolves its promise with no error at
+all, `getRegisteredContentScripts()` shows a perfectly correct-looking entry, and the script still
+never runs on any page — the single hardest-to-diagnose failure mode in this whole pattern, since
+every other signal says "this worked." If a from-scratch raw `chrome.scripting.registerContentScripts`
+call (bypassing the whole Module/Bus system, registering a trivial one-line test script) still
+produces zero observable effect on any page despite resolving cleanly, suspect this before anything
+in this project's own code.
+
+## The ISOLATED-world relay's `run_at` must not lag the MAIN-world script's
+
+`storage-relay.ts`'s `installStorageToMainWorldRelay` needs to have dispatched at least once before
+the page's own scripts start firing requests the interceptor is supposed to catch. If the static
+`content_scripts` entry (which hosts the relay call, in `content-scripts/index.ts`) is left at its
+default `run_at` (`document_idle`) while the dynamically-registered MAIN-world script uses
+`document_start` (as it should, to patch `fetch`/`XMLHttpRequest` before the page's own code runs),
+there's a real window — long enough on a request-heavy SPA (GitHub's own early hovercard/analytics
+calls were enough to demonstrate it) — where the MAIN-world payload has already patched `fetch` but
+`configs` is still `[]`, so nothing matches. Set `run_at: 'document_start'` on the static
+`content_scripts` entry too.
 
 ## Wiring a command through the real Bus
 

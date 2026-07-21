@@ -24,37 +24,46 @@ export function renderItemFormView(
   const formFields = schema.fields.filter((f) => f.key !== idField && f.key !== schema.activeField);
   const fieldInputs = new Map<string, HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>();
 
-  van.add(
-    root,
-    h2(`${existing ? 'Edit' : 'Add'} ${schema.itemLabel}`),
-    form(
-      ...formFields.map((field) => {
-        const { fieldLabel, fieldInput } = renderField(field, existing);
-        fieldInputs.set(field.key, fieldInput);
-        return fieldLabel;
-      }),
-      div(
-        { class: 'form-actions' },
-        button({ type: 'button', class: 'secondary', onclick: callbacks.onCancel }, 'Cancel'),
-        button(
-          {
-            type: 'button',
-            onclick: () => {
-              const item: Record<string, unknown> = { ...existing };
-              item[idField] = existing?.[idField] ?? crypto.randomUUID();
-              if (schema.activeField) item[schema.activeField] = existing?.[schema.activeField] ?? true;
-              for (const field of formFields) {
-                const fieldInput = fieldInputs.get(field.key)!;
-                item[field.key] = readFieldValue(field, fieldInput);
-              }
-              callbacks.onSave(item);
-            },
+  // type: 'submit' + reportValidity() gets us native required/min/max checking (a plain onclick
+  // button never triggers constraint validation, which is how an empty Fake status used to
+  // silently become 0 and get rejected with zero UI feedback). But we still own the actual save —
+  // preventDefault() first so the browser never attempts its own submission afterward; without it,
+  // onSave()'s navigate() call replaces the view (root.replaceChildren()) before the browser gets
+  // to its default action, and it warns "Form submission canceled because the form is not
+  // connected" trying to submit a form that's no longer in the document.
+  const formEl = form(
+    ...formFields.map((field) => {
+      const { fieldLabel, fieldInput } = renderField(field, existing);
+      fieldInputs.set(field.key, fieldInput);
+      return fieldLabel;
+    }),
+    div(
+      { class: 'form-actions' },
+      button({ type: 'button', class: 'secondary', onclick: callbacks.onCancel }, 'Cancel'),
+      button(
+        {
+          type: 'submit',
+          onclick: (e: Event) => {
+            e.preventDefault();
+            const target = e.currentTarget as HTMLButtonElement;
+            if (!target.form!.reportValidity()) return;
+
+            const item: Record<string, unknown> = { ...existing };
+            item[idField] = existing?.[idField] ?? crypto.randomUUID();
+            if (schema.activeField) item[schema.activeField] = existing?.[schema.activeField] ?? true;
+            for (const field of formFields) {
+              const fieldInput = fieldInputs.get(field.key)!;
+              item[field.key] = readFieldValue(field, fieldInput);
+            }
+            callbacks.onSave(item);
           },
-          existing ? 'Save' : 'Add',
-        ),
+        },
+        existing ? 'Save' : 'Add',
       ),
     ),
   );
+
+  van.add(root, h2(`${existing ? 'Edit' : 'Add'} ${schema.itemLabel}`), formEl);
 }
 
 function renderField(
@@ -90,6 +99,8 @@ function renderField(
     type: field.type === 'number' ? 'number' : 'text',
     required: Boolean(field.required),
     value: stringValue,
+    ...(field.type === 'number' && field.min !== undefined ? { min: field.min } : {}),
+    ...(field.type === 'number' && field.max !== undefined ? { max: field.max } : {}),
   });
   const fieldLabel = label(field.label, fieldInput);
   return { fieldLabel, fieldInput };

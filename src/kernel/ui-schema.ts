@@ -17,6 +17,10 @@ export interface UIFieldDef {
   options?: string[];
   /** Only meaningful when type === 'string'; renders a <textarea> instead of <input>. */
   multiline?: boolean;
+  /** Only meaningful when type === 'number'; enforced as native <input min/max> so the browser
+   * rejects an out-of-range value before it ever reaches the Module's own validation. */
+  min?: number;
+  max?: number;
 }
 
 export interface UICollectionSchema {
