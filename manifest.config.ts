@@ -31,10 +31,23 @@ export default defineManifest({
   // requests like images/files), instead of the MAIN-world fetch/XHR patch's synthetic Response.
   // Chrome shows a persistent "Synapse is debugging this browser" banner on any tab it's attached
   // to — an unavoidable trade-off of this permission, not a bug.
-  permissions: ['storage', 'userScripts', 'scripting', 'debugger'],
+  // 'declarativeNetRequest' is required by the 'dnr' mechanism (utils/dnr-network-rules.ts) — same
+  // real-network-stack/Network-tab visibility as 'debugger', but native MV3 (no banner) and purely
+  // declarative (Chrome's engine evaluates the rules, not our JS) — at the cost of never seeing a
+  // request's body, so 'dnr' rules can't rewrite/match on it (see shared/http-mock.ts's Mechanism
+  // doc comment).
+  permissions: ['storage', 'userScripts', 'scripting', 'debugger', 'declarativeNetRequest'],
   // chrome.scripting.registerContentScripts (used for the MAIN-world interceptor) needs its own
   // host permission grant — a static content_scripts.matches entry doesn't satisfy it, even though
   // both show the same install-time warning. Without this, registerContentScripts resolves with no
   // error but silently never actually injects anything.
   host_permissions: ['<all_urls>'],
+  // 'assets/*' covers http-error-mocker/mock-files.ts's build-time-enumerated files (docs/ROADMAP.md
+  // #2.6) once they're big enough that Vite emits them as a real file instead of inlining as a
+  // data: URL (build.assetsInlineLimit, ~4KB) — those need a real chrome-extension://<id>/... URL to
+  // be usable as a rewriteUrl redirect target from an arbitrary page, which requires being declared
+  // web-accessible. crxjs auto-adds its own entries here too (JS chunks it tracks as cross-context
+  // dependencies) — this one is added manually since asset files aren't part of that tracking.
+  // Scoped to 'assets/*' rather than per-file because Vite content-hashes filenames on every build.
+  web_accessible_resources: [{ resources: ['assets/*'], matches: ['<all_urls>'] }],
 });

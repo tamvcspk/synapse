@@ -1,8 +1,8 @@
 import van from 'vanjs-core';
-import type { UICollectionSchema, UIFieldDef } from '../../../../../kernel/ui-schema';
+import { showWhenConditions, type UICollectionSchema, type UIFieldDef } from '../../../../../kernel/ui-schema';
 import { bytesToBase64, putBlob } from '../../../utils/blob-store';
 
-const { div, form, label, input, select, option, textarea, button, h2, details, summary, small, span } = van.tags;
+const { div, form, label, input, select, option, textarea, button, h2, details, summary, small, span, datalist } = van.tags;
 
 /** Above this raw file size, skip the inline `{mimeType, fileName, base64}` copy entirely (still
  * upload to IndexedDB via blob-store.ts, unaffected by this cap) — chrome.storage.local's ~5MB
@@ -35,21 +35,25 @@ export function renderItemFormView(
     { fieldLabel: HTMLLabelElement; fieldInput: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement }
   >();
 
-  // Any field named by another field's `showWhen.field` is a "controller" (docs/ROADMAP.md
+  // Any field named by another field's `showWhen` condition(s) is a "controller" (docs/ROADMAP.md
   // #2.6.1's mechanism-then-action flow) — its *live* value, not just its value at submit time,
   // decides which other fields are currently visible, so it needs a van.state a reactive container
   // can depend on. Same technique management-view.ts's `filter` state already uses.
-  const controllerKeys = new Set(formFields.flatMap((f) => (f.showWhen ? [f.showWhen.field] : [])));
+  const controllerKeys = new Set(formFields.flatMap((f) => showWhenConditions(f.showWhen).map((c) => c.field)));
   const controllerStates = new Map<string, ReturnType<typeof van.state<string>>>();
   for (const key of controllerKeys) {
     const controllerField = formFields.find((f) => f.key === key);
     controllerStates.set(key, van.state(initialFieldValue(controllerField, existing)));
   }
 
+  // Every condition must hold (AND) — e.g. http-error-mocker's rewriteMethod/rewriteBody need
+  // action: rewrite-request AND mechanism: main-world|debugger (mechanism: 'dnr' can't act on
+  // either at all, see shared/http-mock.ts's validateMockConfig).
   function isVisible(field: UIFieldDef): boolean {
-    if (!field.showWhen) return true;
-    const controllerState = controllerStates.get(field.showWhen.field);
-    return controllerState ? field.showWhen.equals.includes(controllerState.val) : true;
+    return showWhenConditions(field.showWhen).every((condition) => {
+      const controllerState = controllerStates.get(condition.field);
+      return controllerState ? condition.equals.includes(controllerState.val) : true;
+    });
   }
 
   function visibleFields(): UIFieldDef[] {
@@ -249,14 +253,23 @@ function renderField(
     return { fieldLabel, fieldInput };
   }
 
+  // Native suggestion dropdown (still lets the user type any value) — <datalist> only pairs with a
+  // single-line <input>, so only offered for type: 'string' here (never 'number', which reaches
+  // this same branch too).
+  const datalistId = field.type === 'string' && field.suggestions?.length ? `datalist-${field.key}` : undefined;
+  const suggestionsList = datalistId
+    ? datalist({ id: datalistId }, ...field.suggestions!.map((s) => option({ value: s.value }, s.label)))
+    : null;
+
   const fieldInput = input({
     type: field.type === 'number' ? 'number' : 'text',
     required: Boolean(field.required),
     value: stringValue,
+    ...(datalistId ? { list: datalistId } : {}),
     ...(field.type === 'number' && field.min !== undefined ? { min: field.min } : {}),
     ...(field.type === 'number' && field.max !== undefined ? { max: field.max } : {}),
   });
-  const fieldLabel = label(field.label, ...labelSuffix, fieldInput);
+  const fieldLabel = label(field.label, ...labelSuffix, fieldInput, suggestionsList);
   return { fieldLabel, fieldInput };
 }
 

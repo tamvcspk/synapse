@@ -1,0 +1,4 @@
+{
+  "hello": "world",
+  "note": "Sample file bundled with the extension — drop your own files next to this one, then rebuild. Pick one from the Rewrite URL suggestions in the mock rule form to redirect a request to it."
+}

@@ -6,6 +6,7 @@ import {
   MECHANISMS,
   buildFakeResponseInit,
   buildRewriteOverrides,
+  endpointPatternToRegexSource,
   getAction,
   hasActiveMockConfig,
   matchMockConfig,
@@ -18,6 +19,7 @@ import {
   teardownDebuggerInterceptor,
   type DebuggerInterceptDecision,
 } from '../../../utils/debugger-network-interceptor';
+import { clearDnrRules, syncDnrRules, type DnrRuleSpec } from '../../../utils/dnr-network-rules';
 import { bytesToBase64, deleteBlob, getBlob } from '../../../utils/blob-store';
 import { isModuleActive } from '../../../module-registry/storage';
 import {
@@ -34,6 +36,9 @@ import {
 import payloadPath from './main-world-payload?script&iife';
 import { MAIN_WORLD_SCRIPT_ID } from './constants';
 import { getMockConfigs, setMockConfigs } from './mock-config-store';
+import { MOCK_FILES } from './mock-files';
+
+const REWRITE_URL_SUGGESTIONS = MOCK_FILES.map((f) => ({ label: f.fileName, value: f.url }));
 
 /**
  * Background Module (docs/design.md §3.B, "browser-specific non-dom Modules" — see
@@ -63,7 +68,7 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
       {
         key: 'mechanism',
         label: 'Mechanism',
-        hint: 'debugger = visible in Network tab + catches file/image requests, shows a debugging banner',
+        hint: 'debugger/dnr = visible in Network tab + catch file/image requests; debugger shows a debugging banner, dnr does not but can\'t rewrite/match request bodies',
         type: 'enum',
         options: MECHANISMS,
         required: true,
@@ -71,7 +76,7 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
       {
         key: 'action',
         label: 'Action',
-        hint: '"block" only works with mechanism: debugger — main-world can only reject a Promise in JS, not a real network failure',
+        hint: '"block" only works with mechanism: debugger or dnr — main-world can only reject a Promise in JS, not a real network failure',
         type: 'enum',
         options: ACTIONS,
         required: true,
@@ -83,7 +88,14 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
         required: true,
         min: 100,
         max: 599,
-        showWhen: { field: 'action', equals: ['fake-response'] },
+        // mechanism: 'dnr' can only fake-response via a data: URL redirect (see fakeResponseFile's
+        // doc comment), which has no HTTP status-code concept — always resolves as a successful
+        // load no matter what's configured here, so hidden entirely for it rather than shown but
+        // silently ignored.
+        showWhen: [
+          { field: 'action', equals: ['fake-response'] },
+          { field: 'mechanism', equals: ['main-world', 'debugger'] },
+        ],
       },
       {
         key: 'fakeResponse',
@@ -114,8 +126,9 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
       {
         key: 'rewriteUrl',
         label: 'Rewrite URL',
-        hint: 'Absolute or relative; leave empty to keep the original',
+        hint: 'Absolute or relative; leave empty to keep the original. Suggestions are files bundled under mock-files/ — drop a file there and rebuild to add more',
         type: 'string',
+        suggestions: REWRITE_URL_SUGGESTIONS,
         showWhen: { field: 'action', equals: ['rewrite-request'] },
       },
       {
@@ -123,7 +136,13 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
         label: 'Rewrite method',
         hint: 'Leave empty to keep the original',
         type: 'string',
-        showWhen: { field: 'action', equals: ['rewrite-request'] },
+        // mechanism: 'dnr' has no action to change the request method — hidden entirely for it
+        // rather than shown-but-rejected (validateMockConfig still hard-rejects it too, as a
+        // backstop against any other caller of the write path, e.g. a future scripted import).
+        showWhen: [
+          { field: 'action', equals: ['rewrite-request'] },
+          { field: 'mechanism', equals: ['main-world', 'debugger'] },
+        ],
       },
       {
         key: 'rewriteHeaders',
@@ -139,21 +158,30 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
         hint: 'Leave empty to keep the original',
         type: 'string',
         multiline: true,
-        showWhen: { field: 'action', equals: ['rewrite-request'] },
+        // Same reasoning as rewriteMethod above — mechanism: 'dnr' has no action to rewrite the
+        // request body at all.
+        showWhen: [
+          { field: 'action', equals: ['rewrite-request'] },
+          { field: 'mechanism', equals: ['main-world', 'debugger'] },
+        ],
       },
       // Not tied to any single action via showWhen — matching is orthogonal to what a rule does
-      // once matched, so these two apply the same way to fake-response/rewrite-request/block alike.
+      // once matched, so this applies the same way to fake-response/rewrite-request/block alike.
+      // mechanism: 'dnr' is excluded, though (unlike hitCountLimit below) — it can't inspect the
+      // request content at all (see validateMockConfig), so shown-but-rejected would be more
+      // confusing than just not offering it.
       {
         key: 'requestMatchContains',
         label: 'Only match if contains',
         hint: "Substring match against the URL/body; main-world's XHR path can only check the URL, not the body — see docs/ROADMAP.md #2.6.1",
         type: 'string',
         advanced: true,
+        showWhen: { field: 'mechanism', equals: ['main-world', 'debugger'] },
       },
       {
         key: 'hitCountLimit',
         label: 'Auto-disable after N matches',
-        hint: 'mechanism: debugger only — main-world does not persist a count',
+        hint: 'mechanism: debugger only — main-world and dnr do not persist a count',
         type: 'number',
         min: 1,
         advanced: true,
@@ -172,6 +200,7 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
         await unregisterMainWorldScript(MAIN_WORLD_SCRIPT_ID);
       }
       await teardownDebuggerInterceptor();
+      await clearDnrRules();
       return;
     }
 
@@ -227,6 +256,79 @@ async function syncRegistration(cache: CacheService): Promise<void> {
   } else {
     await teardownDebuggerInterceptor();
   }
+
+  // 'dnr' has no live callback to (re-)attach — just recompute the full desired rule set and hand
+  // it to syncDnrRules every time, same re-sync-every-time policy as the two branches above.
+  if (hasActiveMockConfig(configs, 'dnr')) {
+    await syncDnrRules(await buildDnrRuleSpecs(configs));
+  } else {
+    await clearDnrRules();
+  }
+}
+
+/** Builds the declarative rule set for every active `mechanism: 'dnr'` config — unlike
+ * `evaluateDebuggerRequest`, this runs once per sync (not per request; DNR has no per-request
+ * callback), producing the *entire* desired rule set up front. */
+async function buildDnrRuleSpecs(configs: MockConfig[]): Promise<DnrRuleSpec[]> {
+  const specs: DnrRuleSpec[] = [];
+
+  for (const config of configs) {
+    if (!config.active || config.mechanism !== 'dnr') continue;
+    const urlRegex = endpointPatternToRegexSource(config.endpointPattern);
+    const action = getAction(config);
+
+    if (action === 'block') {
+      specs.push({ id: config.id, urlRegex, method: config.method, action: { kind: 'block' } });
+      continue;
+    }
+
+    if (action === 'rewrite-request') {
+      // validateMockConfig already rejects rewriteMethod/rewriteBody for mechanism: 'dnr' — only
+      // url/headers ever reach here, which is all a DNR redirect+modifyHeaders pair can express.
+      const overrides = buildRewriteOverrides(config);
+      if (!overrides.url) continue; // nothing to redirect to — dnr's rewrite is redirect-only
+      specs.push({
+        id: config.id,
+        urlRegex,
+        method: config.method,
+        action: { kind: 'redirect', url: overrides.url, ...(overrides.headers ? { requestHeaders: overrides.headers } : {}) },
+      });
+      continue;
+    }
+
+    // fake-response: dnr has no way to synthesize a response body directly — the only way to
+    // "answer" a request without touching its real destination is to redirect to a data: URL that
+    // already contains the desired bytes. This always resolves as a plain, successful load — a
+    // data: URL has no HTTP status-code concept, so `fakeStatus` cannot be honored here (a
+    // documented reduced-fidelity trade-off of this mechanism, not a bug to fix).
+    const fake = buildFakeResponseInit(config);
+    let mimeType = 'application/json';
+    let base64: string;
+    if (config.fakeResponseFile) {
+      const blob = await getBlob(config.fakeResponseFile);
+      if (!blob) continue;
+      mimeType = blob.mimeType;
+      base64 = bytesToBase64(blob.bytes);
+    } else if (config.fakeResponseFileInline) {
+      mimeType = config.fakeResponseFileInline.mimeType;
+      base64 = config.fakeResponseFileInline.base64;
+    } else {
+      base64 = bytesToBase64(new TextEncoder().encode(fake.bodyText).buffer);
+    }
+
+    specs.push({
+      id: config.id,
+      urlRegex,
+      method: config.method,
+      action: {
+        kind: 'redirect',
+        url: `data:${mimeType};base64,${base64}`,
+        ...(fake.headers ? { responseHeaders: fake.headers } : {}),
+      },
+    });
+  }
+
+  return specs;
 }
 
 async function evaluateDebuggerRequest(

@@ -15,9 +15,18 @@ export const HTTP_METHODS: HttpMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELET
  *   tabs — real network-stack traffic, visible in the Network tab, catches every request type
  *   (images, scripts, downloads), at the cost of the 'debugger' permission and a persistent
  *   "being debugged" banner Chrome shows on affected tabs.
+ * - 'dnr': chrome.declarativeNetRequest (utils/dnr-network-rules.ts) — native MV3, no banner, real
+ *   network-stack traffic (visible in Network tab, catches every resource type like `debugger`).
+ *   Purely declarative: Chrome's own engine evaluates the rules, there's no live per-request JS
+ *   callback at all. Real limitations from that, enforced in `validateMockConfig`: can't inspect or
+ *   rewrite a request's body (DNR conditions/actions never see it, only URL/headers/resourceType),
+ *   and can't change the request method. `action: 'fake-response'` only works by redirecting to a
+ *   `data:` URL built from the configured body — so it always behaves as HTTP 200 regardless of
+ *   `fakeStatus` (a `data:` URL has no status-code concept), a documented reduced-fidelity trade-off
+ *   rather than a bug.
  */
-export type Mechanism = 'main-world' | 'debugger';
-export const MECHANISMS: Mechanism[] = ['main-world', 'debugger'];
+export type Mechanism = 'main-world' | 'debugger' | 'dnr';
+export const MECHANISMS: Mechanism[] = ['main-world', 'debugger', 'dnr'];
 /** Configs persisted before this field existed have no `mechanism` — treat that as the original
  * (and cheapest) behavior rather than forcing a storage migration. */
 export const DEFAULT_MECHANISM: Mechanism = 'main-world';
@@ -31,9 +40,10 @@ export const DEFAULT_MECHANISM: Mechanism = 'main-world';
  *   `rewriteHeaders`/`rewriteBody` overrides applied first. Valid for both `main-world` and
  *   `debugger` — but only `debugger` can rewrite non-fetch/XHR requests (script/image/etc. tags);
  *   `main-world`'s patch is limited to what `window.fetch`/`XMLHttpRequest` themselves originate.
- * - 'block': fails the request outright at the real network layer (`Fetch.failRequest`) — requires
- *   `mechanism: 'debugger'`, since `main-world` can only reject a Promise in JS, never produce an
- *   actual network-level failure a page's error handling would see the same way.
+ * - 'block': fails the request outright at the real network layer (`Fetch.failRequest`, or DNR's
+ *   native `block` action) — requires `mechanism: 'debugger'` or `'dnr'`, since `main-world` can
+ *   only reject a Promise in JS, never produce an actual network-level failure a page's error
+ *   handling would see the same way.
  */
 export type Action = 'fake-response' | 'rewrite-request' | 'block';
 export const ACTIONS: Action[] = ['fake-response', 'rewrite-request', 'block'];
@@ -188,17 +198,45 @@ export function validateMockConfig(candidate: unknown): MockConfigValidation {
   }
   const action = c.action as Action;
   const mechanism = c.mechanism as Mechanism;
-  if (action === 'block' && mechanism !== 'debugger') {
-    return { valid: false, reason: `action "block" requires mechanism "debugger"` };
+  if (action === 'block' && mechanism !== 'debugger' && mechanism !== 'dnr') {
+    return { valid: false, reason: `action "block" requires mechanism "debugger" or "dnr"` };
   }
-  if (action === 'fake-response' && (typeof c.fakeStatus !== 'number' || c.fakeStatus < 100 || c.fakeStatus > 599)) {
+  // 'dnr' can only fake-response via a data: URL redirect (see MockConfig.fakeResponseFileInline's
+  // doc comment), which has no HTTP status-code concept — always resolves as a successful load
+  // regardless, so fakeStatus is optional (not required) for it rather than a value the user sets
+  // but that quietly never takes effect. If given anyway, it still has to be in-range.
+  if (action === 'fake-response' && mechanism !== 'dnr' && (typeof c.fakeStatus !== 'number' || c.fakeStatus < 100 || c.fakeStatus > 599)) {
     return { valid: false, reason: 'fakeStatus must be a number between 100 and 599 when action is fake-response' };
+  }
+  if (
+    action === 'fake-response' &&
+    mechanism === 'dnr' &&
+    c.fakeStatus !== undefined &&
+    (typeof c.fakeStatus !== 'number' || c.fakeStatus < 100 || c.fakeStatus > 599)
+  ) {
+    return { valid: false, reason: 'fakeStatus must be a number between 100 and 599' };
   }
   if (action === 'rewrite-request' && c.rewriteMethod !== undefined && c.rewriteMethod !== '') {
     const rewriteMethods: HttpMethod[] = HTTP_METHODS.filter((m) => m !== 'ALL');
     if (typeof c.rewriteMethod !== 'string' || !rewriteMethods.includes(c.rewriteMethod.toUpperCase() as HttpMethod)) {
       return { valid: false, reason: `rewriteMethod must be one of ${rewriteMethods.join(', ')}` };
     }
+  }
+  // 'dnr' is purely declarative — Chrome's own engine evaluates its rules, which never see a
+  // request's body and have no way to change its method (hard API limits, not gaps to fill in
+  // later) — reject rather than silently ignore, since silently going through unmodified could
+  // mislead whatever test this rule was set up for.
+  if (mechanism === 'dnr' && action === 'rewrite-request' && c.rewriteMethod) {
+    return { valid: false, reason: 'mechanism "dnr" cannot change the request method (declarativeNetRequest has no such action)' };
+  }
+  if (mechanism === 'dnr' && action === 'rewrite-request' && c.rewriteBody) {
+    return { valid: false, reason: 'mechanism "dnr" cannot rewrite the request body (declarativeNetRequest has no such action)' };
+  }
+  if (mechanism === 'dnr' && c.requestMatchContains) {
+    return {
+      valid: false,
+      reason: 'mechanism "dnr" cannot match on request content — declarativeNetRequest only ever sees the URL, never the body',
+    };
   }
   if (c.delayMs !== undefined && (typeof c.delayMs !== 'number' || c.delayMs < 0)) {
     return { valid: false, reason: 'delayMs must be a non-negative number' };
@@ -231,7 +269,9 @@ export function validateMockConfig(candidate: unknown): MockConfigValidation {
     active: c.active,
   };
   if (action === 'fake-response') {
-    config.fakeStatus = c.fakeStatus as number;
+    // Required (and validated in-range) for every mechanism except 'dnr', where it's optional —
+    // see the validation block above.
+    if (typeof c.fakeStatus === 'number') config.fakeStatus = c.fakeStatus;
     config.fakeResponse = c.fakeResponse;
     if (c.responseHeaders) config.responseHeaders = c.responseHeaders as string;
     if (c.fakeResponseFile) {
@@ -257,14 +297,20 @@ export function validateMockConfig(candidate: unknown): MockConfigValidation {
 }
 
 /**
- * Compiles an endpointPattern into a RegExp: `*` is a wildcard (any run of characters, same
- * convention as Chrome match patterns / most request-blocking extensions), every other character
- * is matched literally — so a URL containing `?`/`.`/etc. doesn't need escaping by the user. Not
- * anchored, matching the old substring-`includes` behavior for a plain (no `*`) pattern.
+ * Escapes an endpointPattern into a regex *source string*: `*` is a wildcard (any run of
+ * characters, same convention as Chrome match patterns / most request-blocking extensions), every
+ * other character is matched literally — so a URL containing `?`/`.`/etc. doesn't need escaping by
+ * the user. Not anchored, matching the old substring-`includes` behavior for a plain (no `*`)
+ * pattern. Exported as a plain string, not a compiled `RegExp`, so a caller needing something else
+ * to do the compiling (`utils/dnr-network-rules.ts`'s `regexFilter`, which Chrome evaluates as RE2 —
+ * compatible with the simple escaped-literal + `.*` pattern this produces) can use it directly.
  */
+export function endpointPatternToRegexSource(pattern: string): string {
+  return pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*');
+}
+
 function compileEndpointPattern(pattern: string): RegExp {
-  const escaped = pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*');
-  return new RegExp(escaped);
+  return new RegExp(endpointPatternToRegexSource(pattern));
 }
 
 /** First active config for the given `mechanism` whose method + endpointPattern (glob match, see

@@ -8,6 +8,11 @@
 
 export type UIFieldType = 'string' | 'number' | 'boolean' | 'enum' | 'file';
 
+export interface UIShowWhenCondition {
+  field: string;
+  equals: string[];
+}
+
 export interface UIFieldDef {
   key: string;
   label: string;
@@ -48,12 +53,21 @@ export interface UIFieldDef {
    * value is one of `equals` — lets one Collection-schema form show different fields depending on
    * another field's selection (e.g. http-error-mocker's action-specific fields, docs/ROADMAP.md
    * #2.6.1). Absent means always visible. The controller field itself is looked up by `key` within
-   * the same `fields` list. */
-  showWhen?: { field: string; equals: string[] };
+   * the same `fields` list. An array means every condition must hold (AND) — e.g. "action is
+   * rewrite-request AND mechanism is main-world or debugger" (http-error-mocker's `rewriteMethod`/
+   * `rewriteBody`, which `mechanism: 'dnr'` can't act on at all). */
+  showWhen?: UIShowWhenCondition | UIShowWhenCondition[];
   /** Rarely-needed field, grouped into a collapsible "Advanced" `<details>` in the form instead of
    * the main field list (docs/ROADMAP.md #2.6.1) — visibility (`showWhen`) is evaluated the same
    * way either way; this only affects layout. */
   advanced?: boolean;
+  /** Only meaningful for a single-line text field (type 'string', not `multiline` — a `<datalist>`
+   * pairs with an `<input>`, not a `<textarea>`). Native browser suggestion dropdown: the user can
+   * still type anything, but can also pick one of these — `value` is what actually gets submitted,
+   * `label` is only what's shown in the dropdown (e.g. a short readable name standing in for a long
+   * URL). Doesn't replace `options`/`type: 'enum'`, which forces the value to be one of the list;
+   * this is a suggestion, not a constraint. */
+  suggestions?: { label: string; value: string }[];
 }
 
 export interface UICollectionSchema {
@@ -76,6 +90,14 @@ export type UISchema = UICollectionSchema | UIActionSchema;
 
 export function isCollectionSchema(schema: UISchema): schema is UICollectionSchema {
   return schema.kind === 'collection';
+}
+
+/** Normalizes `UIFieldDef.showWhen` (single condition, array of conditions, or absent) into a
+ * plain array — the one place that has to know about the single-vs-array shorthand, so
+ * item-form-view.ts's visibility/controller-tracking logic doesn't have to branch on it itself. */
+export function showWhenConditions(showWhen: UIFieldDef['showWhen']): UIShowWhenCondition[] {
+  if (!showWhen) return [];
+  return Array.isArray(showWhen) ? showWhen : [showWhen];
 }
 
 /** Generic wire shape for a Bus command targeting any collection-schema Module — one shape
