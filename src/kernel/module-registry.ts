@@ -10,6 +10,9 @@ export interface RegistryEntry {
    * __synapseModule.id, only known once its first ManifestReport arrives — until then, absent
    * and the UI falls back to `id` (the extension-assigned registration id). */
   label?: string;
+  /** Mirrors Module.description (bundled only — uploaded modules have no self-declared
+   * description channel today, unlike `label`'s ManifestReport `__synapseModule.id`). */
+  description?: string;
   source: ModuleSource;
   needs: Capability[];
   supportedEnvs: RuntimeEnv[];

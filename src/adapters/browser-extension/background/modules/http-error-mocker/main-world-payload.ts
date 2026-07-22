@@ -1,4 +1,10 @@
-import { buildFakeResponseInit, matchMockConfig, type MockConfig } from '../../../../../shared/http-mock';
+import {
+  buildFakeResponseInit,
+  buildRewriteOverrides,
+  getAction,
+  matchMockConfig,
+  type MockConfig,
+} from '../../../../../shared/http-mock';
 import { createMainWorldChannel } from '../../../utils/main-world/event-channel';
 import { installNetworkInterceptor, type InterceptDecision } from '../../../utils/main-world/network-interceptor';
 import { MOCK_CONFIG_CHANNEL_ID } from './constants';
@@ -20,11 +26,38 @@ createMainWorldChannel<MockConfig[]>(MOCK_CONFIG_CHANNEL_ID).onUpdate((next) => 
   configs = next ?? [];
 });
 
-installNetworkInterceptor(({ method, url }): InterceptDecision => {
-  const match = matchMockConfig(configs, url, method, 'main-world');
+installNetworkInterceptor(({ method, url, body }): InterceptDecision => {
+  const match = matchMockConfig(configs, url, method, 'main-world', body);
   if (!match) return { intercept: false };
 
+  // 'block' can't reach this mechanism (validateMockConfig requires mechanism: 'debugger' for it)
+  // — falling through to fake-response below would be wrong, so pass through defensively instead.
+  if (getAction(match) === 'block') return { intercept: false };
+
+  if (getAction(match) === 'rewrite-request') {
+    return { intercept: 'rewrite', overrides: buildRewriteOverrides(match) };
+  }
+
   const fake = buildFakeResponseInit(match);
+
+  // fakeResponseFileInline rides the same chrome.storage.local sync every other MockConfig field
+  // already uses (see its doc comment) — already present in `configs` by the time evaluate() runs,
+  // no async resolution needed here unlike debugger's IndexedDB-backed fakeResponseFile.
+  if (match.fakeResponseFileInline) {
+    const { mimeType, base64 } = match.fakeResponseFileInline;
+    return {
+      intercept: true,
+      response: {
+        status: fake.status,
+        statusText: fake.statusText,
+        bodyText: base64,
+        bodyEncoding: 'base64',
+        headers: { 'Content-Type': mimeType, ...fake.headers },
+        ...(match.delayMs !== undefined ? { delayMs: match.delayMs } : {}),
+      },
+    };
+  }
+
   return {
     intercept: true,
     response: {
@@ -32,6 +65,7 @@ installNetworkInterceptor(({ method, url }): InterceptDecision => {
       statusText: fake.statusText,
       bodyText: fake.bodyText,
       ...(match.delayMs !== undefined ? { delayMs: match.delayMs } : {}),
+      ...(fake.headers ? { headers: fake.headers } : {}),
     },
   };
 });

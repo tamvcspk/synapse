@@ -22,14 +22,92 @@ export const MECHANISMS: Mechanism[] = ['main-world', 'debugger'];
  * (and cheapest) behavior rather than forcing a storage migration. */
 export const DEFAULT_MECHANISM: Mechanism = 'main-world';
 
+/**
+ * What a rule does once it matches (docs/ROADMAP.md #2.6.1) — independent of `mechanism` (which
+ * decides *how* the match is intercepted):
+ * - 'fake-response': never touches the network, answers with `fakeStatus`/`fakeResponse` directly
+ *   (the original, and still only, behavior for `mechanism: 'main-world'` pre-#2.6.1).
+ * - 'rewrite-request': the request is still sent for real, but with `rewriteUrl`/`rewriteMethod`/
+ *   `rewriteHeaders`/`rewriteBody` overrides applied first. Valid for both `main-world` and
+ *   `debugger` — but only `debugger` can rewrite non-fetch/XHR requests (script/image/etc. tags);
+ *   `main-world`'s patch is limited to what `window.fetch`/`XMLHttpRequest` themselves originate.
+ * - 'block': fails the request outright at the real network layer (`Fetch.failRequest`) — requires
+ *   `mechanism: 'debugger'`, since `main-world` can only reject a Promise in JS, never produce an
+ *   actual network-level failure a page's error handling would see the same way.
+ */
+export type Action = 'fake-response' | 'rewrite-request' | 'block';
+export const ACTIONS: Action[] = ['fake-response', 'rewrite-request', 'block'];
+/** Configs persisted before this field existed have no `action` — they were always fake-response
+ * rules (the only action that existed then). */
+export const DEFAULT_ACTION: Action = 'fake-response';
+
+/** Server-side backstop for item-form-view.ts's ~2MB client-side cap on `fakeResponseFileInline`
+ * (base64 inflates a binary size by ~4/3) — defends against a malformed/tampered upsert bypassing
+ * the client check, not a normal code path. */
+const MAX_INLINE_FILE_BASE64_LENGTH = 3 * 1024 * 1024;
+
 export interface MockConfig {
   id: string;
   endpointPattern: string;
   method: HttpMethod;
   mechanism: Mechanism;
-  fakeStatus: number;
-  fakeResponse: unknown;
+  action: Action;
+  /** Only meaningful when `action === 'fake-response'`. */
+  fakeStatus?: number;
+  fakeResponse?: unknown;
+  /** A blobRef into utils/blob-store.ts's IndexedDB (docs/ROADMAP.md #2.6.1's fake-file support) —
+   * when set, **takes precedence over `fakeResponse`** (the uploaded file's bytes answer the
+   * request instead of the typed text). **`mechanism: 'debugger'` only** — resolving a blobRef
+   * needs IndexedDB access, which the MAIN-world patch's evaluate() callback never has (same
+   * reason as `hitCountLimit`). `main-world` uses `fakeResponseFileInline` instead (see below); this
+   * field stays `undefined` for a `main-world` rule's file upload. This file itself stays I/O-free
+   * (Global SDK, docs/design.md §9) — resolving the blobRef into actual bytes happens in the
+   * background composition root (http-error-mocker/index.ts's `evaluateDebuggerRequest`), never
+   * here. Item-form-view.ts's file field submits BOTH this and `fakeResponseFileInline` at once, as
+   * one JSON string — see `parseFileFieldValue`. */
+  fakeResponseFile?: string;
+  /** The same uploaded file as `fakeResponseFile`, but inlined directly (not a reference) — this is
+   * what `mechanism: 'main-world'` actually uses, since it can't reach IndexedDB but *can* reach
+   * whatever's on this MockConfig itself (it already rides the exact same chrome.storage.local sync
+   * every other field here uses, via installStorageToMainWorldRelay — no new relay mechanism
+   * needed). Deliberately capped client-side (item-form-view.ts, ~2MB) and re-checked here
+   * (`MAX_INLINE_FILE_BASE64_LENGTH`) — chrome.storage.local's ~5MB quota is shared by the *entire*
+   * extension, not just this one field, so an uncapped inline file would risk starving everything
+   * else. A file over the cap simply has no `fakeResponseFileInline` — main-world just won't fake
+   * it (mechanism: debugger, unaffected by this cap, still works via `fakeResponseFile`). */
+  fakeResponseFileInline?: { mimeType: string; fileName: string; base64: string };
+  /** The uploaded file's original name — kept as its own top-level field (rather than only inside
+   * `fakeResponseFileInline`) so a display like the Management View table has something readable
+   * to show *regardless* of mechanism/inline-cap status, without needing an IndexedDB lookup per
+   * row. Cosmetic only — never read by any evaluate() path, only by item-form-view.ts (for editing)
+   * and management-view.ts (for display). */
+  fakeResponseFileName?: string;
   delayMs?: number;
+  /** Rewrite fields below are only meaningful when `action === 'rewrite-request'`; each is
+   * optional independently — an omitted one means "keep the original request's value". */
+  rewriteUrl?: string;
+  rewriteMethod?: string;
+  /** Multiline JSON text (e.g. `{"X-Foo":"bar"}`), parsed by `buildRewriteOverrides` — same
+   * free-text-that-happens-to-be-JSON convention `fakeResponse` already uses, rather than
+   * inventing a dedicated "key-value list" UIFieldDef type for just this one field. */
+  rewriteHeaders?: string;
+  rewriteBody?: string;
+  /** Multiline JSON text merged into the fake response's headers (default is always just
+   * `Content-Type: application/json`) — only meaningful when `action === 'fake-response'`. */
+  responseHeaders?: string;
+  /** Extra matching condition on top of endpointPattern+method: substring match against the URL
+   * (and, where the mechanism's evaluate-time has it, the request body) — independent of `action`,
+   * since it's about *whether* a rule matches at all, not what it does once matched. See
+   * `matchMockConfig`'s doc comment for the `mechanism: 'main-world'` + XHR caveat. */
+  requestMatchContains?: string;
+  /** Auto-disables the rule (`active: false`) after this many matches — **`mechanism: 'debugger'`
+   * only**: persisting the incremented count needs chrome.* storage access, which the MAIN-world
+   * patch's evaluate() callback never has (see main-world-interceptor skill); `main-world` rules
+   * read this field but never act on it. */
+  hitCountLimit?: number;
+  /** Runtime bookkeeping for `hitCountLimit` — never a form field, just carried through
+   * `{...existing}` on every save like any other field the form doesn't touch. */
+  matchCount?: number;
   active: boolean;
 }
 
@@ -38,9 +116,52 @@ export function getMechanism(config: MockConfig): Mechanism {
   return config.mechanism ?? DEFAULT_MECHANISM;
 }
 
+/** Back-compat accessor for configs persisted before `action` existed. */
+export function getAction(config: MockConfig): Action {
+  return config.action ?? DEFAULT_ACTION;
+}
+
 export type MockConfigValidation =
   | { valid: true; config: MockConfig }
   | { valid: false; reason: string };
+
+/** Unpacks item-form-view.ts's combined `{blobRef?, fileName?, inline?}` JSON for a `type: 'file'`
+ * field (docs/ROADMAP.md #2.6.1) into the real MockConfig fields it maps to. Best-effort: malformed
+ * JSON, a missing/invalid `inline` shape, or an oversized `inline.base64` (see
+ * `MAX_INLINE_FILE_BASE64_LENGTH`) all degrade to "that half is just absent" rather than rejecting
+ * the whole upsert — a bad/huge file shouldn't block saving the blobRef half that's still fine. */
+function parseFileFieldValue(raw: string): {
+  blobRef?: string;
+  fileName?: string;
+  inline?: { mimeType: string; fileName: string; base64: string };
+} {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return {};
+    const p = parsed as Record<string, unknown>;
+
+    const blobRef = typeof p.blobRef === 'string' && p.blobRef.length > 0 ? p.blobRef : undefined;
+    const fileName = typeof p.fileName === 'string' && p.fileName.length > 0 ? p.fileName : undefined;
+
+    const rawInline = typeof p.inline === 'object' && p.inline !== null ? (p.inline as Record<string, unknown>) : undefined;
+    const inlineValid =
+      rawInline &&
+      typeof rawInline.mimeType === 'string' &&
+      typeof rawInline.fileName === 'string' &&
+      typeof rawInline.base64 === 'string' &&
+      rawInline.base64.length <= MAX_INLINE_FILE_BASE64_LENGTH
+        ? { mimeType: rawInline.mimeType, fileName: rawInline.fileName, base64: rawInline.base64 }
+        : undefined;
+
+    return {
+      ...(blobRef ? { blobRef } : {}),
+      ...(fileName ? { fileName } : {}),
+      ...(inlineValid ? { inline: inlineValid } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
 
 /** Hand-rolled shape check (no schema lib, matching kernel/manifest-validator.ts's precedent) — used
  * to validate popup form input and any config read back from chrome.storage. */
@@ -62,11 +183,40 @@ export function validateMockConfig(candidate: unknown): MockConfigValidation {
   if (typeof c.mechanism !== 'string' || !MECHANISMS.includes(c.mechanism as Mechanism)) {
     return { valid: false, reason: `mechanism must be one of ${MECHANISMS.join(', ')}` };
   }
-  if (typeof c.fakeStatus !== 'number' || c.fakeStatus < 100 || c.fakeStatus > 599) {
-    return { valid: false, reason: 'fakeStatus must be a number between 100 and 599' };
+  if (typeof c.action !== 'string' || !ACTIONS.includes(c.action as Action)) {
+    return { valid: false, reason: `action must be one of ${ACTIONS.join(', ')}` };
+  }
+  const action = c.action as Action;
+  const mechanism = c.mechanism as Mechanism;
+  if (action === 'block' && mechanism !== 'debugger') {
+    return { valid: false, reason: `action "block" requires mechanism "debugger"` };
+  }
+  if (action === 'fake-response' && (typeof c.fakeStatus !== 'number' || c.fakeStatus < 100 || c.fakeStatus > 599)) {
+    return { valid: false, reason: 'fakeStatus must be a number between 100 and 599 when action is fake-response' };
+  }
+  if (action === 'rewrite-request' && c.rewriteMethod !== undefined && c.rewriteMethod !== '') {
+    const rewriteMethods: HttpMethod[] = HTTP_METHODS.filter((m) => m !== 'ALL');
+    if (typeof c.rewriteMethod !== 'string' || !rewriteMethods.includes(c.rewriteMethod.toUpperCase() as HttpMethod)) {
+      return { valid: false, reason: `rewriteMethod must be one of ${rewriteMethods.join(', ')}` };
+    }
   }
   if (c.delayMs !== undefined && (typeof c.delayMs !== 'number' || c.delayMs < 0)) {
     return { valid: false, reason: 'delayMs must be a non-negative number' };
+  }
+  if (c.responseHeaders !== undefined && typeof c.responseHeaders !== 'string') {
+    return { valid: false, reason: 'responseHeaders must be a string' };
+  }
+  if (c.requestMatchContains !== undefined && typeof c.requestMatchContains !== 'string') {
+    return { valid: false, reason: 'requestMatchContains must be a string' };
+  }
+  if (c.hitCountLimit !== undefined && (typeof c.hitCountLimit !== 'number' || c.hitCountLimit < 1)) {
+    return { valid: false, reason: 'hitCountLimit must be a positive number' };
+  }
+  // item-form-view.ts's file field submits a single JSON string combining both storage forms
+  // (`{blobRef?, inline?}`) — see MockConfig.fakeResponseFile/fakeResponseFileInline's doc comments
+  // and `parseFileFieldValue` below.
+  if (c.fakeResponseFile !== undefined && (typeof c.fakeResponseFile !== 'string' || c.fakeResponseFile.length === 0)) {
+    return { valid: false, reason: 'fakeResponseFile must be a non-empty string' };
   }
   if (typeof c.active !== 'boolean') {
     return { valid: false, reason: 'active must be a boolean' };
@@ -76,12 +226,33 @@ export function validateMockConfig(candidate: unknown): MockConfigValidation {
     id: c.id,
     endpointPattern: c.endpointPattern,
     method: c.method as HttpMethod,
-    mechanism: c.mechanism as Mechanism,
-    fakeStatus: c.fakeStatus,
-    fakeResponse: c.fakeResponse,
+    mechanism,
+    action,
     active: c.active,
   };
+  if (action === 'fake-response') {
+    config.fakeStatus = c.fakeStatus as number;
+    config.fakeResponse = c.fakeResponse;
+    if (c.responseHeaders) config.responseHeaders = c.responseHeaders as string;
+    if (c.fakeResponseFile) {
+      const { blobRef, fileName, inline } = parseFileFieldValue(c.fakeResponseFile as string);
+      if (blobRef) config.fakeResponseFile = blobRef;
+      if (fileName) config.fakeResponseFileName = fileName;
+      if (inline) config.fakeResponseFileInline = inline;
+    }
+  }
+  if (action === 'rewrite-request') {
+    if (c.rewriteUrl) config.rewriteUrl = c.rewriteUrl as string;
+    if (c.rewriteMethod) config.rewriteMethod = (c.rewriteMethod as string).toUpperCase();
+    if (c.rewriteHeaders) config.rewriteHeaders = c.rewriteHeaders as string;
+    if (c.rewriteBody) config.rewriteBody = c.rewriteBody as string;
+  }
   if (c.delayMs !== undefined) config.delayMs = c.delayMs as number;
+  if (c.requestMatchContains) config.requestMatchContains = c.requestMatchContains as string;
+  if (c.hitCountLimit !== undefined) config.hitCountLimit = c.hitCountLimit as number;
+  // Never form-editable — carried over from whatever the previous save already had (0/undefined
+  // for a brand-new rule), so a hit-count keeps counting across unrelated edits to the same rule.
+  if (typeof c.matchCount === 'number') config.matchCount = c.matchCount;
   return { valid: true, config };
 }
 
@@ -100,31 +271,86 @@ function compileEndpointPattern(pattern: string): RegExp {
  * compileEndpointPattern) matches the request URL. Each mechanism's composition root (see
  * main-world-payload.ts / debugger-network-interceptor.ts's caller) only ever wants configs meant
  * for itself — a 'debugger' rule must never be silently answered by the 'main-world' patch or
- * vice versa. */
-export function matchMockConfig(configs: MockConfig[], url: string, method: string, mechanism: Mechanism): MockConfig | undefined {
+ * vice versa.
+ *
+ * `body` is optional and, when given, only ever checked against `requestMatchContains` — never
+ * against endpointPattern/method. `mechanism: 'main-world'`'s XHR path evaluates at `open()` time
+ * (see network-interceptor.ts), before a request body exists, so `body` is always undefined there;
+ * `requestMatchContains` still works for that path, just only against the URL. */
+export function matchMockConfig(
+  configs: MockConfig[],
+  url: string,
+  method: string,
+  mechanism: Mechanism,
+  body?: unknown,
+): MockConfig | undefined {
   const upperMethod = method.toUpperCase();
-  return configs.find(
-    (c) =>
-      c.active &&
-      getMechanism(c) === mechanism &&
-      (c.method === 'ALL' || c.method === upperMethod) &&
-      compileEndpointPattern(c.endpointPattern).test(url),
-  );
+  return configs.find((c) => {
+    if (!c.active || getMechanism(c) !== mechanism) return false;
+    if (c.method !== 'ALL' && c.method !== upperMethod) return false;
+    if (!compileEndpointPattern(c.endpointPattern).test(url)) return false;
+    if (c.requestMatchContains) {
+      const haystack = `${url} ${typeof body === 'string' ? body : ''}`;
+      if (!haystack.includes(c.requestMatchContains)) return false;
+    }
+    return true;
+  });
 }
 
 export interface FakeResponseInit {
   status: number;
   statusText: string;
   bodyText: string;
+  headers?: Record<string, string>;
+}
+
+/** Parses a multiline-JSON-object field (best-effort — malformed JSON is treated as "no override"
+ * rather than failing the whole rule, since a typo in this one optional field shouldn't take down
+ * whatever else was configured correctly). Shared by `responseHeaders` and `rewriteHeaders` — same
+ * free-text-that-happens-to-be-JSON convention `fakeResponse` already uses, rather than inventing
+ * a dedicated "key-value list" UIFieldDef type for just these fields. */
+function parseHeadersJson(text: string | undefined): Record<string, string> | undefined {
+  if (!text) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, string>) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Renders a MockConfig's fake payload into the primitives fetch/XHR faking need — no Response/XHR
- * construction here, since those classes don't exist outside a DOM-ish environment. */
+ * construction here, since those classes don't exist outside a DOM-ish environment. Only ever
+ * called by a caller that already checked `getAction(config) === 'fake-response'`; the `?? `
+ * fallbacks below are defensive (fakeStatus/fakeResponse are optional on MockConfig precisely
+ * because they're meaningless for the other actions), not an expected runtime path. */
 export function buildFakeResponseInit(config: MockConfig): FakeResponseInit {
+  const headers = parseHeadersJson(config.responseHeaders);
   return {
-    status: config.fakeStatus,
+    status: config.fakeStatus ?? 200,
     statusText: `Mocked by Synapse (${config.id})`,
-    bodyText: typeof config.fakeResponse === 'string' ? config.fakeResponse : JSON.stringify(config.fakeResponse),
+    bodyText: typeof config.fakeResponse === 'string' ? config.fakeResponse : JSON.stringify(config.fakeResponse ?? ''),
+    ...(headers ? { headers } : {}),
+  };
+}
+
+export interface RewriteOverrides {
+  url?: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+/** Renders a MockConfig's rewrite fields into the primitives a request-rewrite needs — same
+ * "primitives, not environment classes" split as `buildFakeResponseInit`. Only ever called by a
+ * caller that already checked `getAction(config) === 'rewrite-request'`. */
+export function buildRewriteOverrides(config: MockConfig): RewriteOverrides {
+  const headers = parseHeadersJson(config.rewriteHeaders);
+  return {
+    ...(config.rewriteUrl ? { url: config.rewriteUrl } : {}),
+    ...(config.rewriteMethod ? { method: config.rewriteMethod } : {}),
+    ...(headers ? { headers } : {}),
+    ...(config.rewriteBody ? { body: config.rewriteBody } : {}),
   };
 }
 

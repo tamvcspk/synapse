@@ -21,6 +21,16 @@ export interface ModuleContext {
 
 export interface Module<In = unknown, Out = unknown> {
   id: string;
+  /** Human-friendly display name — shown by the Registry UI (popup list, Dashboard Management View
+   * header) instead of the raw `id`. Optional: falls back to `id` when a Module (bundled or
+   * uploaded) doesn't declare one. Uploaded modules get this from their self-declared
+   * `__synapseModule.id` via a ManifestReport instead (see chrome-module-registry.ts) — bundled
+   * modules set it directly here. */
+  label?: string;
+  /** One-sentence explanation of what the Module does, for a reader browsing the Registry list —
+   * distinct from `label` (a short name) and from any in-form field `hint` (explains one input,
+   * not the whole Module). */
+  description?: string;
   needs?: Capability[];
   /**
    * Environments this Module may run in. Defaults to ['browser-extension'] when omitted, since

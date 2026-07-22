@@ -6,11 +6,16 @@
  * to decide "open Management View" vs "trigger run() directly" — not a boolean flag.
  */
 
-export type UIFieldType = 'string' | 'number' | 'boolean' | 'enum';
+export type UIFieldType = 'string' | 'number' | 'boolean' | 'enum' | 'file';
 
 export interface UIFieldDef {
   key: string;
   label: string;
+  /** Longer explanation shown as a small hover-only info icon (native `title` tooltip) next to the
+   * label, instead of stuffed into `label` itself — keeps the visible label short in both the form
+   * and the Management View table header. Rendered by item-form-view.ts/management-view.ts; not
+   * meaningful on its own without `label`. */
+  hint?: string;
   type: UIFieldType;
   required?: boolean;
   /** Only meaningful when type === 'enum'. */
@@ -21,6 +26,34 @@ export interface UIFieldDef {
    * rejects an out-of-range value before it ever reaches the Module's own validation. */
   min?: number;
   max?: number;
+  /** Only meaningful when type === 'file': renders `<input type="file">`. The submitted *value* is
+   * never the file's bytes — item-form-view.ts uploads the chosen file to utils/blob-store.ts as
+   * soon as it's picked and submits the resulting blobRef string, same as any other field's value
+   * (docs/ROADMAP.md #2.6.1). */
+  /** Only meaningful when type === 'file'. Names a companion field (elsewhere in the same
+   * `fields` list) holding an inline `{mimeType, fileName, base64}` copy of the same upload — set
+   * when a Module needs the bytes available somewhere that can't reach `blob-store.ts` (e.g.
+   * http-error-mocker's `mechanism: 'main-world'`, which can't reach IndexedDB). item-form-view.ts
+   * combines this field's blobRef with the companion field's current value into one submitted
+   * JSON string, so re-saving an existing item without touching the file input doesn't drop
+   * whichever half the Module previously stored. */
+  fileInlineKey?: string;
+  /** Only meaningful when type === 'file'. Names a companion field holding the uploaded file's
+   * original name as a plain string (unlike `fileInlineKey`'s full `{mimeType, fileName, base64}`
+   * object, this one is small enough to always be present, regardless of any inline-size cap) — so
+   * management-view.ts's table can show a readable filename instead of an opaque blobRef, without
+   * an IndexedDB lookup per row. item-form-view.ts reads/writes it the same way as `fileInlineKey`. */
+  fileNameKey?: string;
+  /** Field only rendered (and only submitted) when the named controller field's current live
+   * value is one of `equals` — lets one Collection-schema form show different fields depending on
+   * another field's selection (e.g. http-error-mocker's action-specific fields, docs/ROADMAP.md
+   * #2.6.1). Absent means always visible. The controller field itself is looked up by `key` within
+   * the same `fields` list. */
+  showWhen?: { field: string; equals: string[] };
+  /** Rarely-needed field, grouped into a collapsible "Advanced" `<details>` in the form instead of
+   * the main field list (docs/ROADMAP.md #2.6.1) — visibility (`showWhen`) is evaluated the same
+   * way either way; this only affects layout. */
+  advanced?: boolean;
 }
 
 export interface UICollectionSchema {

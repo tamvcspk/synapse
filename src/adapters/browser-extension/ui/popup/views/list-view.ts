@@ -47,7 +47,9 @@ export function renderListView(
 }
 
 function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
-  const label = span(entry.label ?? entry.id);
+  // `title` (hover tooltip), not a visible line — this popup is a small fixed-width window, no
+  // room for a description under every row like the Dashboard's Management View header can afford.
+  const label = span(entry.description ? { title: entry.description } : {}, entry.label ?? entry.id);
   if (entry.uiSchema) {
     label.classList.add('module-label-link');
     label.onclick = () => callbacks.onOpenModule(entry);

@@ -143,6 +143,8 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
       };
       if (!envSupported) entry.reason = `not supported in ${CURRENT_ENV} (supports: ${supportedEnvs.join(', ')})`;
       if (mod.uiSchema) entry.uiSchema = mod.uiSchema;
+      if (mod.label) entry.label = mod.label;
+      if (mod.description) entry.description = mod.description;
 
       entries.push(entry);
     }

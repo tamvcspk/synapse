@@ -1,4 +1,4 @@
-import type { EvaluateRequest } from './main-world/network-interceptor';
+import type { InterceptDecision, InterceptRequest } from './main-world/network-interceptor';
 
 /**
  * Generic background-only network interception mechanism built on chrome.debugger + CDP's Fetch
@@ -9,11 +9,14 @@ import type { EvaluateRequest } from './main-world/network-interceptor';
  * mechanism DevTools itself uses. That's what makes mocked requests show up in the Network tab and
  * lets this mechanism catch every request type (images, scripts, downloads), not just fetch/XHR.
  *
- * No domain knowledge here — same `EvaluateRequest` contract as the MAIN-world interceptor, reused
- * as-is (see that file) rather than duplicated, so a caller can point either mechanism at the same
- * kind of business logic. Requires the 'debugger' permission (manifest.config.ts) and shows a
- * persistent "being debugged" banner on every attached tab — callers should only attach while at
- * least one rule actually needs this mechanism, and detach the moment none do.
+ * No domain knowledge here — same `InterceptRequest`/`InterceptDecision` shapes the MAIN-world
+ * interceptor uses (see that file), reused rather than duplicated, so a caller can point either
+ * mechanism at the same kind of business logic. This mechanism can do one thing MAIN-world never
+ * can, though — `block` a request at the real network layer via `Fetch.failRequest` — so its
+ * decision type is `InterceptDecision` widened with that one extra case. Requires the 'debugger'
+ * permission (manifest.config.ts) and shows a persistent "being debugged" banner on every attached
+ * tab — callers should only attach while at least one rule actually needs this mechanism, and
+ * detach the moment none do.
  */
 
 // CDP's Fetch domain isn't in @types/chrome (chrome.debugger.sendCommand's params/result are
@@ -23,7 +26,17 @@ interface FetchRequestPausedEvent {
   request: { url: string; method: string; postData?: string };
 }
 
-let currentEvaluate: EvaluateRequest | null = null;
+/** `main-world`'s `InterceptDecision` plus `'block'` — only `chrome.debugger` (real network-stack
+ * access) can produce an actual network-level failure; `main-world` can only reject a Promise in
+ * JS, which isn't the same thing to a page's error handling, so it was never worth adding there. */
+export type DebuggerInterceptDecision = InterceptDecision | { intercept: 'block' };
+// Async — unlike main-world's EvaluateRequest, this mechanism's caller may need to resolve an
+// uploaded file's bytes out of IndexedDB (docs/ROADMAP.md #2.6.1) before it can answer, which
+// main-world's synchronous fetch/XHR patch could never do. Fine here: CDP holds the request paused
+// until something responds, there's no "must return immediately" constraint like XHR's open()/send().
+export type DebuggerEvaluateRequest = (req: InterceptRequest) => Promise<DebuggerInterceptDecision>;
+
+let currentEvaluate: DebuggerEvaluateRequest | null = null;
 let installed = false;
 const attachedTabs = new Set<number>();
 
@@ -45,24 +58,56 @@ async function attachToTab(tabId: number): Promise<void> {
   }
 }
 
-function onDebuggerEvent(source: chrome.debugger.Debuggee, method: string, params?: object): void {
+async function onDebuggerEvent(source: chrome.debugger.Debuggee, method: string, params?: object): Promise<void> {
   if (method !== 'Fetch.requestPaused' || source.tabId === undefined) return;
   const { requestId, request } = params as unknown as FetchRequestPausedEvent;
+  const tabId = source.tabId;
 
-  const decision = currentEvaluate?.({ method: request.method, url: request.url, body: request.postData }) ?? { intercept: false };
-  if (!decision.intercept) {
-    void chrome.debugger.sendCommand({ tabId: source.tabId }, 'Fetch.continueRequest', { requestId });
+  const decision: DebuggerInterceptDecision = currentEvaluate
+    ? await currentEvaluate({ method: request.method, url: request.url, body: request.postData })
+    : { intercept: false };
+
+  if (decision.intercept === false) {
+    void chrome.debugger.sendCommand({ tabId }, 'Fetch.continueRequest', { requestId });
+    return;
+  }
+
+  if (decision.intercept === 'block') {
+    void chrome.debugger.sendCommand({ tabId }, 'Fetch.failRequest', { requestId, errorReason: 'Failed' });
+    return;
+  }
+
+  if (decision.intercept === 'rewrite') {
+    const { overrides } = decision;
+    const commandParams: Record<string, unknown> = { requestId };
+    if (overrides.url !== undefined) commandParams.url = overrides.url;
+    if (overrides.method !== undefined) commandParams.method = overrides.method;
+    if (overrides.body !== undefined) commandParams.postData = toBase64Utf8(overrides.body);
+    if (overrides.headers !== undefined) {
+      commandParams.headers = Object.entries(overrides.headers).map(([name, value]) => ({ name, value }));
+    }
+    void chrome.debugger.sendCommand({ tabId }, 'Fetch.continueRequest', commandParams);
     return;
   }
 
   const { response } = decision;
-  const fulfill = () =>
-    chrome.debugger.sendCommand({ tabId: source.tabId }, 'Fetch.fulfillRequest', {
+  const fulfill = () => {
+    // Map, not array-concat, so a custom `Content-Type` override replaces the default instead of
+    // both ending up in the header list — two same-name response headers is ambiguous, not a merge.
+    const headers = new Map([['content-type', 'application/json']]);
+    for (const [name, value] of Object.entries(response.headers ?? {})) headers.set(name.toLowerCase(), value);
+
+    // 'base64' means bodyText is already-encoded file bytes (fakeResponseFile) — re-running it
+    // through toBase64Utf8 (meant for *text*) would corrupt it, not just double-encode it.
+    const body = response.bodyEncoding === 'base64' ? response.bodyText : toBase64Utf8(response.bodyText);
+
+    return chrome.debugger.sendCommand({ tabId }, 'Fetch.fulfillRequest', {
       requestId,
       responseCode: response.status,
-      responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
-      body: toBase64Utf8(response.bodyText),
+      responseHeaders: [...headers].map(([name, value]) => ({ name, value })),
+      body,
     });
+  };
 
   if (response.delayMs) setTimeout(fulfill, response.delayMs);
   else void fulfill();
@@ -85,7 +130,7 @@ function onDebuggerDetach(source: chrome.debugger.Debuggee): void {
 
 /** Idempotent: safe to call every time the caller's config set changes — always refreshes the
  * `evaluate` closure in place, only (re-)installs listeners/attaches tabs the first time. */
-export async function ensureDebuggerInterceptor(evaluate: EvaluateRequest): Promise<void> {
+export async function ensureDebuggerInterceptor(evaluate: DebuggerEvaluateRequest): Promise<void> {
   currentEvaluate = evaluate;
   if (installed) return;
   installed = true;
