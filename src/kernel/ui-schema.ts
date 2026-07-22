@@ -84,6 +84,11 @@ export interface UICollectionSchema {
 export interface UIActionSchema {
   kind: 'action';
   actionLabel: string;
+  /** When 'files', `run()`'s result is `{title, markdown, files: {fileName, mimeType, base64}[]}`
+   * instead of the usual free-form result — the popup opens a dedicated full-page Review tab
+   * (`ui/review/`) with a ZIP-download action, rather than showing the result inline. For actions
+   * producing a downloadable bundle, not just a short text/markdown snippet. */
+  resultView?: 'files';
 }
 
 export type UISchema = UICollectionSchema | UIActionSchema;

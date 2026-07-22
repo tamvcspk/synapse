@@ -7,6 +7,7 @@ const KEYS = {
   uploaded: 'synapse:uploaded',
   manifestReports: 'synapse:manifest-reports',
   userScriptsPermission: 'synapse:user-scripts-permission',
+  subState: 'synapse:sub-state',
 } as const;
 
 export type StoredManifestReport = Omit<ManifestReport, 'type'>;
@@ -76,6 +77,18 @@ export async function deleteManifestReport(moduleId: string): Promise<void> {
   const map = await getManifestReports();
   delete map[moduleId];
   await setStored(KEYS.manifestReports, map);
+}
+
+/** Per-Composite-Module sub-step bypass state (docs/ROADMAP.md #3), keyed by composite module id
+ * then sub-module id. A sub-module missing from its composite's map defaults to active. */
+export async function getSubStateMap(): Promise<Record<string, Record<string, boolean>>> {
+  return getStored(KEYS.subState, {});
+}
+
+export async function setSubModuleActive(id: string, subId: string, active: boolean): Promise<void> {
+  const map = await getSubStateMap();
+  map[id] = { ...map[id], [subId]: active };
+  await setStored(KEYS.subState, map);
 }
 
 /**

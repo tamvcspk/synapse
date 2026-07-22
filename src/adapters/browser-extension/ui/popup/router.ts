@@ -26,6 +26,7 @@ export interface RouterHandlers {
   onUpload(): void;
   onRefresh(): void;
   onOpenModule(entry: RegistryEntry): void;
+  onOpenSteps(entry: RegistryEntry): void;
   onNavigate(next: View): void;
   onConsentApprove(): void;
   onConsentDeny(): void;
@@ -48,6 +49,7 @@ export async function render(
         onUpload: handlers.onUpload,
         onRefresh: handlers.onRefresh,
         onOpenModule: handlers.onOpenModule,
+        onOpenSteps: handlers.onOpenSteps,
       },
       listProps,
     );

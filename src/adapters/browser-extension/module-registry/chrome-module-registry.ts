@@ -9,9 +9,11 @@ import {
   getActivationMap,
   getGrantsMap,
   getManifestReports,
+  getSubStateMap,
   getUploadedSources,
   setGrants,
   setModuleActive,
+  setSubModuleActive as persistSubModuleActive,
   setUploadedSource,
   type StoredManifestReport,
 } from './storage';
@@ -72,6 +74,10 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     await setGrants(id, capabilities);
   }
 
+  async setSubModuleActive(id: string, subId: string, active: boolean): Promise<void> {
+    await persistSubModuleActive(id, subId, active);
+  }
+
   async uploadModule(source: string): Promise<UploadResult> {
     const id = crypto.randomUUID();
     try {
@@ -88,14 +94,15 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
   }
 
   private async buildEntries(): Promise<RegistryEntry[]> {
-    const [activation, grants, uploaded, reports] = await Promise.all([
+    const [activation, grants, uploaded, reports, subStates] = await Promise.all([
       getActivationMap(),
       getGrantsMap(),
       getUploadedSources(),
       getManifestReports(),
+      getSubStateMap(),
     ]);
 
-    const bundled = await this.buildBundledEntries(activation, grants);
+    const bundled = await this.buildBundledEntries(activation, grants, subStates);
     const uploadedEntries = await this.buildUploadedEntries(uploaded, reports, activation, grants);
     const entries = [...bundled, ...uploadedEntries];
 
@@ -114,6 +121,7 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
   private async buildBundledEntries(
     activation: Record<string, boolean>,
     grants: Record<string, Capability[]>,
+    subStates: Record<string, Record<string, boolean>>,
   ): Promise<RegistryEntry[]> {
     const entries: RegistryEntry[] = [];
     // Merges dom Modules (bundled-modules.ts) with browser-specific non-dom Modules
@@ -145,6 +153,10 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
       if (mod.uiSchema) entry.uiSchema = mod.uiSchema;
       if (mod.label) entry.label = mod.label;
       if (mod.description) entry.description = mod.description;
+      if (mod.subModules) {
+        entry.subModules = mod.subModules;
+        entry.subState = subStates[mod.id] ?? {};
+      }
 
       entries.push(entry);
     }

@@ -9,6 +9,12 @@
 export interface HtmlToMarkdownOptions {
   /** Resolves relative href/src attributes to absolute URLs via `new URL(value, baseUrl)`. */
   baseUrl: string;
+  /** Optional hook: given an `<img>`'s resolved absolute URL, returns the URL/path to actually
+   * emit in the Markdown — defaults to the absolute URL unchanged. Generic mechanism (no opinion
+   * on *why* a URL might be rewritten, docs/design.md §9) — the policy (e.g. pointing at a
+   * locally-fetched copy instead of the remote original) belongs to the caller, see
+   * reader-mode-converter.module.ts. */
+  resolveImageUrl?: (absoluteUrl: string) => string;
 }
 
 const BLOCK_TAGS = new Set([
@@ -120,7 +126,9 @@ function renderNode(node: Node, options: HtmlToMarkdownOptions): string {
     case 'IMG': {
       const src = el.getAttribute('src');
       const alt = el.getAttribute('alt') ?? '';
-      return src ? `![${alt}](${resolveUrl(src, options.baseUrl)})` : '';
+      if (!src) return '';
+      const absolute = resolveUrl(src, options.baseUrl);
+      return `![${alt}](${options.resolveImageUrl?.(absolute) ?? absolute})`;
     }
     case 'LI':
       return `\n- ${renderChildren(el, options).trim()}`;

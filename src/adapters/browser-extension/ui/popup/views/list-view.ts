@@ -11,6 +11,11 @@ export interface ListViewCallbacks {
   /** Navigation Flow (docs/ROADMAP.md #2): row/icon click for any entry carrying a uiSchema —
    * router.ts decides whether that means "open Management View" or "trigger run() directly". */
   onOpenModule(entry: RegistryEntry): void;
+  /** Composite Module (docs/ROADMAP.md #3): opens the Dashboard's per-step toggle view — a
+   * separate action from `onOpenModule` since a Composite Module's own `uiSchema` (if any) can be
+   * an Action schema (triggers run() directly), independent of whether it also has sub-steps to
+   * configure. Only shown when `entry.subModules` is non-empty. */
+  onOpenSteps(entry: RegistryEntry): void;
 }
 
 export interface ListViewProps {
@@ -75,6 +80,15 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
         )
       : null;
 
+  // Composite Module (docs/ROADMAP.md #3) — a text button (not another icon; this popup is a small
+  // fixed-width window, and "Steps" reads clearer than an ambiguous glyph) opening the Dashboard's
+  // per-step toggle view (docs/ROADMAP.md #1's rebuild) — kept independent of gearBtn since a
+  // Composite Module can also have its own Action/Collection uiSchema at the same time.
+  const stepsBtn =
+    entry.status === 'ok' && entry.subModules && entry.subModules.length > 0
+      ? button({ title: 'Configure steps', onclick: () => callbacks.onOpenSteps(entry) }, 'Steps')
+      : null;
+
   return li(
     { class: 'module-row' + (entry.status !== 'ok' ? ' disabled' : '') },
     label,
@@ -88,6 +102,7 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
     // Action-icon + toggle grouped together, visually adjacent, separate from label/reason/grant.
     div(
       { class: 'row-actions' },
+      stepsBtn,
       gearBtn,
       input({
         type: 'checkbox',

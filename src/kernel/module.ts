@@ -41,6 +41,14 @@ export interface Module<In = unknown, Out = unknown> {
    * popup show a Gear/Arrow icon for this Module; its `kind` decides the icon's behavior. */
   uiSchema?: UISchema;
   /**
+   * Composite Module (docs/ROADMAP.md #3) — the ordered list of sub-modules this Module runs
+   * sequentially inside its own `run()` (see `kernel/composite-module.ts`'s `createCompositeModule`).
+   * Purely declarative metadata for the Registry UI to render a per-step bypass toggle
+   * (`RegistryEntry.subState`) — the Kernel/Registry never invokes these sub-modules directly,
+   * only this Module's own `run()` does.
+   */
+  subModules?: { id: string; label?: string }[];
+  /**
    * Read-side counterpart to a `'collection'` uiSchema's write path (CollectionCommand, handled
    * inside `run()`) — the Module's own storage read, self-registered here instead of the
    * Management View (docs/ROADMAP.md #2/#2.5) importing a specific module's storage file by name.

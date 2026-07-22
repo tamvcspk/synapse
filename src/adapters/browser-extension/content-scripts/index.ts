@@ -16,9 +16,15 @@ for (const mod of domModules) {
   registerDomModule(mod);
 }
 
+// 'reader-mode-converter' now fetches every image on the page (docs/ROADMAP.md #1's rebuild as a
+// Composite Module) — no longer a cheap smoke test, so it's excluded from the automatic per-page
+// run below (kept explicit rather than a generic opt-out field, same "only one thing needs this"
+// style as the mock-config relay above).
+const AUTORUN_EXCLUDED = new Set(['reader-mode-converter']);
+
 // One-off smoke-test invocation per active 'dom' Module, so loading the extension gives
 // immediate visual confirmation that the Kernel foundation + auto-discovery wire up correctly.
-for (const mod of domModules) {
+for (const mod of domModules.filter((mod) => !AUTORUN_EXCLUDED.has(mod.id))) {
   void (async () => {
     if (!(await isModuleActive(mod.id))) return;
     try {

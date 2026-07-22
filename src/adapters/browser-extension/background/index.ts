@@ -2,6 +2,7 @@ import { Kernel } from '../../../kernel';
 import type { Module } from '../../../kernel/module';
 import { ServiceInjector } from '../../../kernel/service-injector';
 import { resolveWorkflowSteps, type Workflow } from '../../../kernel/workflow';
+import { createCompositeModule } from '../../../kernel/composite-module';
 import { registerRpcHandler } from '../module-registry/rpc-handler';
 import { BACKGROUND_MODULES } from '../module-registry/background-modules';
 import { setUserScriptsPermissionGranted } from '../module-registry/storage';
@@ -74,3 +75,26 @@ if (demoResolution.missing.length === 0) {
     console.log('Synapse: workflow demo ->', result); // expected "start B A"
   });
 }
+
+// Smoke-test for Composite Module (kernel/composite-module.ts, docs/ROADMAP.md #3): proves
+// createCompositeModule's own sequential dispatch + bypass logic, reusing the same demoModules
+// above rather than registering a fake business Module into the Registry. `getSubState` stands in
+// for RegistryEntry.subState — a real Composite Module instance wires this to the chrome.storage
+// read the Adapter already has (see chrome-module-registry.ts's getSubStateMap).
+let demoBypassAppendB = false;
+const demoComposite = createCompositeModule({
+  id: 'demo-composite',
+  subModules: demoModules,
+  getSubState: async () => (demoBypassAppendB ? { 'append-b': false } : {}),
+  onSubFailure: (failure) => console.error(`Synapse: composite demo step "${failure.moduleId}" failed`, failure.error),
+});
+kernel
+  .run([demoComposite], 'start')
+  .then((result) => {
+    console.log('Synapse: composite demo (no bypass) ->', result); // expected "start A B"
+    demoBypassAppendB = true;
+    return kernel.run([demoComposite], 'start');
+  })
+  .then((result) => {
+    console.log('Synapse: composite demo (append-b bypassed) ->', result); // expected "start A"
+  });

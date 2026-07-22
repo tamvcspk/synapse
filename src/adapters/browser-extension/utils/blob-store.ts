@@ -90,3 +90,15 @@ export function bytesToBase64(bytes: ArrayBuffer): string {
   for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte);
   return btoa(binary);
 }
+
+/** Inverse of `bytesToBase64` — kept here rather than duplicated, unlike
+ * `main-world/network-interceptor.ts`'s own copy (that one exists specifically because a
+ * MAIN-world bundle can't safely import this file's `indexedDB`-touching functions transitively;
+ * this module's own call sites — popup, Dashboard — share the extension's IndexedDB origin, so no
+ * such isolation concern applies here). */
+export function base64ToBytes(base64: string): ArrayBuffer {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}

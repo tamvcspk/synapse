@@ -5,6 +5,7 @@ import { isCollectionSchema } from '../../../../kernel/ui-schema';
 import { ChromeModuleRegistryService } from '../../module-registry/chrome-module-registry';
 import { isUserScriptsPermissionGranted } from '../../module-registry/storage';
 import { triggerModuleAction } from './module-trigger';
+import { openReviewPage } from './review-handoff';
 import { render as renderView, type RouterHandlers, type View } from './router';
 
 const registry = new ChromeModuleRegistryService();
@@ -14,6 +15,10 @@ const root = document.getElementById('root')!;
 // CRUD flow that used to be the popup's 'management'/'item-form' views. Path must match the entry
 // key vite.config.ts registers for `ui/dashboard/index.html`.
 const DASHBOARD_PATH = 'src/adapters/browser-extension/ui/dashboard/index.html';
+// The Review page (docs/ROADMAP.md #3) — a standalone Tab for an Action-schema module whose
+// uiSchema declares `resultView: 'files'`. Path must match the entry key vite.config.ts registers
+// for `ui/review/index.html`.
+const REVIEW_PATH = 'src/adapters/browser-extension/ui/review/index.html';
 
 let view: View = { kind: 'list' };
 let entries: RegistryEntry[] = [];
@@ -54,6 +59,7 @@ const handlers: RouterHandlers = {
   onUpload: () => fileInput.click(),
   onRefresh: handleRefresh,
   onOpenModule: handleOpenModule,
+  onOpenSteps: handleOpenSteps,
   onNavigate: navigate,
   onConsentApprove: handleConsentApprove,
   onConsentDeny: () => navigate({ kind: 'list' }),
@@ -63,14 +69,24 @@ const handlers: RouterHandlers = {
 // page in its own Tab (no longer an in-popup view — see DASHBOARD_PATH above); an Action schema
 // (no persisted collection, e.g. reader-mode-converter) triggers run() directly and shows the
 // result in place, per the schema's shape rather than a boolean flag.
+/** Shared by the Collection-schema branch below and `handleOpenSteps` — both just need the
+ * Dashboard tab open on this module's id, closing the popup right after. */
+function openDashboard(entry: RegistryEntry): void {
+  const url = `${chrome.runtime.getURL(DASHBOARD_PATH)}?moduleId=${encodeURIComponent(entry.id)}`;
+  void chrome.tabs.create({ url });
+  window.close();
+}
+
+function handleOpenSteps(entry: RegistryEntry): void {
+  openDashboard(entry);
+}
+
 async function handleOpenModule(entry: RegistryEntry): Promise<void> {
   const schema = entry.uiSchema;
   if (!schema) return;
 
   if (isCollectionSchema(schema)) {
-    const url = `${chrome.runtime.getURL(DASHBOARD_PATH)}?moduleId=${encodeURIComponent(entry.id)}`;
-    void chrome.tabs.create({ url });
-    window.close();
+    openDashboard(entry);
     return;
   }
 
@@ -83,6 +99,23 @@ async function handleOpenModule(entry: RegistryEntry): Promise<void> {
       ? 'This page could not be reached (try reloading the tab, or it may be a restricted page). '
       : '';
     navigate({ kind: 'action-result', title: `${entry.label ?? entry.id} — Error`, content: `${hint}${result.error ?? 'Unknown error'}`, isError: true });
+    return;
+  }
+
+  if (schema.resultView === 'files') {
+    const outcome = await openReviewPage(result.data);
+    if (!outcome.ok) {
+      navigate({
+        kind: 'action-result',
+        title: `${entry.label ?? entry.id} — Error`,
+        content: outcome.error ?? 'Unknown error',
+        isError: true,
+      });
+      return;
+    }
+    const url = `${chrome.runtime.getURL(REVIEW_PATH)}?reviewId=${encodeURIComponent(outcome.reviewId!)}`;
+    void chrome.tabs.create({ url });
+    window.close();
     return;
   }
 

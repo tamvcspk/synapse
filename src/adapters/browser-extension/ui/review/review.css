@@ -1,0 +1,25 @@
+header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1em;
+}
+
+header h1 {
+  margin: 0;
+}
+
+.review-markdown {
+  width: 100%;
+  min-height: 60vh;
+  font-family: var(--pico-font-family-monospace, monospace);
+  white-space: pre-wrap;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}

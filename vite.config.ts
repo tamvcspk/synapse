@@ -16,6 +16,9 @@ export default defineConfig({
         // matter for output path; Vite preserves the input path (matches how manifest.config.ts's
         // action.default_popup path is mirrored in dist).
         dashboard: 'src/adapters/browser-extension/ui/dashboard/index.html',
+        // Review page (docs/ROADMAP.md #3) — same "extra Vite HTML entry" treatment as `dashboard`
+        // above, opened the same way (chrome.tabs.create from the popup), no manifest field fits it.
+        review: 'src/adapters/browser-extension/ui/review/index.html',
       },
     },
   },

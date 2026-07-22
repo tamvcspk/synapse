@@ -23,6 +23,13 @@ export interface RegistryEntry {
   grantedCapabilities: Capability[];
   /** Mirrors Module.uiSchema — presence drives the popup's Gear/Arrow icon (docs/ROADMAP.md #2). */
   uiSchema?: UISchema;
+  /** Mirrors Module.subModules (docs/ROADMAP.md #3) — presence drives the popup's per-step
+   * bypass toggles for a Composite Module. */
+  subModules?: { id: string; label?: string }[];
+  /** Per-step bypass state for a Composite Module's `subModules` — keyed by sub-module id, `false`
+   * means that step is skipped (docs/ROADMAP.md #3). A step missing from this map is treated as
+   * active (not bypassed). Absent entirely when `subModules` is absent. */
+  subState?: Record<string, boolean>;
 }
 
 export interface UploadResult {
@@ -43,4 +50,7 @@ export interface ModuleRegistryService {
   uploadModule(source: string): Promise<UploadResult>;
   grantCapabilities(id: string, capabilities: Capability[]): Promise<void>;
   refresh(): Promise<RegistryEntry[]>;
+  /** Toggles one sub-module's bypass state on a Composite Module (docs/ROADMAP.md #3). Only
+   * meaningful for a `RegistryEntry` whose `subModules` includes `subId`. */
+  setSubModuleActive(id: string, subId: string, active: boolean): Promise<void>;
 }

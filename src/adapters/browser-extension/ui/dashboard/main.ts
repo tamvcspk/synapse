@@ -6,6 +6,7 @@ import { ChromeModuleRegistryService } from '../../module-registry/chrome-module
 import { getModuleDataSource, type ModuleDataSource } from '../module-data-sources';
 import { renderManagementView } from './views/management-view';
 import { renderItemFormView } from './views/item-form-view';
+import { renderStepsView } from './views/steps-view';
 
 /**
  * Dashboard page (docs/ROADMAP.md #2.5): a standalone Tab (opened via `chrome.tabs.create` from the
@@ -20,7 +21,7 @@ const registry = new ChromeModuleRegistryService();
 const root = document.getElementById('root')!;
 const moduleId = new URLSearchParams(location.search).get('moduleId');
 
-type View = { kind: 'management' } | { kind: 'item-form'; itemId?: string };
+type View = { kind: 'management' } | { kind: 'item-form'; itemId?: string } | { kind: 'steps' };
 
 let view: View = { kind: 'management' };
 let entry: RegistryEntry | undefined;
@@ -47,14 +48,29 @@ async function load(): Promise<void> {
   schema = entry?.uiSchema && isCollectionSchema(entry.uiSchema) ? entry.uiSchema : undefined;
   dataSource = entry && getModuleDataSource(entry.id);
 
-  if (!entry || !schema || !dataSource) {
-    renderError(`Module "${moduleId}" has no manageable collection.`);
+  if (!entry) {
+    renderError(`Module "${moduleId}" was not found.`);
     return;
   }
 
   document.title = `Synapse — ${entry.label ?? entry.id}`;
-  items = await dataSource.list();
-  render();
+
+  if (schema && dataSource) {
+    items = await dataSource.list();
+    if (view.kind === 'steps') view = { kind: 'management' };
+    render();
+    return;
+  }
+
+  // No Collection schema (e.g. an Action-schema Composite Module like Reader Mode Converter,
+  // docs/ROADMAP.md #3) — the per-step bypass view is the only thing this page can show it.
+  if (entry.subModules && entry.subModules.length > 0) {
+    view = { kind: 'steps' };
+    render();
+    return;
+  }
+
+  renderError(`Module "${moduleId}" has no manageable collection or configurable steps.`);
 }
 
 function renderError(message: string): void {
@@ -70,11 +86,22 @@ function navigate(next: View): void {
 }
 
 function render(): void {
-  if (!entry || !schema || !dataSource) return;
+  if (!entry) return;
   const activeEntry = entry;
+  const currentView = view;
+
+  if (currentView.kind === 'steps') {
+    renderStepsView(root, activeEntry, {
+      onToggleSub: (subId, active) => {
+        void registry.setSubModuleActive(activeEntry.id, subId, active).then(load);
+      },
+    });
+    return;
+  }
+
+  if (!schema || !dataSource) return;
   const activeSchema = schema;
   const activeDataSource = dataSource;
-  const currentView = view;
 
   if (currentView.kind === 'management') {
     const idField = activeSchema.idField ?? 'id';
