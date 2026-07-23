@@ -1,52 +1,8 @@
+import { Readability } from '@mozilla/readability';
 import type { Module } from '../../../../kernel/module';
 import { createCompositeModule } from '../../../../kernel/composite-module';
 import { htmlToMarkdown } from '../../../../shared/html-to-markdown';
 import { bytesToBase64 } from '../../utils/blob-store';
-
-/**
- * ReaderDistiller (docs/ROADMAP.md #1): policy, not mechanism — decides which DOM node counts as
- * "the content" via a text-density heuristic. Colocated with the Module (not src/shared/) because
- * this judgment call is specific to how reader-mode-converter reads a page, not a generic,
- * domain-agnostic hook (docs/design.md §9).
- */
-const CANDIDATE_SELECTOR = 'article, main, [role="main"], div, section';
-const MIN_CONTENT_LENGTH = 140;
-
-function isVisible(el: Element): boolean {
-  return el instanceof HTMLElement && el.offsetWidth > 0;
-}
-
-function textLength(el: Element): number {
-  return (el.textContent ?? '').trim().length;
-}
-
-function linkTextLength(el: Element): number {
-  return Array.from(el.querySelectorAll('a')).reduce((sum, a) => sum + (a.textContent?.trim().length ?? 0), 0);
-}
-
-/** Scores each visible block candidate by "real text" density (total length minus link-text
- * length, since nav/sidebar noise tends to be mostly links) and returns the best match, falling
- * back to document.body when nothing clears MIN_CONTENT_LENGTH. */
-function distillContentNode(doc: Document): Element {
-  let best: Element = doc.body;
-  let bestScore = 0;
-
-  for (const candidate of Array.from(doc.querySelectorAll(CANDIDATE_SELECTOR))) {
-    if (!isVisible(candidate)) continue;
-
-    const total = textLength(candidate);
-    if (total < MIN_CONTENT_LENGTH) continue;
-
-    const density = (total - linkTextLength(candidate)) / total;
-    const score = total * density;
-    if (score > bestScore) {
-      bestScore = score;
-      best = candidate;
-    }
-  }
-
-  return best;
-}
 
 /**
  * Reader Mode Converter (docs/ROADMAP.md #1, rebuilt as a Composite Module for #3): load dom →
@@ -55,12 +11,14 @@ function distillContentNode(doc: Document): Element {
  * same accumulating shape, so bypassing a step degrades gracefully by construction — the next step
  * just sees whatever the previous one already put there, no special-case handling needed.
  *
- * Deliberately entirely read-only against the *live* `document` — never cloned, never mutated.
- * `distillContentNode` (and `htmlToMarkdown`'s own hidden-element check) rely on `el.offsetWidth`,
- * which only reflects reality for nodes still attached to the rendered page; cloning the document
- * up front to allow safe mutation would detach everything from layout and silently break every
- * visibility check. "Clean" narrows down which node counts as content — it never strips/removes
- * anything from the page the user is actually looking at.
+ * "Clean" uses Mozilla's `@mozilla/readability` (the library behind Firefox's Reader View) instead
+ * of a hand-rolled heuristic — battle-tested against real-world page markup rather than one
+ * text-density formula. Readability **mutates** the document it's given, so `load-dom` hands it a
+ * detached clone (its own documented usage pattern) rather than the live page — safe here because,
+ * unlike a hand-rolled distiller keyed on `el.offsetWidth`, Readability's own visibility checks are
+ * attribute/inline-style-based (`hidden`, `aria-hidden`, `style.display`), not layout-dependent, and
+ * `html-to-markdown.ts`'s hidden-element check was updated to match for the same reason (a detached
+ * clone never has real layout to read `offsetWidth` from).
  */
 interface ReaderPipelineValue {
   doc: Document;
@@ -94,16 +52,25 @@ const LoadDomStep: Module<void, ReaderPipelineValue> = {
   label: 'Load DOM',
   needs: ['dom'],
   async run() {
-    return { doc: document, root: document.body, baseUrl: document.baseURI, title: document.title, images: [] };
+    // Cloned once here (not inside `clean`) so bypassing `clean` still gets a valid, if
+    // unprocessed, `root` to fall back to (the same clone's <body>).
+    const doc = document.cloneNode(true) as Document;
+    return { doc, root: doc.body, baseUrl: document.baseURI, title: document.title, images: [] };
   },
 };
 
 const CleanStep: Module<ReaderPipelineValue, ReaderPipelineValue> = {
   id: 'reader-mode-converter/clean',
-  label: 'Clean content',
+  label: 'Clean content (Readability)',
   needs: ['dom'],
   async run(input) {
-    return { ...input, root: distillContentNode(input.doc) };
+    // Custom serializer: returns the article's root Element directly instead of Readability's
+    // default (an HTML string) — avoids reparsing a string back into a DOM node just to hand it
+    // to htmlToMarkdown, which already resolves `<img>`/`<a>` URLs against `baseUrl` itself.
+    const reader = new Readability<Element>(input.doc, { serializer: (el) => el as unknown as Element });
+    const article = reader.parse();
+    if (!article?.content) return input; // not readerable — fall back to the raw cloned <body>
+    return { ...input, root: article.content, title: article.title || input.title };
   },
 };
 
@@ -197,6 +164,7 @@ const ConvertMarkdownStep: Module<ReaderPipelineValue, ReaderModeResult> = {
 
 export const ReaderModeConverterModule: Module<void, ReaderModeResult> = createCompositeModule({
   id: 'reader-mode-converter',
+  label: 'Reader Mode Converter',
   description:
     'Distills the page into Markdown, fetching images so they can be reviewed and downloaded as a bundle.',
   subModules: [LoadDomStep, CleanStep, FetchImagesStep, ConvertMarkdownStep],

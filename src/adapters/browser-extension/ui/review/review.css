@@ -10,6 +10,29 @@ header h1 {
   margin: 0;
 }
 
+.review-filename {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.review-filename label {
+  white-space: nowrap;
+}
+
+.review-filename input {
+  margin: 0;
+}
+
+.form-actions label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-right: auto;
+  white-space: nowrap;
+}
+
 .review-markdown {
   width: 100%;
   min-height: 60vh;

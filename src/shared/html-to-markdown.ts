@@ -1,13 +1,24 @@
+import TurndownService from 'turndown';
+
 /**
- * Global SDK (docs/design.md §9): pure DOM traversal, no chrome.*, no I/O, no global reads
- * (document/window) of its own — the caller passes the root Node and a baseUrl explicitly, so
- * this survives being imported into a MAIN-world payload or any other restrictive execution
- * context. Mechanism only: it has no opinion on *which* node is "the content" — that's
- * ReaderDistiller's job (policy, owned by the reader-mode-converter Module).
+ * Global SDK (docs/design.md §9): no `chrome.*`, no I/O, no global reads (document/window) of its
+ * own during actual conversion — the caller passes the root Node and a baseUrl explicitly, so this
+ * survives being imported into a MAIN-world payload or any other restrictive execution context.
+ * Mechanism only: it has no opinion on *which* node is "the content" — that's the caller's job
+ * (e.g. reader-mode-converter.module.ts's Readability-based `clean` step).
+ *
+ * Wraps Turndown (mixmark-io/turndown) rather than hand-rolled tag-by-tag rendering — battle-tested
+ * CommonMark conversion instead of one file re-deriving it. Turndown's `RootNode` clones whatever
+ * Node it's given (`input.cloneNode(true)`) instead of parsing an HTML string through the DOM, as
+ * long as a Node — never a string — is what reaches `.turndown()`, which is what `htmlToMarkdown`
+ * always does; the "no document/window reads of its own" guarantee holds for that path. (Turndown
+ * does probe `window.DOMParser` once at import time to pick its string-parsing strategy — inert and
+ * guarded, since that strategy is only ever invoked for a string input, which never happens here.)
  */
 
 export interface HtmlToMarkdownOptions {
-  /** Resolves relative href/src attributes to absolute URLs via `new URL(value, baseUrl)`. */
+  /** Resolves relative href/src attributes to absolute URLs via `new URL(value, baseUrl)` —
+   * Turndown leaves them exactly as authored, so this file still owns that resolution. */
   baseUrl: string;
   /** Optional hook: given an `<img>`'s resolved absolute URL, returns the URL/path to actually
    * emit in the Markdown — defaults to the absolute URL unchanged. Generic mechanism (no opinion
@@ -17,37 +28,14 @@ export interface HtmlToMarkdownOptions {
   resolveImageUrl?: (absoluteUrl: string) => string;
 }
 
-const BLOCK_TAGS = new Set([
-  'P',
-  'DIV',
-  'SECTION',
-  'ARTICLE',
-  'HEADER',
-  'FOOTER',
-  'MAIN',
-  'UL',
-  'OL',
-  'LI',
-  'BLOCKQUOTE',
-  'PRE',
-  'FIGURE',
-  'FIGCAPTION',
-  'TABLE',
-  'TR',
-]);
-
-const HEADING_LEVEL: Record<string, number> = {
-  H1: 1,
-  H2: 2,
-  H3: 3,
-  H4: 4,
-  H5: 5,
-  H6: 6,
-};
-
-/** Ground rule: a node with no rendered box (offsetWidth <= 0) is treated as hidden and skipped. */
-function isHiddenElement(el: Element): boolean {
-  return el instanceof HTMLElement && el.offsetWidth <= 0;
+/** Ground rule: a node explicitly marked hidden is removed entirely (not just visually ignored).
+ * Attribute/inline-style based rather than `offsetWidth`-based — the root passed in isn't
+ * guaranteed to be attached to a live, rendered document (e.g. reader-mode-converter.module.ts
+ * feeds this a Readability-processed clone, which never has real layout), so a layout-dependent
+ * check would misfire as "everything is hidden" there. */
+function isHiddenElement(el: HTMLElement): boolean {
+  if (el.hidden || el.getAttribute('aria-hidden') === 'true') return true;
+  return el.style.display === 'none' || el.style.visibility === 'hidden';
 }
 
 function resolveUrl(value: string, baseUrl: string): string {
@@ -58,95 +46,43 @@ function resolveUrl(value: string, baseUrl: string): string {
   }
 }
 
-function collapseWhitespace(text: string): string {
-  return text.replace(/\s+/g, ' ');
-}
+/** Converts a DOM subtree into Markdown text via Turndown. The caller decides which root node
+ * represents "the content" — this function has no opinion on that. */
+export function htmlToMarkdown(root: Node, options: HtmlToMarkdownOptions): string {
+  const turndownService = new TurndownService({
+    headingStyle: 'atx',
+    bulletListMarker: '-',
+    codeBlockStyle: 'fenced',
+    hr: '---',
+  });
 
-function renderChildren(node: Node, options: HtmlToMarkdownOptions): string {
-  let out = '';
-  for (const child of Array.from(node.childNodes)) {
-    out += renderNode(child, options);
-  }
-  return out;
-}
+  turndownService.remove(['script', 'style', 'noscript']);
+  turndownService.remove((node) => isHiddenElement(node));
 
-function renderNode(node: Node, options: HtmlToMarkdownOptions): string {
-  if (node.nodeType === Node.TEXT_NODE) {
-    return collapseWhitespace(node.textContent ?? '');
-  }
-
-  if (node.nodeType !== Node.ELEMENT_NODE) {
-    return '';
-  }
-
-  const el = node as Element;
-  if (isHiddenElement(el)) {
-    return '';
-  }
-
-  const tag = el.tagName;
-
-  const headingLevel = HEADING_LEVEL[tag];
-  if (headingLevel) {
-    return `\n\n${'#'.repeat(headingLevel)} ${collapseWhitespace(el.textContent ?? '').trim()}\n\n`;
-  }
-
-  switch (tag) {
-    case 'BR':
-      return '\n';
-    case 'HR':
-      return '\n\n---\n\n';
-    case 'SCRIPT':
-    case 'STYLE':
-    case 'NOSCRIPT':
-      return '';
-    case 'STRONG':
-    case 'B':
-      return `**${renderChildren(el, options).trim()}**`;
-    case 'EM':
-    case 'I':
-      return `*${renderChildren(el, options).trim()}*`;
-    case 'CODE':
-      return `\`${el.textContent ?? ''}\``;
-    case 'PRE':
-      return `\n\n\`\`\`\n${el.textContent ?? ''}\n\`\`\`\n\n`;
-    case 'BLOCKQUOTE': {
-      const inner = renderChildren(el, options).trim();
-      const quoted = inner
-        .split('\n')
-        .map((line) => (line.length > 0 ? `> ${line}` : '>'))
-        .join('\n');
-      return `\n\n${quoted}\n\n`;
-    }
-    case 'A': {
-      const href = el.getAttribute('href');
-      const label = renderChildren(el, options).trim();
-      return href ? `[${label}](${resolveUrl(href, options.baseUrl)})` : label;
-    }
-    case 'IMG': {
+  // Turndown's built-in image/link rules use `src`/`href` exactly as authored — these two
+  // override them to resolve against `baseUrl` first, and route images through the
+  // `resolveImageUrl` hook. `addRule` un-shifts onto the front of Turndown's rule list, so these
+  // are matched before the built-in ones of the same tag.
+  turndownService.addRule('image-absolute-url', {
+    filter: 'img',
+    replacement: (_content, node) => {
+      const el = node as HTMLImageElement;
       const src = el.getAttribute('src');
-      const alt = el.getAttribute('alt') ?? '';
       if (!src) return '';
+      const alt = el.getAttribute('alt') ?? '';
       const absolute = resolveUrl(src, options.baseUrl);
       return `![${alt}](${options.resolveImageUrl?.(absolute) ?? absolute})`;
-    }
-    case 'LI':
-      return `\n- ${renderChildren(el, options).trim()}`;
-    case 'UL':
-    case 'OL':
-      return `\n\n${renderChildren(el, options).trim()}\n\n`;
-    default: {
-      const inner = renderChildren(el, options);
-      return BLOCK_TAGS.has(tag) ? `\n\n${inner.trim()}\n\n` : inner;
-    }
-  }
-}
+    },
+  });
 
-/** Converts a DOM subtree into Markdown text. Purely a rendering mechanism — the caller decides
- * which root node represents "the content" (see ReaderDistiller). */
-export function htmlToMarkdown(root: Node, options: HtmlToMarkdownOptions): string {
-  return renderNode(root, options)
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  turndownService.addRule('link-absolute-url', {
+    filter: 'a',
+    replacement: (content, node) => {
+      const el = node as HTMLAnchorElement;
+      const href = el.getAttribute('href');
+      return href ? `[${content}](${resolveUrl(href, options.baseUrl)})` : content;
+    },
+  });
+
+  return turndownService.turndown(root as unknown as HTMLElement).trim();
 }
