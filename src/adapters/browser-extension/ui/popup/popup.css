@@ -66,3 +66,8 @@ body {
 .action-result-form.is-error p {
   color: var(--pico-del-color);
 }
+
+.busy-view {
+  text-align: center;
+  padding: 1.5rem 0;
+}

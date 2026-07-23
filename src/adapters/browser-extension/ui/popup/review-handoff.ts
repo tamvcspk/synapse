@@ -13,9 +13,17 @@ export interface ReviewFile {
   base64: string;
 }
 
-export interface ReviewData {
+/** One file-per-page entry (docs/ROADMAP.md #1) — a single-page conversion has exactly one of
+ * these, Crawl & Convert Site has one per successfully-converted page. */
+export interface ReviewPage {
+  path: string;
   title: string;
   markdown: string;
+}
+
+export interface ReviewData {
+  title: string;
+  pages: ReviewPage[];
   files: ReviewFile[];
 }
 
@@ -30,7 +38,15 @@ function isReviewData(data: unknown): data is ReviewData {
   const record = data as Record<string, unknown>;
   return (
     typeof record.title === 'string' &&
-    typeof record.markdown === 'string' &&
+    Array.isArray(record.pages) &&
+    record.pages.every(
+      (p) =>
+        p &&
+        typeof p === 'object' &&
+        typeof (p as Record<string, unknown>).path === 'string' &&
+        typeof (p as Record<string, unknown>).title === 'string' &&
+        typeof (p as Record<string, unknown>).markdown === 'string',
+    ) &&
     Array.isArray(record.files) &&
     record.files.every(
       (f) =>
@@ -51,7 +67,7 @@ function isReviewData(data: unknown): data is ReviewData {
  */
 export async function openReviewPage(data: unknown): Promise<ReviewHandoffResult> {
   if (!isReviewData(data)) {
-    return { ok: false, error: "This module's result is not in the expected {title, markdown, files} shape." };
+    return { ok: false, error: "This module's result is not in the expected {title, pages, files} shape." };
   }
 
   const reviewId = crypto.randomUUID();
@@ -64,7 +80,7 @@ export async function openReviewPage(data: unknown): Promise<ReviewHandoffResult
   }
 
   await chrome.storage.session.set({
-    [`synapse:review:${reviewId}`]: { title: data.title, markdown: data.markdown, fileRefs },
+    [`synapse:review:${reviewId}`]: { title: data.title, pages: data.pages, fileRefs },
   });
 
   return { ok: true, reviewId };

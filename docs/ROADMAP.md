@@ -15,22 +15,140 @@ Trạng thái các hạng mục đang xét, dùng làm state memory giữa các 
 - **Rebuild thành Composite Module (mục 3), 4 bước tuần tự** trong [reader-mode-converter.module.ts](../src/adapters/browser-extension/content-scripts/modules/reader-mode-converter.module.ts), lắp qua `createCompositeModule` (giữ nguyên `id: 'reader-mode-converter'`, thêm `label: 'Reader Mode Converter'` để Main Registry View không hiện raw id): `load-dom` → `clean` → `fetch-images` → `convert-markdown`, mỗi bước đọc/mở rộng cùng một shape tích luỹ (`ReaderPipelineValue`) nên bypass một bước qua Dashboard's Steps view (mục 3) tự động an toàn — bước sau chỉ thấy giá trị mặc định bước trước để lại, không cần code phòng thủ riêng.
   - **`clean` dùng `@mozilla/readability` (thư viện đứng sau Firefox Reader View) thay vì heuristic tự viết** — quyết định đổi sau khi có yêu cầu cải thiện độ chính xác so với công thức mật độ chữ tự chế trước đó (`distillContentNode`, đã xoá hoàn toàn). Readability **mutate** document nó nhận (theo đúng usage pattern chính thức của thư viện), nên `load-dom` clone `document` (`document.cloneNode(true)`) trước khi đưa vào — an toàn vì Readability's check ẩn/hiện dựa vào attribute/inline-style (giống `isHiddenElement` đã sửa ở trên), không dựa `offsetWidth`, nên hoạt động đúng trên một cây tách rời không có layout thật. `new Readability<Element>(doc, {serializer: (el) => el})` — custom serializer trả thẳng DOM Element thay vì HTML string mặc định, khỏi phải parse lại string thành node. Readability tự chuẩn hoá `<img src>`/`<a href>` thành URL tuyệt đối qua `_fixRelativeUris` (dùng `doc.baseURI`) nên tới `fetch-images` phần lớn URL đã tuyệt đối sẵn; bypass "clean" thì `root` rơi về `<body>` của bản clone chưa qua Readability (chưa chuẩn hoá URL), nên `fetch-images` vẫn tự resolve qua `new URL(src, baseUrl)` để bao case đó.
   - `fetch-images`: `fetch()` thẳng trong content-script — Chrome cấp quyền cross-origin fetch cho content script y hệt background khi origin nằm trong `host_permissions` (đã có `<all_urls>`), nên **không cần hop qua Bus/background**. Mỗi ảnh: bọc try/catch riêng (fail một ảnh không hỏng cả bước — graceful fail), cap ~10MB/ảnh, bỏ qua `data:` URL (đã tự chứa đủ), dedupe theo URL tuyệt đối, base64-encode qua `bytesToBase64` (tái dùng từ [blob-store.ts](../src/adapters/browser-extension/utils/blob-store.ts) — an toàn vì bước này chỉ gọi hàm mã hoá byte thuần, không đụng `indexedDB` của file đó).
-  - `convert-markdown`: dựng `Map<absoluteUrl, localPath>` từ ảnh đã tải, truyền vào `resolveImageUrl` của `htmlToMarkdown` — markdown cuối cùng trỏ ảnh tới `images/<file>` cục bộ thay vì URL gốc. Trả về `{ title, markdown, files }` — shape mới, khác `{title, markdown}` cũ. `title` ưu tiên `article.title` (Readability's title, thường sạch hơn `document.title` — bỏ được hậu tố tên site) khi có, fallback `document.title`.
+  - `convert-markdown`: dựng `Map<absoluteUrl, localPath>` từ ảnh đã tải, truyền vào `resolveImageUrl` của `htmlToMarkdown` — markdown cuối cùng trỏ ảnh tới `images/<file>` cục bộ thay vì URL gốc. Trả về `{ title, markdown, files }` (kiểu nội bộ `PageConversionResult`, không export — xem "file-per-page" bên dưới cho shape public thật sự dispatcher trả ra). `title` ưu tiên `article.title` (Readability's title, thường sạch hơn `document.title` — bỏ được hậu tố tên site) khi có, fallback `document.title`.
 - **`content-scripts/index.ts`'s auto-run smoke test loại trừ `reader-mode-converter`** — trước đây mọi module `dom` được tự chạy 1 lần mỗi lần load trang (chỉ đọc DOM, vô hại); giờ bước fetch-images sẽ gọi `fetch()` mọi ảnh trên trang, nên module này bị loại khỏi vòng lặp đó (loại trừ tường minh, cùng phong cách "chỉ 1 chỗ cần cái này" đã dùng cho mock-config relay trong cùng file).
-- **Trigger:** `uiSchema: {kind: 'action', actionLabel: 'Convert to Markdown', resultView: 'files'}` — `resultView: 'files'` (mới, [ui-schema.ts](../src/kernel/ui-schema.ts)) báo cho popup biết kết quả có shape `{title, markdown, files}` và cần mở trang Review (xem "Cuối cùng — Review page + ZIP" bên dưới) thay vì `action-result-view` inline như trước.
+- **Trigger — `UIActionSchema` giờ mang một mảng `actions`, không phải một action đơn** ([ui-schema.ts](../src/kernel/ui-schema.ts), đổi để hỗ trợ mục "Crawl & Convert Site" ngay dưới đây — Reader Mode Converter là consumer duy nhất của `kind:'action'` lúc đổi, migration gọn trong 3 file: `ui-schema.ts`, `list-view.ts`, popup's `main.ts`): `{kind:'action', actions: [{id, actionLabel, resultView?}]}`. Popup's `list-view.ts` render một nút text ngắn mỗi action (thay vì icon `▶` đơn trước đây — không còn rõ nghĩa khi có >1 action); click vào tên module (label) mặc định chạy `actions[0]`. `resultView: 'files'` (không đổi ý nghĩa) báo cho popup biết kết quả action đó cần mở trang Review thay vì `action-result-view` inline — shape thật sự của kết quả là `{title, pages, files}` (xem "file-per-page" bên dưới), không phải `{title, markdown, files}` như bản đầu.
 - **Dependency mới: `@mozilla/readability`** (runtime, ship vào bundle content-scripts qua `bundled-modules.ts`'s glob) — ngoại lệ so với "không thêm dependency" đã theo trước đó (vd ZIP writer tự viết bên dưới), chấp nhận vì đây là thư viện chuẩn ngành cho đúng bài toán này, không phải tiện lợi vặt.
 - **Sau này (chưa làm, cố ý — chưa có yêu cầu cụ thể):** một bước thứ 5 giữa `fetch-images` và `convert-markdown` để nhận diện ảnh là diagram → convert qua Mermaid; ảnh thường thì giữ nguyên như hiện tại.
 
+### Crawl & Convert Site — action thứ 2 (mới)
+
+Action thứ 2 trên cùng Module (không phải Module/Crawler riêng — đã cân nhắc và loại phương án đó
+lúc lập kế hoạch), nằm cạnh "Convert" trong danh sách `actions`: `{id: 'crawl-site', actionLabel:
+'Crawl', resultView: 'files'}`. Tự động tìm toàn bộ trang doc cùng site, convert từng trang qua
+đúng pipeline 4 bước ở trên, gộp lại thành 1 bundle — dùng lại 100% Review/ZIP page, không sửa gì ở
+`ui/review/`.
+
+- **Discovery, sitemap trước (`discoverUrlsFromSitemap`):** thử đọc `robots.txt` tìm directive
+  `Sitemap:` trước (cách chuẩn một site tự khai báo vị trí khác mặc định), rồi mới thử
+  `/sitemap.xml`. Parse qua `DOMParser(..., 'application/xml')`, đọc mọi `<loc>`. Trả về `undefined`
+  (không phải mảng rỗng) khi không tìm được gì hợp lệ — để caller biết fallback sang nav-crawl,
+  phân biệt với "site có 0 trang".
+- **Fallback — auto-expand nav (`expandAllNavButtons` + `discoverUrlsFromNav`):** click mọi
+  `button[aria-expanded="false"]` trong `nav, [role="navigation"]`, đợi ~150ms, lặp lại (mở 1 mục
+  có thể lộ mục con) tới khi hết nút collapsed hoặc chạm cap ~20 vòng (guard site không bao giờ ổn
+  định), rồi đọc mọi `<a href>` còn lại trong các nav đó.
+- **Lọc + cap:** chỉ giữ URL cùng origin (`new URL(u).origin === location.origin`) — mặc định đơn
+  giản nhất, không cần thêm UI hỏi path-prefix. `MAX_CRAWL_PAGES = 200` chặn crawl chạy vô tận
+  (cùng vai trò với `MAX_IMAGE_BYTES` — graceful partial result, không phải hard fail).
+- **Quyết định kiến trúc quan trọng nhất: `fetch()` + `DOMParser`, không phải `chrome.tabs`
+  navigate.** Convert một trang REMOTE không cần mở tab điều hướng tới nó — `fetch(url)` rồi `new
+  DOMParser().parseFromString(html, 'text/html')` cho ra một `Document` mà Readability/pipeline
+  hiện có chạy được y hệt trang live, nhờ `LoadDomStep` được sửa: nếu input đã là một
+  `ReaderPipelineValue` đầy đủ (duck-type qua có `root`) thì trả nguyên, không clone `document` live
+  — đây là điểm nối cho phép tái dùng **nguyên** `clean`/`fetch-images`/`convert-markdown`, không
+  sửa gì cả 3 bước đó. Toàn bộ tính năng vẫn nằm gọn trong 1 content-script Module, không cần
+  background/`chrome.tabs` orchestration.
+  - **Đánh đổi đã chấp nhận:** trang phải có nội dung sẵn trong raw HTML response (server-rendered/
+    prerendered) mới convert ra được gì — trang thuần client-rendered (không SSR) sẽ chỉ ra markdown
+    rỗng/thưa cho đúng trang đó (vì JS của nó không bao giờ chạy ở đây), không phải lỗi chặn cả
+    crawl — graceful fail, cùng phong cách với 1 ảnh fetch lỗi ở `fetch-images`.
+- **`crawlSite`:** tuần tự từng URL (không song song), delay ~200ms giữa các fetch (phép lịch sự
+  tối thiểu, cùng tinh thần với đợi 150ms trong vòng lặp expand-nav). Trang lỗi fetch/parse bị bỏ
+  qua, crawl tiếp tục. Sau mỗi trang, bắn (fire-and-forget) `chrome.runtime.sendMessage({type:
+  'reader-mode-crawl-progress', done, total})` cho popup's busy view (xem bên dưới) — bỏ qua lỗi
+  nếu không ai đang lắng nghe, không phải là exception thật.
+- **Output — file-per-page, không phải 1 file gộp (đổi sau khi thử thật trên angular.dev ra 200
+  trang, đụng `MAX_CRAWL_PAGES`, và thấy 1 file gộp 10k+ dòng không dùng được).** Shape public đổi
+  từ `{title, markdown, files}` sang `{title, pages: {path, title, markdown}[], files}`
+  (`ReaderModePage`/`ReaderModeResult` mới trong reader-mode-converter.module.ts) — dùng chung cho
+  **cả hai** action, không phải riêng crawl: action "Convert" (1 trang) cũng trả `pages` với đúng 1
+  phần tử, để Review page không phải biết hai shape khác nhau tuỳ action, chỉ cần biết
+  `pages.length`.
+  - **`pathFromUrl(url)`:** suy ra đường dẫn file từ URL, mô phỏng cấu trúc site thật (không phải
+    đánh số `page-N` như bản đầu) — vd `https://angular.dev/guide/signals` → `guide/signals.md`,
+    root site → `index.md`. Mỗi segment path được `slugify()` (tách ra
+    [src/shared/slugify.ts](../src/shared/slugify.ts), dùng chung với Review page — xem bug diacritics
+    đã sửa ở mục dưới) **riêng lẻ**, không slugify cả pathname một lượt, để dấu `/` giữ nguyên vai trò
+    ranh giới thư mục thay vì bị gộp mất.
+  - **`uniquePagePath`:** de-dupe đường dẫn trùng (hai URL khác nhau có thể ra cùng slug) bằng hậu tố
+    số trước phần mở rộng — cùng thuật toán với `uniqueFileName` đã có cho ảnh.
+  - **`buildCrawlResult`:** gộp danh sách `{url, result}` (từ `pageComposite.run` mỗi trang) thành
+    `ReaderModeResult` — `title` lấy `location.hostname` (vd "angular.dev", thay vì chuỗi cứng
+    "Crawled Site" trước đây); ảnh mỗi trang được re-namespace theo path của chính trang đó (`/`
+    trong path đổi thành `-` làm tiền tố tên file ảnh) thay vì đánh số `page-<n>` như bản đầu — vẫn
+    tránh trùng tên ảnh giữa các trang khi gộp chung 1 zip.
+  - Action "Convert" (1 trang, trong dispatcher's `run()`): path mặc định `${slugify(title,
+    'reader-mode')}.md` — vẫn editable ở Review page như bản đầu (xem bên dưới), chỉ là tên field
+    logic bây giờ là `pages[0].path` thay vì một field `markdown` rời.
+- **Đánh đổi đã chấp nhận, chưa xử lý (flagged khi lập kế hoạch, chưa làm gì thêm):** popup vẫn
+  chờ response y hệt action "Convert" — đóng popup giữa chừng lúc crawl (click ra ngoài) sẽ mất kết
+  quả, vì response chỉ có 1 lần lúc kết thúc. Popup không tự đóng theo thời gian (chỉ đóng khi click
+  ra ngoài/Esc) nên rủi ro này giảm nếu người dùng cứ để yên popup — busy view (mục dưới) cập nhật
+  tiến trình liên tục chính là để tạo tín hiệu rõ ràng "đang chạy, đừng đóng", thay vì dựng hẳn kiến
+  trúc push-từ-background phức tạp hơn cho v1 này.
+- **Popup — busy view chung cho mọi action (mới, không riêng crawl):** [`router.ts`](../src/adapters/browser-extension/ui/popup/router.ts) thêm `View` kind `'busy'`; [`views/busy-view.ts`](../src/adapters/browser-extension/ui/popup/views/busy-view.ts) (mới) chỉ hiện 1 dòng message, không có nút huỷ. `main.ts`'s `handleOpenModule` navigate sang `busy` ngay khi trigger action (action nhanh chỉ flash thoáng qua), đăng ký lắng nghe `chrome.runtime.onMessage` cho message `reader-mode-crawl-progress` để cập nhật message (`"Crawling... 3/12 pages"`), gỡ listener khi `triggerModuleAction` resolve xong (thành công hay lỗi).
+
 ### Review page + ZIP download (mới)
 
-Kết quả `{title, markdown, files}` của một Action-schema Module có `resultView: 'files'` không hiện inline trong popup nữa — mở một Tab riêng, lớn, kiểu "print preview" (chỉ hiện text thô, không render markdown→HTML — quyết định đã chốt khi làm mục này), kèm nút Download ZIP.
+Kết quả `{title, pages, files}` của một Action-schema Module có `resultView: 'files'` không hiện
+inline trong popup nữa — mở một Tab riêng, lớn, kiểu "print preview" (chỉ hiện text thô, không
+render markdown→HTML — quyết định đã chốt khi làm mục này), kèm nút Download ZIP xuất ra đúng cấu
+trúc file-per-page (mục "Crawl & Convert Site" ở trên), không phải 1 file gộp.
 
-- **Handoff qua `ui/popup/review-handoff.ts` (mới):** `openReviewPage(data)` kiểm tra shape `{title, markdown, files}` một cách cấu trúc (không import type cụ thể của Reader Mode — giữ popup tổng quát cho mọi Action module tương lai dùng `resultView: 'files'`, cùng tinh thần `CollectionCommand<T>` tổng quát ở nơi khác). Bytes ảnh (`base64ToBytes`, mới trong [blob-store.ts](../src/adapters/browser-extension/utils/blob-store.ts)) lưu vào IndexedDB qua `putBlob` (popup cùng origin extension với background/Dashboard, khác content script — xem doc comment của blob-store.ts); phần text nhỏ `{title, markdown, fileRefs}` lưu tạm vào `chrome.storage.session` (không cần permission mới) dưới key `synapse:review:<reviewId>`.
-- **Trang [`ui/review/`](../src/adapters/browser-extension/ui/review/) (VanJS + Pico.css y hệt Dashboard):** đọc `?reviewId=`, `get`/`remove` một lần khỏi `chrome.storage.session` (one-shot, không nằm lại). Hiện `title` làm heading tĩnh; `markdown` trong một `<textarea>` **có thể sửa** (không còn `readonly` — người dùng có thể chỉnh sửa text trước khi tải về), Copy/Download đều đọc giá trị *hiện tại* của textarea, không phải `payload.markdown` gốc.
-  - **File name — editable, mới:** một `<input>` riêng, giá trị khởi tạo là kebab-case của `title` (`slugify()`), dùng làm tên cho cả file `.md` trong zip lẫn tên file `.zip` tải về — tách biệt với `title` hiển thị (heading không đổi được, chỉ tên file đổi được).
-    - **Bug đã sửa: `slugify` xoá sạch ký tự có dấu tiếng Việt thay vì bỏ dấu** — "Lần đầu công bố dữ liệu" từng ra `l-n-u-c-ng-b-d-li-u` (mỗi ký tự có dấu bị lọc bỏ trực tiếp bởi `[^a-z0-9]`, chỉ còn trơ phụ âm). `stripDiacritics()` (mới) chạy `normalize('NFD')` trước rồi lọc bỏ các code point trong khối "Combining Diacritical Marks" (`0x0300`–`0x036f`, viết bằng so sánh số chứ không phải regex-class ký tự Unicode literal, tránh nhúng ký tự tổ hợp khó phân biệt bằng mắt vào source) — bắt được phần lớn dấu tiếng Việt (huyền/sắc/hỏi/ngã/nặng, ă/â/ê/ô/ơ/ư) vì NFD phân rã chúng thành chữ cái gốc + dấu tổ hợp. Riêng `đ`/`Đ` không có phân rã canonical trong Unicode (là chữ cái riêng, không phải chữ+dấu) nên thay trực tiếp. Kết quả: "Lần đầu công bố dữ liệu 1.000 bộ gen người Việt" → `lan-dau-cong-bo-du-lieu-1-000-bo-gen-nguoi-viet`.
-  - **Toggle "Download images (N)" — mới:** checkbox riêng, mặc định bật, tự `disabled` khi không có ảnh nào (`fileRefs.length === 0`). Tắt đi thì `handleDownload` bỏ hẳn bước đọc IndexedDB/thêm `images/` vào zip (chỉ còn file `.md`) — markdown text vẫn giữ nguyên đường dẫn `images/<file>` như đã sửa, không tự viết lại thành URL gốc (người dùng tự chỉnh nếu cần, giữ scope tối giản). Best-effort `deleteBlob` sau khi zip xong **chỉ áp dụng cho ảnh thực sự được đưa vào lần tải đó** — bỏ qua khi toggle tắt, để lần tải sau (nếu bật lại) vẫn còn blob để dùng.
-- **ZIP — tự viết, không thêm dependency:** [`src/shared/zip.ts`](../src/shared/zip.ts) (mới, Global SDK thuần) — `buildZip(entries)` dựng ZIP method STORE (không nén — ảnh vốn đã là định dạng nén sẵn, markdown nhỏ, nên nén thêm lợi ích không đáng kể), tự viết bảng CRC32 + local file header + central directory + EOCD, không có ngoại lệ nào phụ thuộc `fflate`/thư viện khác. Nút Download ZIP dựng `<slug>.md` + (nếu toggle bật) `images/<fileName>` từ IndexedDB, `Blob`/`URL.createObjectURL` + `<a download>` (không cần permission `downloads`).
+- **Handoff qua `ui/popup/review-handoff.ts`:** `openReviewPage(data)` kiểm tra shape `{title,
+  pages: {path, title, markdown}[], files}` một cách cấu trúc (không import type cụ thể của Reader
+  Mode — giữ popup tổng quát cho mọi Action module tương lai dùng `resultView: 'files'`, cùng tinh
+  thần `CollectionCommand<T>` tổng quát ở nơi khác). Bytes ảnh (`base64ToBytes`, trong
+  [blob-store.ts](../src/adapters/browser-extension/utils/blob-store.ts)) lưu vào IndexedDB qua
+  `putBlob` (popup cùng origin extension với background/Dashboard, khác content script — xem doc
+  comment của blob-store.ts); phần text nhỏ `{title, pages, fileRefs}` lưu tạm vào
+  `chrome.storage.session` (không cần permission mới) dưới key `synapse:review:<reviewId>`.
+- **Trang [`ui/review/`](../src/adapters/browser-extension/ui/review/) (VanJS + Pico.css y hệt Dashboard):** đọc `?reviewId=`, `get`/`remove` một lần khỏi `chrome.storage.session` (one-shot, không nằm lại). Hiện `title` làm heading tĩnh; nội dung trang đang xem trong một `<textarea>` **có thể sửa** (không `readonly`), Copy/Download đều đọc giá trị *hiện tại* của textarea, không phải markdown gốc.
+  - **1 trang (`pages.length === 1`, action "Convert"): giữ nguyên UX ban đầu** — một `<input>`
+    editable, giá trị khởi tạo `pages[0].path` (bỏ đuôi `.md`), dùng làm tên file `.md` đó trong
+    zip. `slugify()` (kebab-case, xử lý dấu tiếng Việt đúng — xem bug đã sửa bên dưới) chuyển sang
+    sống ở [`src/shared/slugify.ts`](../src/shared/slugify.ts) thay vì local trong file này, vì
+    `reader-mode-converter.module.ts` (content-script) giờ cũng cần nó để suy path cho crawl.
+  - **Nhiều trang (`pages.length > 1`, action "Crawl") — mới, thay cho việc gộp hết vào 1 file:**
+    một `<select>` liệt kê `pages[i].path` (đường dẫn đã suy từ URL, xem mục "Crawl & Convert Site"
+    ở trên) — **không cho sửa path** (sửa tay hàng trăm đường dẫn không thực tế), chỉ chọn để
+    xem/sửa **nội dung**. Đổi lựa chọn trong `<select>` lưu lại nội dung textarea hiện tại vào đúng
+    phần tử `pages[i]` đang xem trước khi load nội dung trang mới vào — không mất chỉnh sửa khi
+    chuyển qua lại giữa các trang. Trước khi zip, `handleDownload` cũng lưu lại nội dung đang hiện
+    trong textarea (phòng trường hợp người dùng chưa đổi `<select>` sau khi sửa) rồi mới build zip
+    từ **toàn bộ** `pages` (không chỉ trang đang xem).
+    - **Bug đã sửa (từ bản đầu tiên của "1 file gộp"): `slugify` xoá sạch ký tự có dấu tiếng Việt
+      thay vì bỏ dấu** — "Lần đầu công bố dữ liệu" từng ra `l-n-u-c-ng-b-d-li-u` (mỗi ký tự có dấu
+      bị lọc bỏ trực tiếp bởi `[^a-z0-9]`, chỉ còn trơ phụ âm). `stripDiacritics()` chạy
+      `normalize('NFD')` trước rồi lọc bỏ các code point trong khối "Combining Diacritical Marks"
+      (`0x0300`–`0x036f`, viết bằng so sánh số chứ không phải regex-class ký tự Unicode literal,
+      tránh nhúng ký tự tổ hợp khó phân biệt bằng mắt vào source) — bắt được phần lớn dấu tiếng
+      Việt (huyền/sắc/hỏi/ngã/nặng, ă/â/ê/ô/ơ/ư) vì NFD phân rã chúng thành chữ cái gốc + dấu tổ
+      hợp. Riêng `đ`/`Đ` không có phân rã canonical trong Unicode nên thay trực tiếp. Kết quả: "Lần
+      đầu công bố dữ liệu 1.000 bộ gen người Việt" → `lan-dau-cong-bo-du-lieu-1-000-bo-gen-nguoi-viet`.
+  - **Toggle "Download images (N)":** checkbox riêng, mặc định bật, tự `disabled` khi không có ảnh
+    nào (`fileRefs.length === 0`). Tắt đi thì `handleDownload` bỏ hẳn bước đọc IndexedDB/thêm ảnh
+    vào zip (chỉ còn các file `.md`) — markdown text vẫn giữ nguyên đường dẫn `images/<file>` như
+    đã sửa, không tự viết lại thành URL gốc (người dùng tự chỉnh nếu cần, giữ scope tối giản).
+    Best-effort `deleteBlob` sau khi zip xong **chỉ áp dụng cho ảnh thực sự được đưa vào lần tải
+    đó** — bỏ qua khi toggle tắt, để lần tải sau (nếu bật lại) vẫn còn blob để dùng.
+  - **Bug đã sửa: double-prefix `images/images/...` trong zip** — `ReaderModeFile.fileName` (từ
+    content-script) đã tự mang tiền tố `images/` sẵn (`localPath`/`buildCrawlResult`'s
+    `imagePrefix`), nhưng `handleDownload` bản đầu tiên lại tự thêm `images/${ref.fileName}` một
+    lần nữa khi dựng zip entry. Sửa: dùng thẳng `ref.fileName` làm `name` của entry, không thêm
+    tiền tố lần hai.
+  - **Zip filename tách khỏi file name của trang đơn:** trước đây 1 input vừa đặt tên file `.md`
+    vừa đặt tên `.zip`; giờ tên file zip luôn là `${slugify(payload.title)}.zip` (dùng `title` tổng
+    — vd hostname cho crawl, tiêu đề bài viết cho convert 1 trang) — độc lập với tên file `.md` của
+    từng trang, đơn giản hoá logic khi có nhiều trang.
+- **ZIP — tự viết, không thêm dependency:** [`src/shared/zip.ts`](../src/shared/zip.ts) (Global SDK
+  thuần) — `buildZip(entries)` dựng ZIP method STORE (không nén — ảnh vốn đã là định dạng nén sẵn,
+  markdown nhỏ, nên nén thêm lợi ích không đáng kể), tự viết bảng CRC32 + local file header +
+  central directory + EOCD, không có ngoại lệ nào phụ thuộc `fflate`/thư viện khác. Mỗi `page.path`
+  (có thể chứa `/`, vd `guide/signals.md`) trở thành một entry riêng trong zip — `buildZip` không
+  cần sửa gì, tên entry có `/` tự nhiên tạo thư mục con khi giải nén, đúng "hệ thống file như
+  sitemap" đã yêu cầu.
 
 ## 2. Tách mock-config-section khỏi popup thành generic renderer
 

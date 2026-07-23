@@ -1,7 +1,8 @@
 import { Readability } from '@mozilla/readability';
-import type { Module } from '../../../../kernel/module';
+import type { Module, ModuleContext } from '../../../../kernel/module';
 import { createCompositeModule } from '../../../../kernel/composite-module';
 import { htmlToMarkdown } from '../../../../shared/html-to-markdown';
+import { slugify } from '../../../../shared/slugify';
 import { bytesToBase64 } from '../../utils/blob-store';
 
 /**
@@ -19,6 +20,12 @@ import { bytesToBase64 } from '../../utils/blob-store';
  * attribute/inline-style-based (`hidden`, `aria-hidden`, `style.display`), not layout-dependent, and
  * `html-to-markdown.ts`'s hidden-element check was updated to match for the same reason (a detached
  * clone never has real layout to read `offsetWidth` from).
+ *
+ * Two actions (docs/ROADMAP.md #1's Crawl & Convert Site): the ordinary single-page conversion
+ * below (`pageComposite`), and `crawlSite` — discovers every same-origin doc page and runs each one
+ * through that *same* pipeline. `LoadDomStep` is what makes that reuse possible: fed an already-built
+ * `ReaderPipelineValue` (from a fetched+parsed remote page), it passes it through unchanged instead
+ * of cloning the live document.
  */
 interface ReaderPipelineValue {
   doc: Document;
@@ -41,19 +48,40 @@ export interface ReaderModeFile {
   base64: string;
 }
 
-export interface ReaderModeResult {
+/** One page's conversion output — `pageComposite`'s own result shape, before it's wrapped (single
+ * page) or collected (crawl) into the public `ReaderModeResult` below. Not exported: callers of
+ * this Module only ever see the wrapped shape. */
+interface PageConversionResult {
   title: string;
   markdown: string;
   files: ReaderModeFile[];
 }
 
-const LoadDomStep: Module<void, ReaderPipelineValue> = {
+export interface ReaderModePage {
+  /** Relative file path within the downloaded bundle (docs/ROADMAP.md #1's file-per-page
+   * structure) — e.g. `guide/signals.md` for a crawled page, or an editable `<slug>.md` for a
+   * single-page conversion. Always ends in `.md`. */
+  path: string;
+  title: string;
+  markdown: string;
+}
+
+/** `run()`'s result for both actions (docs/ROADMAP.md #1) — single-page conversion produces one
+ * `pages` entry, Crawl & Convert Site produces one per successfully-converted page. Always this
+ * one shape so the Review page (`ui/review/`) never has to branch on which action produced it,
+ * only on how many pages are in it. */
+export interface ReaderModeResult {
+  title: string;
+  pages: ReaderModePage[];
+  files: ReaderModeFile[];
+}
+
+const LoadDomStep: Module<ReaderPipelineValue | undefined, ReaderPipelineValue> = {
   id: 'reader-mode-converter/load-dom',
   label: 'Load DOM',
   needs: ['dom'],
-  async run() {
-    // Cloned once here (not inside `clean`) so bypassing `clean` still gets a valid, if
-    // unprocessed, `root` to fall back to (the same clone's <body>).
+  async run(input) {
+    if (input) return input; // crawlSite already built this from a fetched+parsed remote page
     const doc = document.cloneNode(true) as Document;
     return { doc, root: doc.body, baseUrl: document.baseURI, title: document.title, images: [] };
   },
@@ -144,7 +172,7 @@ const FetchImagesStep: Module<ReaderPipelineValue, ReaderPipelineValue> = {
   },
 };
 
-const ConvertMarkdownStep: Module<ReaderPipelineValue, ReaderModeResult> = {
+const ConvertMarkdownStep: Module<ReaderPipelineValue, PageConversionResult> = {
   id: 'reader-mode-converter/convert-markdown',
   label: 'Convert to Markdown',
   needs: ['dom'],
@@ -162,11 +190,221 @@ const ConvertMarkdownStep: Module<ReaderPipelineValue, ReaderModeResult> = {
   },
 };
 
-export const ReaderModeConverterModule: Module<void, ReaderModeResult> = createCompositeModule({
+const pageComposite = createCompositeModule({
   id: 'reader-mode-converter',
   label: 'Reader Mode Converter',
   description:
     'Distills the page into Markdown, fetching images so they can be reviewed and downloaded as a bundle.',
   subModules: [LoadDomStep, CleanStep, FetchImagesStep, ConvertMarkdownStep],
-  uiSchema: { kind: 'action', actionLabel: 'Convert to Markdown', resultView: 'files' },
-}) as Module<void, ReaderModeResult>;
+});
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const NAV_SELECTOR = 'nav, [role="navigation"]';
+
+/** Clicks every collapsed disclosure button under `root`, waiting for the DOM to update and
+ * repeating — expanding one item can reveal further collapsed children. Capped at a fixed number
+ * of rounds as a guard against a site whose nav never fully settles. */
+async function expandAllNavButtons(root: ParentNode): Promise<void> {
+  for (let round = 0; round < 20; round++) {
+    const collapsed = Array.from(root.querySelectorAll('button[aria-expanded="false"]'));
+    if (collapsed.length === 0) return;
+    for (const btn of collapsed) (btn as HTMLElement).click();
+    await sleep(150);
+  }
+}
+
+/** Fallback URL discovery (docs/ROADMAP.md #1) when no sitemap is published — auto-expands the
+ * current page's nav, then reads every `<a href>` still inside it. */
+async function discoverUrlsFromNav(baseUrl: string): Promise<string[]> {
+  const navRoots = Array.from(document.querySelectorAll(NAV_SELECTOR));
+  for (const navEl of navRoots) await expandAllNavButtons(navEl);
+
+  const urls = new Set<string>();
+  for (const navEl of navRoots) {
+    for (const a of Array.from(navEl.querySelectorAll('a[href]'))) {
+      const href = a.getAttribute('href');
+      if (!href) continue;
+      try {
+        urls.add(new URL(href, baseUrl).toString());
+      } catch {
+        // not a resolvable URL — skip
+      }
+    }
+  }
+  return Array.from(urls);
+}
+
+/** Primary URL discovery: a published sitemap is faster, simpler, and doesn't depend on guessing
+ * the nav's markup at all. Tries `robots.txt`'s `Sitemap:` directive first (the canonical way a
+ * site announces a non-default location), then the conventional `/sitemap.xml` path. Returns
+ * `undefined` (not an empty array) when nothing usable was found, so the caller knows to fall back
+ * to nav-crawling rather than treating "no sitemap" as "site has zero pages". */
+async function discoverUrlsFromSitemap(origin: string): Promise<string[] | undefined> {
+  const candidates = [`${origin}/sitemap.xml`];
+  try {
+    const robotsRes = await fetch(`${origin}/robots.txt`);
+    if (robotsRes.ok) {
+      const robotsText = await robotsRes.text();
+      for (const line of robotsText.split('\n')) {
+        const match = /^\s*Sitemap:\s*(\S+)/i.exec(line);
+        if (match) candidates.unshift(match[1]!);
+      }
+    }
+  } catch {
+    // robots.txt fetch failed — fall back to the default candidate above
+  }
+
+  for (const url of candidates) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const xml = await res.text();
+      const doc = new DOMParser().parseFromString(xml, 'application/xml');
+      if (doc.querySelector('parsererror')) continue;
+      const locs = Array.from(doc.querySelectorAll('loc'))
+        .map((el) => el.textContent?.trim())
+        .filter((u): u is string => !!u);
+      if (locs.length > 0) return locs;
+    } catch {
+      // this candidate failed — try the next one
+    }
+  }
+  return undefined;
+}
+
+/** Derives a page's file path from its URL, mirroring the site's own structure (docs/ROADMAP.md
+ * #1) — e.g. `https://angular.dev/guide/signals` → `guide/signals.md`, site root → `index.md`.
+ * Each path segment is slugified independently (not the whole pathname at once) so `/` boundaries
+ * survive as folder separators instead of being collapsed away. */
+function pathFromUrl(url: string): string {
+  let pathname = '/';
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    // keep the '/' default — falls through to 'index.md' below
+  }
+  const segments = pathname
+    .split('/')
+    .filter(Boolean)
+    .map((seg) => slugify(decodeURIComponent(seg)));
+  return segments.length === 0 ? 'index.md' : `${segments.join('/')}.md`;
+}
+
+/** De-duplicates a derived page path (e.g. two URLs that both slugify to the same thing) the same
+ * way `uniqueFileName` above de-duplicates image names — numeric suffix before the extension. */
+function uniquePagePath(path: string, seen: Set<string>): string {
+  let candidate = path;
+  let n = 2;
+  while (seen.has(candidate)) {
+    const dot = path.lastIndexOf('.');
+    candidate = dot === -1 ? `${path}-${n}` : `${path.slice(0, dot)}-${n}${path.slice(dot)}`;
+    n++;
+  }
+  seen.add(candidate);
+  return candidate;
+}
+
+/** Assembles the crawl's final `ReaderModeResult` — one `pages` entry per successfully-converted
+ * URL (file path mirrors the site structure), images re-namespaced per page (prefixed with that
+ * page's own path, "/" flattened to "-") so same-named images on different pages don't collide
+ * once bundled into one zip (Review page's Download ZIP, docs/ROADMAP.md #3). */
+function buildCrawlResult(pages: { url: string; result: PageConversionResult }[]): ReaderModeResult {
+  const seenPaths = new Set<string>();
+  const resultPages: ReaderModePage[] = [];
+  const files: ReaderModeFile[] = [];
+
+  for (const { url, result } of pages) {
+    const path = uniquePagePath(pathFromUrl(url), seenPaths);
+    resultPages.push({ path, title: result.title, markdown: result.markdown });
+
+    const imagePrefix = path.replace(/\.md$/, '').replace(/\//g, '-');
+    for (const file of result.files) {
+      files.push({ ...file, fileName: `images/${imagePrefix}-${file.fileName.replace(/^images\//, '')}` });
+    }
+  }
+
+  return { title: location.hostname, pages: resultPages, files };
+}
+
+// Bounds worst-case runtime/payload size — a graceful partial result (whatever was found up to
+// this many pages) rather than a runaway crawl, same role as MAX_IMAGE_BYTES above.
+const MAX_CRAWL_PAGES = 200;
+const CRAWL_FETCH_DELAY_MS = 200;
+
+/** Crawl & Convert Site action (docs/ROADMAP.md #1): discovers every same-origin doc page (sitemap
+ * first, nav-expand fallback), fetches and converts each one through the same `pageComposite` used
+ * for the live page, and combines the results into one bundle.
+ *
+ * Deliberately `fetch()` + `DOMParser`, not `chrome.tabs` navigation — no background/tab
+ * orchestration needed, the whole feature stays inside this one content-script Module. Trade-off:
+ * a page needs its content in the raw HTML response (server-rendered/prerendered) to convert
+ * meaningfully — a fully client-rendered page (no SSR) just yields thin/empty markdown for that one
+ * page, since its JS never runs here, rather than aborting the whole crawl (graceful fail, same
+ * style as a single failed image fetch above). */
+async function crawlSite(ctx: ModuleContext): Promise<ReaderModeResult> {
+  const origin = location.origin;
+  const sitemapUrls = await discoverUrlsFromSitemap(origin);
+  const discovered = sitemapUrls ?? (await discoverUrlsFromNav(document.baseURI));
+
+  const uniqueUrls = Array.from(
+    new Set(
+      discovered.filter((u) => {
+        try {
+          return new URL(u).origin === origin;
+        } catch {
+          return false;
+        }
+      }),
+    ),
+  ).slice(0, MAX_CRAWL_PAGES);
+
+  const pages: { url: string; result: PageConversionResult }[] = [];
+  for (let i = 0; i < uniqueUrls.length; i++) {
+    const url = uniqueUrls[i]!;
+    try {
+      const res = await fetch(url);
+      if (res.ok) {
+        const html = await res.text();
+        const parsedDoc = new DOMParser().parseFromString(html, 'text/html');
+        const initial: ReaderPipelineValue = {
+          doc: parsedDoc,
+          root: parsedDoc.body,
+          baseUrl: url,
+          title: parsedDoc.title,
+          images: [],
+        };
+        const result = (await pageComposite.run(initial, ctx)) as PageConversionResult;
+        pages.push({ url, result });
+      }
+    } catch {
+      // graceful fail — skip this page, keep crawling the rest
+    }
+    void chrome.runtime.sendMessage({ type: 'reader-mode-crawl-progress', done: i + 1, total: uniqueUrls.length }).catch(() => {});
+    if (i < uniqueUrls.length - 1) await sleep(CRAWL_FETCH_DELAY_MS);
+  }
+
+  return buildCrawlResult(pages);
+}
+
+export const ReaderModeConverterModule: Module<{ action?: string } | undefined, ReaderModeResult> = {
+  ...pageComposite,
+  uiSchema: {
+    kind: 'action',
+    actions: [
+      { id: 'convert-page', actionLabel: 'Convert', resultView: 'files' },
+      { id: 'crawl-site', actionLabel: 'Crawl', resultView: 'files' },
+    ],
+  },
+  async run(input, ctx) {
+    if (input?.action === 'crawl-site') return crawlSite(ctx);
+    const page = (await pageComposite.run(undefined, ctx)) as PageConversionResult;
+    return {
+      title: page.title,
+      pages: [{ path: `${slugify(page.title, 'reader-mode')}.md`, title: page.title, markdown: page.markdown }],
+      files: page.files,
+    };
+  },
+};

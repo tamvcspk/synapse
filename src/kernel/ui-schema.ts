@@ -80,15 +80,24 @@ export interface UICollectionSchema {
   activeField?: string;
 }
 
-/** No persisted collection — clicking the module's icon triggers run() directly. */
-export interface UIActionSchema {
-  kind: 'action';
+export interface UIActionDef {
+  /** Passed as `{ action: id }` in `run()`'s input (docs/ROADMAP.md #1's Crawl & Convert Site) —
+   * lets one Module expose more than one on-demand action, each dispatched by the Module's own
+   * `run()`, not by the Kernel/Registry (which has no notion of "which action"). */
+  id: string;
   actionLabel: string;
   /** When 'files', `run()`'s result is `{title, markdown, files: {fileName, mimeType, base64}[]}`
    * instead of the usual free-form result — the popup opens a dedicated full-page Review tab
    * (`ui/review/`) with a ZIP-download action, rather than showing the result inline. For actions
    * producing a downloadable bundle, not just a short text/markdown snippet. */
   resultView?: 'files';
+}
+
+/** No persisted collection — clicking one of the module's action buttons triggers run() directly
+ * with `{ action: id }` as input. */
+export interface UIActionSchema {
+  kind: 'action';
+  actions: UIActionDef[];
 }
 
 export type UISchema = UICollectionSchema | UIActionSchema;

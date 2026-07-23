@@ -9,8 +9,11 @@ export interface ListViewCallbacks {
   onUpload(): void;
   onRefresh(): void;
   /** Navigation Flow (docs/ROADMAP.md #2): row/icon click for any entry carrying a uiSchema —
-   * router.ts decides whether that means "open Management View" or "trigger run() directly". */
-  onOpenModule(entry: RegistryEntry): void;
+   * router.ts decides whether that means "open Management View" or "trigger run() directly". For
+   * an Action schema with more than one action (docs/ROADMAP.md #1's Crawl & Convert Site),
+   * `actionId` picks which one; omitted for a Collection schema (only one thing to open) or when
+   * defaulting to the first action (e.g. clicking the row label itself). */
+  onOpenModule(entry: RegistryEntry, actionId?: string): void;
   /** Composite Module (docs/ROADMAP.md #3): opens the Dashboard's per-step toggle view — a
    * separate action from `onOpenModule` since a Composite Module's own `uiSchema` (if any) can be
    * an Action schema (triggers run() directly), independent of whether it also has sub-steps to
@@ -51,39 +54,41 @@ export function renderListView(
   );
 }
 
+/** One button per action for an Action schema (docs/ROADMAP.md #1) — short text labels (not an
+ * ambiguous icon; the popup used to get away with a single '▶' when there was only ever one
+ * action) — or the single Collection schema "Manage" gear. Empty array when the module has no
+ * usable uiSchema (nothing to render). */
+function renderActionButtons(entry: RegistryEntry, callbacks: ListViewCallbacks) {
+  if (entry.status !== 'ok' || !entry.uiSchema) return [];
+  if (entry.uiSchema.kind === 'collection') {
+    return [button({ class: 'module-gear', title: 'Manage', onclick: () => callbacks.onOpenModule(entry) }, '⚙')];
+  }
+  return entry.uiSchema.actions.map((action) =>
+    button({ title: action.actionLabel, onclick: () => callbacks.onOpenModule(entry, action.id) }, action.actionLabel),
+  );
+}
+
 function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
   // `title` (hover tooltip), not a visible line — this popup is a small fixed-width window, no
   // room for a description under every row like the Dashboard's Management View header can afford.
   const label = span(entry.description ? { title: entry.description } : {}, entry.label ?? entry.id);
   if (entry.uiSchema) {
     label.classList.add('module-label-link');
-    label.onclick = () => callbacks.onOpenModule(entry);
+    // Collection schema: open Management View. Action schema: default to its first action (e.g.
+    // clicking the title still runs the primary action, same as before there could be more than
+    // one) — the row's own action buttons below expose every action explicitly.
+    label.onclick = () =>
+      callbacks.onOpenModule(entry, entry.uiSchema?.kind === 'action' ? entry.uiSchema.actions[0]?.id : undefined);
   }
 
   // An uploaded module's needs[] is only known after its first run (see chrome-module-registry.ts) —
   // it can be active with capabilities the RPC handler is still rejecting until explicitly granted.
   const ungranted = entry.needs.filter((n) => !entry.grantedCapabilities.includes(n));
 
-  // Gear/Arrow icon (Navigation Flow, docs/ROADMAP.md #2) — only when the module declares a
-  // uiSchema. Its behavior (open Management View vs trigger run()) is decided by router.ts based
-  // on the schema's shape, not here. Long-term this action moves to the extension toolbar icon
-  // (docs/ROADMAP.md #4) — until then it stays here with a native `title` tooltip.
-  const gearBtn =
-    entry.status === 'ok' && entry.uiSchema
-      ? button(
-          {
-            class: 'module-gear',
-            title: entry.uiSchema.kind === 'collection' ? 'Manage' : entry.uiSchema.actionLabel,
-            onclick: () => callbacks.onOpenModule(entry),
-          },
-          entry.uiSchema.kind === 'collection' ? '⚙' : '▶',
-        )
-      : null;
-
   // Composite Module (docs/ROADMAP.md #3) — a text button (not another icon; this popup is a small
   // fixed-width window, and "Steps" reads clearer than an ambiguous glyph) opening the Dashboard's
-  // per-step toggle view (docs/ROADMAP.md #1's rebuild) — kept independent of gearBtn since a
-  // Composite Module can also have its own Action/Collection uiSchema at the same time.
+  // per-step toggle view (docs/ROADMAP.md #1's rebuild) — kept independent of the action buttons
+  // since a Composite Module can also have its own Action/Collection uiSchema at the same time.
   const stepsBtn =
     entry.status === 'ok' && entry.subModules && entry.subModules.length > 0
       ? button({ title: 'Configure steps', onclick: () => callbacks.onOpenSteps(entry) }, 'Steps')
@@ -99,11 +104,11 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
     entry.status === 'ok' && ungranted.length > 0
       ? button({ title: `Requests: ${ungranted.join(', ')}`, onclick: () => callbacks.onGrant(entry) }, 'Grant')
       : null,
-    // Action-icon + toggle grouped together, visually adjacent, separate from label/reason/grant.
+    // Action button(s) + toggle grouped together, visually adjacent, separate from label/reason/grant.
     div(
       { class: 'row-actions' },
       stepsBtn,
-      gearBtn,
+      ...renderActionButtons(entry, callbacks),
       input({
         type: 'checkbox',
         role: 'switch',

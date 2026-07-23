@@ -21,8 +21,13 @@ header h1 {
   white-space: nowrap;
 }
 
-.review-filename input {
+.review-filename input,
+.review-filename select {
   margin: 0;
+}
+
+.review-filename select {
+  flex: 1;
 }
 
 .form-actions label {

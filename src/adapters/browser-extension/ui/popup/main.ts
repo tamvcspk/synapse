@@ -8,6 +8,30 @@ import { triggerModuleAction } from './module-trigger';
 import { openReviewPage } from './review-handoff';
 import { render as renderView, type RouterHandlers, type View } from './router';
 
+/** Fire-and-forget progress pings from a long-running action (docs/ROADMAP.md #1's Crawl &
+ * Convert Site, `reader-mode-converter.module.ts`'s `crawlSite`) — sent via the general
+ * `chrome.runtime.sendMessage` broadcast channel, independent of `triggerModuleAction`'s
+ * request/response pair below (which only ever resolves once, at the very end). Not specific to
+ * any one module — any action could adopt this convention. */
+interface CrawlProgressMessage {
+  type: 'reader-mode-crawl-progress';
+  done: number;
+  total: number;
+}
+
+function isCrawlProgressMessage(message: unknown): message is CrawlProgressMessage {
+  return !!message && typeof message === 'object' && (message as Record<string, unknown>).type === 'reader-mode-crawl-progress';
+}
+
+/** Subscribes to progress pings for the duration of one action trigger; returns the unsubscribe. */
+function listenForProgress(onProgress: (message: string) => void): () => void {
+  const listener = (message: unknown) => {
+    if (isCrawlProgressMessage(message)) onProgress(`Crawling... ${message.done}/${message.total} pages`);
+  };
+  chrome.runtime.onMessage.addListener(listener);
+  return () => chrome.runtime.onMessage.removeListener(listener);
+}
+
 const registry = new ChromeModuleRegistryService();
 const root = document.getElementById('root')!;
 
@@ -81,7 +105,7 @@ function handleOpenSteps(entry: RegistryEntry): void {
   openDashboard(entry);
 }
 
-async function handleOpenModule(entry: RegistryEntry): Promise<void> {
+async function handleOpenModule(entry: RegistryEntry, actionId?: string): Promise<void> {
   const schema = entry.uiSchema;
   if (!schema) return;
 
@@ -90,7 +114,24 @@ async function handleOpenModule(entry: RegistryEntry): Promise<void> {
     return;
   }
 
-  const result = await triggerModuleAction(entry.id);
+  // Defaults to the first action — matches list-view.ts's own default for a plain label click.
+  const action = schema.actions.find((a) => a.id === actionId) ?? schema.actions[0];
+  if (!action) return;
+
+  // Shown immediately — most actions resolve in a second or two (this just flashes briefly), but
+  // a long-running one (Crawl & Convert Site) keeps this updated via progress pings, so the user
+  // has a clear reason to wait instead of clicking away (which would lose the response — the
+  // request/response pair below only ever resolves once, at the very end).
+  navigate({ kind: 'busy', message: 'Running...' });
+  const stopProgress = listenForProgress((message) => navigate({ kind: 'busy', message }));
+
+  let result: Awaited<ReturnType<typeof triggerModuleAction>>;
+  try {
+    result = await triggerModuleAction(entry.id, { action: action.id });
+  } finally {
+    stopProgress();
+  }
+
   if (!result.ok) {
     // "Could not establish connection. Receiving end does not exist." is Chrome's standard
     // message for "no content script listening in that tab" — friendlier prefix, but still show
@@ -102,7 +143,7 @@ async function handleOpenModule(entry: RegistryEntry): Promise<void> {
     return;
   }
 
-  if (schema.resultView === 'files') {
+  if (action.resultView === 'files') {
     const outcome = await openReviewPage(result.data);
     if (!outcome.ok) {
       navigate({
