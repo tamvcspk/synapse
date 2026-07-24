@@ -42,6 +42,10 @@ export interface AnchoredBadgeOptions {
    * corner. Auto-removed once `target` leaves the document (e.g. SPA navigation). */
   target: Element;
   label: string;
+  /** Native `title` attribute (hover tooltip) — e.g. flagging a best-effort/correlated match
+   * (docs/ROADMAP.md #4.1's blob:/MSE badge) so the user isn't misled into treating it as certain
+   * as a directly-resolved src. */
+  title?: string;
   onClick: () => void;
 }
 
@@ -221,6 +225,7 @@ export function showAnchoredBadge(options: AnchoredBadgeOptions): void {
   }
   badge.target = options.target;
   badge.el.textContent = options.label;
+  badge.el.title = options.title ?? '';
   badge.el.onclick = options.onClick;
 }
 

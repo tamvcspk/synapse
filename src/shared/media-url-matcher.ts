@@ -43,3 +43,24 @@ export function classifyMediaUrl(url: string): MediaKind | undefined {
   if (STREAM_EXTENSIONS.includes(extension)) return 'stream';
   return undefined;
 }
+
+// Same deliberate segment exclusion as STREAM_EXTENSIONS above — video/mp2t is the MIME type
+// servers use for HLS .ts segments, not something worth surfacing on its own (docs/ROADMAP.md #4).
+const SEGMENT_MIME_TYPES = ['video/mp2t'];
+const STREAM_MIME_TYPES = ['application/vnd.apple.mpegurl', 'application/x-mpegurl', 'application/dash+xml'];
+
+/** Classifies a response's `Content-Type` header value as media, or `undefined` if it isn't one
+ * this Module cares about — the server-confirmed counterpart to `classifyMediaUrl`'s URL-extension
+ * guess (docs/ROADMAP.md #4.1's junk-URL filtering: a `chrome.webRequest`-observed request whose
+ * resource type isn't already `'media'` now needs this to positively match before being recorded,
+ * since a URL merely looking like media — e.g. an ad/analytics XHR ending in `.mp4` — used to be
+ * enough on its own). Prefix-matches `video/*`/`audio/*` rather than an exhaustive codec list, so
+ * it isn't a maintenance burden as new codecs/containers show up. */
+export function classifyMediaMimeType(contentType: string): MediaKind | undefined {
+  const mime = contentType.split(';')[0]!.trim().toLowerCase();
+  if (SEGMENT_MIME_TYPES.includes(mime)) return undefined;
+  if (STREAM_MIME_TYPES.includes(mime)) return 'stream';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  return undefined;
+}

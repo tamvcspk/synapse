@@ -3,8 +3,10 @@ import { buildDomModuleServices } from './rpc-client';
 import { BUNDLED_MODULES } from '../module-registry/bundled-modules';
 import { isModuleActive } from '../module-registry/storage';
 import { installStorageToMainWorldRelay } from '../utils/main-world/storage-relay';
+import { createMainWorldChannel } from '../utils/main-world/event-channel';
 import { showFloatingWidget } from '../utils/floating-widget';
 import { MOCK_CONFIG_CHANNEL_ID, MOCK_CONFIG_STORAGE_KEY } from '../background/modules/http-error-mocker/constants';
+import { MAIN_WORLD_REPORT_CHANNEL_ID } from '../background/modules/network-sniffer/constants';
 
 // Generic infra call (not a Module — see main-world-interceptor skill): forwards
 // http-error-mocker's persisted MockConfig list into its MAIN-world interceptor whenever it's
@@ -41,6 +43,17 @@ chrome.runtime.onMessage.addListener((message: { type?: string } | undefined) =>
       },
     });
   })();
+});
+
+// docs/ROADMAP.md #4.1 — relays network-sniffer's MAIN-world observer (main-world-payload.ts) to
+// background purely for persistence into the Dashboard's detected-media list. Registered here
+// (top-frame-only), matching where the MAIN-world script itself runs — registerMainWorldScript
+// doesn't set `allFrames`, so it defaults to top-frame-only, same as http-error-mocker's. Separate
+// from dom-media-observer.ts's OWN listener on this same channel (badge-anchoring correlation,
+// no relay needed there — see that file) — two independent listeners on the same shared-window
+// CustomEvent, one per purpose.
+createMainWorldChannel<{ url: string }>(MAIN_WORLD_REPORT_CHANNEL_ID).onUpdate(({ url }) => {
+  chrome.runtime.sendMessage({ event: 'network-sniffer', payload: { op: 'report-main-world-media', url } }).catch(() => {});
 });
 
 const domModules = BUNDLED_MODULES.filter((mod) => mod.needs?.includes('dom'));

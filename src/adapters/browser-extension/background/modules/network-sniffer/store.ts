@@ -10,6 +10,12 @@ export interface DetectedMedia {
   pageUrl?: string;
   /** ISO timestamp — display-only, not used for ordering (storage array order is insertion order). */
   detectedAt: string;
+  /** docs/ROADMAP.md #4.1 — best-effort signal that this request's initiating document isn't the
+   * tab's own top-level page (e.g. a third-party ad iframe). A LABEL, not a filter — a legitimate
+   * video is often served from a different-origin CDN too, so this is never used to exclude
+   * anything. `undefined` means unknown (only ever computed for the `webRequest`-sourced path,
+   * which is the only source with a tabId+initiator in hand), not "known first-party". */
+  thirdParty?: boolean;
 }
 
 const DETECTED_MEDIA_STORAGE_KEY = 'synapse:network-sniffer:detected-media';

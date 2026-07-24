@@ -1,9 +1,38 @@
 import type { Module } from '../../../../../kernel/module';
 import type { CollectionCommand } from '../../../../../kernel/ui-schema';
-import { classifyMediaUrl } from '../../../../../shared/media-url-matcher';
-import { ensureNetworkObserver, teardownNetworkObserver } from '../../../utils/webrequest-media-observer';
+import { classifyMediaUrl, classifyMediaMimeType, type MediaKind } from '../../../../../shared/media-url-matcher';
+import { ensureNetworkObserver, teardownNetworkObserver, type ObservedRequest } from '../../../utils/webrequest-media-observer';
+import {
+  isMainWorldScriptRegistered,
+  registerMainWorldScript,
+  unregisterMainWorldScript,
+} from '../../../utils/main-world-injector';
 import { isModuleActive } from '../../../module-registry/storage';
+// `&iife`, not `&module` — see main-world-interceptor skill: chrome.scripting always injects `js`
+// entries as a classic script, and a raw ES module chunk (real `import` statements) throws a
+// SyntaxError before a single line runs. `&iife` inlines every dependency into one self-contained
+// file with zero `import` statements.
+import payloadPath from './main-world-payload?script&iife';
+import { MAIN_WORLD_SCRIPT_ID } from './constants';
 import { addDetectedMedia, listDetectedMedia, removeDetectedMedia, type DetectedMedia } from './store';
+
+/**
+ * docs/ROADMAP.md #4.1's junk-URL filtering, the "what counts as media" policy half (the observer
+ * mechanism itself has zero opinion — see webrequest-media-observer.ts's doc comment).
+ *
+ * `resourceType === 'media'` means Chrome itself already classified this as a real media fetch —
+ * unchanged behavior, Content-Type kind preferred when present, URL-extension fallback otherwise
+ * (exactly as before this filtering was added). Anything else (`xmlhttprequest`/`object`/`other`)
+ * is the noisy bucket where a URL merely *looking* like media (an ad/analytics XHR ending in
+ * `.mp4`, say) used to be enough on its own — now it REQUIRES a genuine, server-confirmed
+ * Content-Type match. A response with no/mismatched Content-Type is silently excluded, same
+ * "partial result over false positive" posture as fetch-images'/crawlSite's per-item skip.
+ */
+function classifyDetection(req: ObservedRequest): MediaKind | undefined {
+  const mimeKind = req.contentType ? classifyMediaMimeType(req.contentType) : undefined;
+  if (req.resourceType === 'media') return mimeKind ?? classifyMediaUrl(req.url);
+  return mimeKind;
+}
 
 /** Sent directly by content-scripts/dom-media-observer.ts (docs/ROADMAP.md #4 Phase 1) via
  * `chrome.runtime.sendMessage({event: 'network-sniffer', payload: ...})` — a second detection
@@ -12,6 +41,28 @@ import { addDetectedMedia, listDetectedMedia, removeDetectedMedia, type Detected
 interface ReportDomMediaCommand {
   op: 'report-dom-media';
   items: { url: string; pageUrl?: string }[];
+}
+
+/** Sent by content-scripts/index.ts, relaying main-world-payload.ts's MAIN-world channel report
+ * (docs/ROADMAP.md #4.1's third detection source) — same "module-specific op, bypasses the generic
+ * CollectionCommand shape" reasoning as ReportDomMediaCommand above. */
+interface ReportMainWorldMediaCommand {
+  op: 'report-main-world-media';
+  url: string;
+}
+
+/** docs/ROADMAP.md #4.1's third-party/initiator-origin signal — a LABEL, not a filter (see
+ * DetectedMedia.thirdParty's doc comment for why hard-filtering on this would be wrong). Returns
+ * `undefined` (unknown, not a claim either way) when the tab's URL can't be read (e.g. a chrome://
+ * page, or the tab closed between detection and this lookup) rather than guessing. */
+async function isThirdPartyInitiator(tabId: number, initiator: string): Promise<boolean | undefined> {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab.url) return undefined;
+    return new URL(initiator).hostname !== new URL(tab.url).hostname;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Fire-and-forget push to a specific tab telling its top-frame content script new media was
@@ -56,7 +107,10 @@ chrome.runtime.onMessage.addListener((message: { type?: string; url?: string } |
  * "active tab" by the time anyone reads it), so there's no sensible Add/Edit, only Delete
  * ("dismiss this entry") and a per-row Download action (UICollectionSchema's `rowAction`).
  */
-export const NetworkSnifferModule: Module<CollectionCommand<DetectedMedia> | ReportDomMediaCommand | undefined, void> = {
+export const NetworkSnifferModule: Module<
+  CollectionCommand<DetectedMedia> | ReportDomMediaCommand | ReportMainWorldMediaCommand | undefined,
+  void
+> = {
   id: 'network-sniffer',
   label: 'Media Sniffer',
   description: 'Passively detects video/audio/stream URLs requested by pages you visit, and lets you download them.',
@@ -75,34 +129,73 @@ export const NetworkSnifferModule: Module<CollectionCommand<DetectedMedia> | Rep
       { key: 'kind', label: 'Type', type: 'string' },
       { key: 'pageUrl', label: 'Found on', type: 'string' },
       { key: 'detectedAt', label: 'Detected', type: 'string' },
+      {
+        key: 'thirdParty',
+        label: 'Third-party?',
+        hint: 'Best-effort signal only — a legitimate video is often served from a different-origin CDN too, this is not a reliable ad indicator on its own',
+        type: 'boolean',
+      },
     ],
   },
   listCollection: async () => (await listDetectedMedia()) as unknown as Record<string, unknown>[],
   async run(command, ctx) {
     if (!(await isModuleActive('network-sniffer'))) {
       teardownNetworkObserver();
+      if (await isMainWorldScriptRegistered(MAIN_WORLD_SCRIPT_ID)) {
+        await unregisterMainWorldScript(MAIN_WORLD_SCRIPT_ID);
+      }
       return;
     }
 
     // Idempotent — safe to call on every bus event (startup 'sync', or a Delete command), only
     // actually installs the chrome.webRequest listener the first time.
     ensureNetworkObserver((req) => {
-      const kind = classifyMediaUrl(req.url);
+      const kind = classifyDetection(req);
       if (!kind) return;
-      // exactOptionalPropertyTypes: only include `pageUrl` when the observer actually provided one.
-      const media: DetectedMedia = req.initiator
-        ? { id: crypto.randomUUID(), url: req.url, kind, pageUrl: req.initiator, detectedAt: new Date().toISOString() }
-        : { id: crypto.randomUUID(), url: req.url, kind, detectedAt: new Date().toISOString() };
-      // docs/ROADMAP.md #4.2 — only push the float-widget notice on a genuine new detection (not
-      // a repeat request for an already-known URL), same "don't spam a chatty page" philosophy as
-      // the store's own dedupe/cap.
-      void addDetectedMedia(media, ctx.services.cache).then((inserted) => {
-        if (inserted) notifyTabMediaFound(req.tabId);
-      });
+      void (async () => {
+        // Only computable when the observer gave us an initiator — the only source with a
+        // tabId+initiator in hand (docs/ROADMAP.md #4.1's third-party signal).
+        const thirdParty = req.initiator ? await isThirdPartyInitiator(req.tabId, req.initiator) : undefined;
+        // exactOptionalPropertyTypes: only include a field when actually available, never `undefined`.
+        const media: DetectedMedia = {
+          id: crypto.randomUUID(),
+          url: req.url,
+          kind,
+          detectedAt: new Date().toISOString(),
+          ...(req.initiator ? { pageUrl: req.initiator } : {}),
+          ...(thirdParty !== undefined ? { thirdParty } : {}),
+        };
+        // docs/ROADMAP.md #4.2 — only push the float-widget notice on a genuine new detection (not
+        // a repeat request for an already-known URL), same "don't spam a chatty page" philosophy as
+        // the store's own dedupe/cap.
+        if (await addDetectedMedia(media, ctx.services.cache)) notifyTabMediaFound(req.tabId);
+      })();
+    });
+
+    // Always (re-)register while active, not just when nothing is registered yet — same
+    // stale-jsPath-avoidance reasoning as http-error-mocker's syncRegistration (Vite content-hashes
+    // the built filename on every rebuild).
+    await registerMainWorldScript({
+      id: MAIN_WORLD_SCRIPT_ID,
+      matches: ['<all_urls>'],
+      jsPath: payloadPath,
+      runAt: 'document_start',
     });
 
     if (command?.op === 'delete') {
       await removeDetectedMedia(command.id, ctx.services.cache);
+    }
+
+    if (command?.op === 'report-main-world-media') {
+      // Re-validates server-side rather than trusting the content script's own relay — same "never
+      // trust the shim to self-limit" posture as report-dom-media below.
+      const kind = classifyMediaUrl(command.url);
+      if (kind) {
+        await addDetectedMedia(
+          { id: crypto.randomUUID(), url: command.url, kind, detectedAt: new Date().toISOString() },
+          ctx.services.cache,
+        );
+      }
     }
 
     if (command?.op === 'report-dom-media') {

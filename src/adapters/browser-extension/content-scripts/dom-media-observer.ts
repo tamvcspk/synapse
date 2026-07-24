@@ -1,5 +1,7 @@
 import { classifyMediaUrl } from '../../../shared/media-url-matcher';
+import { createMainWorldChannel } from '../utils/main-world/event-channel';
 import { showAnchoredBadge } from '../utils/floating-widget';
+import { MAIN_WORLD_REPORT_CHANNEL_ID } from '../background/modules/network-sniffer/constants';
 
 /**
  * Content-script infra (ISOLATED world) for network-sniffer's Phase 1 enhancement
@@ -9,16 +11,21 @@ import { showAnchoredBadge } from '../utils/floating-widget';
  * a real request for it fires — this closes the gap for a source that's already in the DOM but
  * hasn't been played/requested yet (lazy players, `preload="none"`).
  *
- * `blob:`-sourced MSE video isn't handled — `classifyMediaUrl` returns undefined for those (no
- * dot-extension to match), so they're silently skipped, which is correct: a blob: URL is scoped to
- * this page's own JS realm and isn't fetchable from any other context anyway.
- *
  * docs/ROADMAP.md #4.2 — also shows a small download badge anchored to each detected element's
  * corner (utils/floating-widget.ts's showAnchoredBadge), purely locally: this content script
  * already holds the actual DOM element and its resolved URL, so there's no need for a background
  * round trip just to decide "show a widget here" the way the webRequest-only path needs (that path
  * has no DOM visibility at all — see network-sniffer/index.ts's notifyTabMediaFound, which is the
  * *only* remaining source of the page-corner toast now that DOM-visible media gets its own badge).
+ *
+ * docs/ROADMAP.md #4.1 — `blob:`-sourced MSE video (hls.js/dash.js-style players, `classifyMediaUrl`
+ * correctly returns undefined for it — a blob: URL isn't fetchable outside its own JS realm) used
+ * to be silently skipped entirely, leaving the actual content the user wants with no download
+ * affordance while ad `<video>`s with plain URLs got one. This file now listens to
+ * network-sniffer's MAIN-world observer (main-world-payload.ts, shares this frame's `window` when
+ * both run in the top frame) for the manifest/media URL the player's own JS actually fetches, and
+ * correlates it to any `blob:` `<video>`/`<audio>` element on the page as a best-effort anchor
+ * target — see `lastMainWorldMediaUrl` below for the (deliberately simple, single-global) heuristic.
  */
 
 interface DomMediaItem {
@@ -31,7 +38,19 @@ interface CandidateMedia {
    * rendered box of its own (not painted), so anchoring to it would misplace the badge invisibly. */
   element: HTMLMediaElement;
   url: string;
+  /** True when `url` is a best-effort MAIN-world correlation (see file doc comment), not the
+   * element's own resolved src — `report()` skips these (already persisted once via the
+   * MAIN-world path) and `showBadges` skips the redundant classifyMediaUrl check (already
+   * validated before being dispatched from main-world-payload.ts). */
+  correlated?: boolean;
 }
+
+/** Most recently observed MAIN-world media/manifest URL (docs/ROADMAP.md #4.1) — a single global,
+ * not per-element. Known, accepted limitation: a page with multiple simultaneous MSE players all
+ * get anchored to whichever manifest was last observed, not precisely matched to "their own"
+ * player. Precise per-element correlation would need MediaSource/SourceBuffer byte interception, a
+ * much heavier technique deliberately not built here. */
+let lastMainWorldMediaUrl: string | undefined;
 
 function collectCandidates(): CandidateMedia[] {
   const seen = new Set<string>();
@@ -43,16 +62,28 @@ function collectCandidates(): CandidateMedia[] {
     seen.add(src);
     candidates.push({ element: anchor, url: src });
   }
+
+  // blob:/MSE players never expose a fetchable src at all (see file doc comment) — anchor them to
+  // the best-effort correlated URL instead of leaving them with no badge whatsoever.
+  if (lastMainWorldMediaUrl) {
+    for (const el of document.querySelectorAll('video, audio')) {
+      if (!(el instanceof HTMLMediaElement)) continue;
+      const src = el.currentSrc || el.getAttribute('src');
+      if (src?.startsWith('blob:')) candidates.push({ element: el, url: lastMainWorldMediaUrl, correlated: true });
+    }
+  }
+
   return candidates;
 }
 
 function showBadges(candidates: CandidateMedia[]): void {
-  for (const { element, url } of candidates) {
-    if (!classifyMediaUrl(url)) continue;
+  for (const { element, url, correlated } of candidates) {
+    if (!correlated && !classifyMediaUrl(url)) continue;
     showAnchoredBadge({
       id: `network-sniffer:${url}`,
       target: element,
       label: '⬇',
+      ...(correlated ? { title: "Best-effort match — this player streams via a technique we can't inspect directly" } : {}),
       onClick: () => {
         chrome.runtime.sendMessage({ type: 'synapse:download-media', url }).catch(() => {
           // No listener (e.g. background just restarted) — best-effort, same posture as `report`.
@@ -77,13 +108,25 @@ function report(urls: string[]): void {
 function scanNow(): void {
   const candidates = collectCandidates();
   showBadges(candidates);
-  report(candidates.map((c) => c.url));
+  // Correlated candidates aren't real DOM-resolved detections — already persisted once via
+  // network-sniffer/index.ts's report-main-world-media handling, don't double-report them here.
+  report(candidates.filter((c) => !c.correlated).map((c) => c.url));
 }
 
 /** Idempotent per page load — content-scripts/index.ts only calls this once, when the Module is
  * active, so no install/teardown pair is needed here (unlike the background-side observer, this
  * doesn't outlive the page). */
 export function installDomMediaObserver(): void {
+  // docs/ROADMAP.md #4.1 — shares this frame's `window` with network-sniffer's MAIN-world script
+  // when both run in the top frame (a nested iframe's instance of this file simply never receives
+  // an event, since the MAIN-world script is top-frame-only — see main-world-payload.ts). Triggers
+  // an immediate re-scan: a `preload="none"` player (the motivating case) may not fetch its
+  // manifest until playback starts, well after the MutationObserver below last fired.
+  createMainWorldChannel<{ url: string }>(MAIN_WORLD_REPORT_CHANNEL_ID).onUpdate(({ url }) => {
+    lastMainWorldMediaUrl = url;
+    scanNow();
+  });
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', scanNow, { once: true });
   } else {
