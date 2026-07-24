@@ -71,7 +71,10 @@ function renderActionButtons(entry: RegistryEntry, callbacks: ListViewCallbacks)
 function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
   // `title` (hover tooltip), not a visible line — this popup is a small fixed-width window, no
   // room for a description under every row like the Dashboard's Management View header can afford.
-  const label = span(entry.description ? { title: entry.description } : {}, entry.label ?? entry.id);
+  // The float-widget note (docs/ROADMAP.md #4.2) is driven by the generic `uiParadigm` field, not
+  // hardcoded to network-sniffer by id, so any future float-widget Module gets it for free.
+  const tooltipParts = [entry.description, entry.uiParadigm === 'float-widget' ? 'Shows on-page alerts when active.' : null].filter(Boolean);
+  const label = span(tooltipParts.length > 0 ? { title: tooltipParts.join(' ') } : {}, entry.label ?? entry.id);
   if (entry.uiSchema) {
     label.classList.add('module-label-link');
     // Collection schema: open Management View. Action schema: default to its first action (e.g.

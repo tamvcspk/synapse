@@ -30,6 +30,9 @@ export interface RegistryEntry {
    * means that step is skipped (docs/ROADMAP.md #3). A step missing from this map is treated as
    * active (not bypassed). Absent entirely when `subModules` is absent. */
   subState?: Record<string, boolean>;
+  /** Mirrors Module.uiParadigm (docs/ROADMAP.md §4.2) — presence of `'float-widget'` is what
+   * drives the popup's on-page-alerts hint. Absent for a Module that declares no paradigm. */
+  uiParadigm?: 'none' | 'dedicated-page' | 'float-widget' | 'action-button';
 }
 
 export interface UploadResult {

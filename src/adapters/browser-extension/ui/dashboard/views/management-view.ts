@@ -71,7 +71,16 @@ export function renderManagementView(
       ),
       td(
         { class: 'row-actions' },
-        button({ title: 'Edit', onclick: () => callbacks.onEdit(item) }, '✎'),
+        schema.rowAction
+          ? button(
+              {
+                title: schema.rowAction.label,
+                onclick: () => chrome.downloads.download({ url: String(item[schema.rowAction!.urlField]) }),
+              },
+              schema.rowAction.label,
+            )
+          : null,
+        schema.readOnly ? null : button({ title: 'Edit', onclick: () => callbacks.onEdit(item) }, '✎'),
         button({ title: 'Delete', onclick: () => callbacks.onDelete(item) }, '✕'),
       ),
     );
@@ -106,7 +115,7 @@ export function renderManagementView(
         // (list-view.ts uses `title` instead for the same `entry.description`).
         entry.description ? p({ class: 'module-description' }, entry.description) : null,
       ),
-      button({ onclick: callbacks.onAdd }, `+ Add ${schema.itemLabel}`),
+      schema.readOnly ? null : button({ onclick: callbacks.onAdd }, `+ Add ${schema.itemLabel}`),
     ),
     section(
       input({

@@ -78,6 +78,17 @@ export interface UICollectionSchema {
   idField?: string;
   /** Boolean field rendered as a per-row toggle in the Management View table instead of a plain cell. */
   activeField?: string;
+  /** When true, the Management View hides "+ Add" and each row's Edit (✎) button — for a Module
+   * whose items are only ever produced by itself (e.g. network-sniffer's detected media,
+   * docs/ROADMAP.md #4), not user-authored. Delete (✕) still renders — "dismiss this entry" stays
+   * meaningful even when "create"/"edit" don't. */
+  readOnly?: boolean;
+  /** Renders one extra per-row button in the Management View, labeled `label`, that opens
+   * `item[urlField]` via `chrome.downloads.download` — the Dashboard tab already has full
+   * `chrome.*` access (design.md §7), so this needs no new callback plumbing through
+   * dashboard/main.ts. First use: network-sniffer's "Download" action on a detected media URL
+   * (docs/ROADMAP.md #4). */
+  rowAction?: { label: string; urlField: string };
 }
 
 export interface UIActionDef {

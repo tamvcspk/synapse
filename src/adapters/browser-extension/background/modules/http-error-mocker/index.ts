@@ -200,7 +200,7 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
         await unregisterMainWorldScript(MAIN_WORLD_SCRIPT_ID);
       }
       await teardownDebuggerInterceptor();
-      await clearDnrRules();
+      await clearDnrRules('http-error-mocker');
       return;
     }
 
@@ -260,9 +260,9 @@ async function syncRegistration(cache: CacheService): Promise<void> {
   // 'dnr' has no live callback to (re-)attach — just recompute the full desired rule set and hand
   // it to syncDnrRules every time, same re-sync-every-time policy as the two branches above.
   if (hasActiveMockConfig(configs, 'dnr')) {
-    await syncDnrRules(await buildDnrRuleSpecs(configs));
+    await syncDnrRules('http-error-mocker', await buildDnrRuleSpecs(configs));
   } else {
-    await clearDnrRules();
+    await clearDnrRules('http-error-mocker');
   }
 }
 

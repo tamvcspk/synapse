@@ -7,6 +7,7 @@ import { isUserScriptsPermissionGranted } from '../../module-registry/storage';
 import { triggerModuleAction } from './module-trigger';
 import { openReviewPage } from './review-handoff';
 import { render as renderView, type RouterHandlers, type View } from './router';
+import { DASHBOARD_PATH } from '../dashboard/dashboard-path';
 
 /** Fire-and-forget progress pings from a long-running action (docs/ROADMAP.md #1's Crawl &
  * Convert Site, `reader-mode-converter.module.ts`'s `crawlSite`) — sent via the general
@@ -36,9 +37,9 @@ const registry = new ChromeModuleRegistryService();
 const root = document.getElementById('root')!;
 
 // The Dashboard page (docs/ROADMAP.md #2.5) — a standalone Tab hosting the Collection-schema
-// CRUD flow that used to be the popup's 'management'/'item-form' views. Path must match the entry
-// key vite.config.ts registers for `ui/dashboard/index.html`.
-const DASHBOARD_PATH = 'src/adapters/browser-extension/ui/dashboard/index.html';
+// CRUD flow that used to be the popup's 'management'/'item-form' views. DASHBOARD_PATH now lives
+// in dashboard-path.ts (docs/ROADMAP.md #4.2) so content-scripts/index.ts's float-widget listener
+// can build the same URL without duplicating the literal path.
 // The Review page (docs/ROADMAP.md #3) — a standalone Tab for an Action-schema module whose
 // uiSchema declares `resultView: 'files'`. Path must match the entry key vite.config.ts registers
 // for `ui/review/index.html`.

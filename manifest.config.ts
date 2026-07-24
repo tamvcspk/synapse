@@ -20,6 +20,25 @@ export default defineManifest({
       // configs array before this ISOLATED-world relay ever read chrome.storage and dispatched
       // the CustomEvent into MAIN world. Matching runAt closes nearly all of that window.
       run_at: 'document_start',
+      // all_frames intentionally NOT set here (defaults to false, top-frame-only) — see
+      // frame-media-observer.ts's entry below for why this stays separate.
+    },
+    // Separate entry, `all_frames: true` (docs/ROADMAP.md #4) — network-sniffer's DOM/iframe
+    // detection and iframe-unsandbox's fix both need to run inside every nested/cross-origin
+    // iframe, not just the top frame. Kept as its OWN entry rather than flipping all_frames on the
+    // entry above: chrome.tabs.sendMessage(tabId, msg) with no frameId broadcasts to every frame in
+    // the tab, so putting content-scripts/index.ts's registerDomModule (reader-mode-converter's
+    // Action-schema dispatch) in every iframe too would let multiple frames race to answer the same
+    // trigger message — a real regression unrelated to this feature.
+    {
+      matches: ['<all_urls>'],
+      js: ['src/adapters/browser-extension/content-scripts/frame-media-observer.ts'],
+      all_frames: true,
+      // 'document_start' (not the default 'document_idle') matters for iframe-unsandbox: widening a
+      // sandboxed <iframe>'s token list only takes effect on that frame's *next* navigation, so the
+      // parent frame's fix needs to land before a freshly-encountered sandboxed child begins its own
+      // load. network-sniffer's DOM scan already waits for DOMContentLoaded internally regardless.
+      run_at: 'document_start',
     },
   ],
   action: {
@@ -36,7 +55,13 @@ export default defineManifest({
   // declarative (Chrome's engine evaluates the rules, not our JS) — at the cost of never seeing a
   // request's body, so 'dnr' rules can't rewrite/match on it (see shared/http-mock.ts's Mechanism
   // doc comment).
-  permissions: ['storage', 'userScripts', 'scripting', 'debugger', 'declarativeNetRequest'],
+  // 'webRequest' backs network-sniffer's chrome.webRequest.onBeforeRequest observer
+  // (utils/webrequest-media-observer.ts, docs/ROADMAP.md #4) — read-only request observation, no
+  // 'webRequestBlocking' (not needed here, and MV3 service workers can't register blocking
+  // webRequest listeners anyway). Shows no banner, unlike 'debugger'.
+  // 'downloads' backs the Management View's generic per-row `rowAction` button
+  // (kernel/ui-schema.ts), first used by network-sniffer's "Download" action on a detected media URL.
+  permissions: ['storage', 'userScripts', 'scripting', 'debugger', 'declarativeNetRequest', 'webRequest', 'downloads'],
   // chrome.scripting.registerContentScripts (used for the MAIN-world interceptor) needs its own
   // host permission grant — a static content_scripts.matches entry doesn't satisfy it, even though
   // both show the same install-time warning. Without this, registerContentScripts resolves with no

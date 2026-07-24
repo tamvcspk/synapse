@@ -30,6 +30,19 @@ function isEnvSupported(mod: Pick<Module, 'id' | 'supportedEnvs'>): boolean {
   }
 }
 
+/**
+ * Best-effort nudge so a bus-needing Module's `run()` re-checks `isModuleActive` right away instead
+ * of only on its next unrelated bus event or the next service-worker restart (docs/ROADMAP.md #4
+ * Part B) — every such Module (http-error-mocker, network-sniffer, iframe-unsandbox) already
+ * re-gates on `isModuleActive` before doing anything, on ANY command shape including this bare
+ * `{op:'sync'}`, so this is safe generically. A Module without a 'bus' listener for this id (i.e.
+ * one that doesn't declare `needs: ['bus']`) simply has no listener to receive it — a harmless
+ * no-op, not an error.
+ */
+function pingBusModule(id: string): void {
+  chrome.runtime.sendMessage({ event: id, payload: { op: 'sync' } }).catch(() => {});
+}
+
 async function registerUploadedScript(id: string, source: string): Promise<void> {
   const shimmed = buildShimSource(id, source);
   await chrome.userScripts.register([
@@ -60,6 +73,7 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
       }
     }
     await setModuleActive(id, true);
+    pingBusModule(id);
   }
 
   async deactivate(id: string): Promise<void> {
@@ -68,6 +82,7 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
       await chrome.userScripts.unregister({ ids: [id] });
     }
     await setModuleActive(id, false);
+    pingBusModule(id);
   }
 
   async grantCapabilities(id: string, capabilities: Capability[]): Promise<void> {
@@ -151,6 +166,7 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
       };
       if (!envSupported) entry.reason = `not supported in ${CURRENT_ENV} (supports: ${supportedEnvs.join(', ')})`;
       if (mod.uiSchema) entry.uiSchema = mod.uiSchema;
+      if (mod.uiParadigm) entry.uiParadigm = mod.uiParadigm;
       if (mod.label) entry.label = mod.label;
       if (mod.description) entry.description = mod.description;
       if (mod.subModules) {

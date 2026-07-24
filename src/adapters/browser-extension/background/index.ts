@@ -6,6 +6,7 @@ import { createCompositeModule } from '../../../kernel/composite-module';
 import { registerRpcHandler } from '../module-registry/rpc-handler';
 import { BACKGROUND_MODULES } from '../module-registry/background-modules';
 import { setUserScriptsPermissionGranted } from '../module-registry/storage';
+import { DASHBOARD_PATH } from '../ui/dashboard/dashboard-path';
 import { chromeRuntimeBus } from './services/bus';
 import { chromeStorageCache } from './services/cache';
 // import a concrete ai factory once a Module actually declares it — see kernel-bootstrap skill
@@ -31,7 +32,23 @@ void kernel
   })
   .then(() => {
     chromeRuntimeBus.emit('http-error-mocker', { op: 'sync' });
+    // network-sniffer (docs/ROADMAP.md #4) needs the same startup nudge to re-install its
+    // chrome.webRequest listener after a service-worker restart, if the module is active.
+    chromeRuntimeBus.emit('network-sniffer', { op: 'sync' });
+    // iframe-unsandbox (docs/ROADMAP.md #4 Part C) needs the same nudge to re-sync its DNR rule.
+    chromeRuntimeBus.emit('iframe-unsandbox', { op: 'sync' });
   });
+
+// docs/ROADMAP.md #4.2 — generic relay so any content-script UI (float-widget on-page action, not
+// just network-sniffer) can open the Dashboard without chrome.tabs (content scripts don't have it)
+// and without listing the Dashboard in web_accessible_resources (a direct page-context
+// `<a href="chrome-extension://...">` click is blocked by Chrome otherwise — see
+// content-scripts/index.ts's comment). Generic on purpose: only `moduleId` is module-specific, the
+// relay itself doesn't know or care which Module sent it.
+chrome.runtime.onMessage.addListener((message: { type?: string; moduleId?: string } | undefined) => {
+  if (message?.type !== 'synapse:open-dashboard' || !message.moduleId) return;
+  void chrome.tabs.create({ url: `${chrome.runtime.getURL(DASHBOARD_PATH)}?moduleId=${encodeURIComponent(message.moduleId)}` });
+});
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   kernel.run(/* resolve modules for message.workflowId */ [], message.input, (failure) => {
