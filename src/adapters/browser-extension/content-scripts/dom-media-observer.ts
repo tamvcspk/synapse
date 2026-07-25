@@ -1,7 +1,11 @@
 import { classifyMediaUrl } from '../../../shared/media-url-matcher';
 import { createMainWorldChannel } from '../utils/main-world/event-channel';
 import { showAnchoredBadge } from '../utils/floating-widget';
-import { MAIN_WORLD_REPORT_CHANNEL_ID } from '../background/modules/network-sniffer/constants';
+import {
+  MAIN_WORLD_REPORT_CHANNEL_ID,
+  MAIN_WORLD_CORRELATION_CHANNEL_ID,
+  HLS_CORRELATION_ATTRIBUTE,
+} from '../background/modules/network-sniffer/constants';
 
 /**
  * Content-script infra (ISOLATED world) for network-sniffer's Phase 1 enhancement
@@ -21,11 +25,21 @@ import { MAIN_WORLD_REPORT_CHANNEL_ID } from '../background/modules/network-snif
  * docs/ROADMAP.md #4.1 — `blob:`-sourced MSE video (hls.js/dash.js-style players, `classifyMediaUrl`
  * correctly returns undefined for it — a blob: URL isn't fetchable outside its own JS realm) used
  * to be silently skipped entirely, leaving the actual content the user wants with no download
- * affordance while ad `<video>`s with plain URLs got one. This file now listens to
- * network-sniffer's MAIN-world observer (main-world-payload.ts, shares this frame's `window` when
- * both run in the top frame) for the manifest/media URL the player's own JS actually fetches, and
- * correlates it to any `blob:` `<video>`/`<audio>` element on the page as a best-effort anchor
- * target — see `lastMainWorldMediaUrl` below for the (deliberately simple, single-global) heuristic.
+ * affordance while ad `<video>`s with plain URLs got one. This file listens to network-sniffer's
+ * MAIN-world observer (main-world-payload.ts, shares this frame's `window` when both run in the top
+ * frame) for the manifest/media URL the player's own JS actually fetches, and correlates it to a
+ * `blob:` `<video>`/`<audio>` element as an anchor target.
+ *
+ * docs/ROADMAP.md #7.3 — three correlation signals, checked in precision order in
+ * `collectCandidates()` below (was a single page-global heuristic before this, which a page with
+ * multiple simultaneous MSE players would mis-anchor): (1) `HLS_CORRELATION_ATTRIBUTE`, set directly
+ * on the exact element by hls-global-hook.ts's `MANIFEST_LOADED` handler — an exact pairing, no
+ * guessing; (2) `blobUrlCorrelation`, a `blob: URL -> manifest URL` map fed by
+ * media-source-interceptor.ts's generic MediaSource hook — an exact match on the blob: URL itself,
+ * though the manifest URL side is still a time-window guess (see that file's doc comment); (3)
+ * `playCorrelatedUrl`, populated only when a SPECIFIC element's own `'play'` event fires — the last
+ * resort, for a blob: element neither of the above could place, now scoped to the element that
+ * actually started playing instead of applied to every blob: element on the page.
  */
 
 interface DomMediaItem {
@@ -45,12 +59,21 @@ interface CandidateMedia {
   correlated?: boolean;
 }
 
-/** Most recently observed MAIN-world media/manifest URL (docs/ROADMAP.md #4.1) — a single global,
- * not per-element. Known, accepted limitation: a page with multiple simultaneous MSE players all
- * get anchored to whichever manifest was last observed, not precisely matched to "their own"
- * player. Precise per-element correlation would need MediaSource/SourceBuffer byte interception, a
- * much heavier technique deliberately not built here. */
-let lastMainWorldMediaUrl: string | undefined;
+// docs/ROADMAP.md #7.3(a) — blob: object URL -> best-effort correlated manifest/media URL, fed by
+// main-world-payload.ts's MediaSource/createObjectURL hook. Keyed by the ACTUAL blob: URL a specific
+// element's src resolves to, so multiple simultaneous MSE players on the page no longer collide the
+// way the old single global did.
+const blobUrlCorrelation = new Map<string, string>();
+
+// docs/ROADMAP.md #7.3's 'play' signal — last-resort fallback only, for a blob: element with neither
+// an HLS_CORRELATION_ATTRIBUTE match nor a blobUrlCorrelation entry. Populated only when THIS
+// SPECIFIC element starts playing (capture-phase 'play' below), not applied to every blob: element
+// on the page like the old single global was.
+const playCorrelatedUrl = new WeakMap<HTMLMediaElement, string>();
+// Most recently observed MAIN-world media/manifest URL — used ONLY inside the 'play' handler below
+// to populate playCorrelatedUrl for the element that just started playing, never applied blindly to
+// every blob: element on a scan (that was the old, coarser behavior this file used to have).
+let mostRecentlyObservedUrl: string | undefined;
 
 function collectCandidates(): CandidateMedia[] {
   const seen = new Set<string>();
@@ -63,14 +86,17 @@ function collectCandidates(): CandidateMedia[] {
     candidates.push({ element: anchor, url: src });
   }
 
-  // blob:/MSE players never expose a fetchable src at all (see file doc comment) — anchor them to
-  // the best-effort correlated URL instead of leaving them with no badge whatsoever.
-  if (lastMainWorldMediaUrl) {
-    for (const el of document.querySelectorAll('video, audio')) {
-      if (!(el instanceof HTMLMediaElement)) continue;
-      const src = el.currentSrc || el.getAttribute('src');
-      if (src?.startsWith('blob:')) candidates.push({ element: el, url: lastMainWorldMediaUrl, correlated: true });
-    }
+  // blob:/MSE players never expose a fetchable src at all (see file doc comment) — anchor each one
+  // to whichever correlation signal is available for THIS SPECIFIC element, in precision order
+  // (docs/ROADMAP.md #7.3): an exact hls.js MANIFEST_LOADED tag, an exact MediaSource/
+  // createObjectURL blob: URL match, or (last resort) the URL observed around when this exact
+  // element started playing.
+  for (const el of document.querySelectorAll('video, audio')) {
+    if (!(el instanceof HTMLMediaElement)) continue;
+    const src = el.currentSrc || el.getAttribute('src');
+    if (!src?.startsWith('blob:')) continue;
+    const correlatedUrl = el.getAttribute(HLS_CORRELATION_ATTRIBUTE) ?? blobUrlCorrelation.get(src) ?? playCorrelatedUrl.get(el);
+    if (correlatedUrl) candidates.push({ element: el, url: correlatedUrl, correlated: true });
   }
 
   return candidates;
@@ -123,9 +149,31 @@ export function installDomMediaObserver(): void {
   // an immediate re-scan: a `preload="none"` player (the motivating case) may not fetch its
   // manifest until playback starts, well after the MutationObserver below last fired.
   createMainWorldChannel<{ url: string }>(MAIN_WORLD_REPORT_CHANNEL_ID).onUpdate(({ url }) => {
-    lastMainWorldMediaUrl = url;
+    mostRecentlyObservedUrl = url;
     scanNow();
   });
+
+  // docs/ROADMAP.md #7.3(a) — the generic MediaSource/createObjectURL correlation signal.
+  createMainWorldChannel<{ blobUrl: string; url: string }>(MAIN_WORLD_CORRELATION_CHANNEL_ID).onUpdate(({ blobUrl, url }) => {
+    blobUrlCorrelation.set(blobUrl, url);
+    scanNow();
+  });
+
+  // docs/ROADMAP.md #7.3's 'play' signal — capture phase so a page's own stopPropagation() on the
+  // bubble phase can't hide this from us. Scopes the "most recently observed URL" guess to the
+  // EXACT element that just started playing, instead of applying it to every blob: element on the
+  // page (the old, coarser behavior) — still just a heuristic, but a much narrower one.
+  document.addEventListener(
+    'play',
+    (event) => {
+      if (!(event.target instanceof HTMLMediaElement) || !mostRecentlyObservedUrl) return;
+      const src = event.target.currentSrc || event.target.getAttribute('src');
+      if (!src?.startsWith('blob:')) return;
+      playCorrelatedUrl.set(event.target, mostRecentlyObservedUrl);
+      scanNow();
+    },
+    true,
+  );
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', scanNow, { once: true });
