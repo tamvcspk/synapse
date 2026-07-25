@@ -17,7 +17,7 @@ export interface ManifestVariant {
 
 export type ParsedManifest =
   | { kind: 'master'; variants: ManifestVariant[] }
-  | { kind: 'media'; segments: string[]; encrypted: boolean }
+  | { kind: 'media'; segments: string[]; encrypted: boolean; isLive: boolean }
   | { kind: 'unknown' };
 
 /** The URI line belonging to a tag at `lines[from]` — the next non-blank line, per the HLS spec.
@@ -44,6 +44,13 @@ function nextUri(lines: string[], from: number): { value: string; index: number 
  * proceed past. Malformed/unresolvable URIs are skipped individually, not treated as a
  * whole-manifest parse failure — same "partial result over hard failure" posture as
  * fetch-images'/crawlSite's per-item skip.
+ *
+ * docs/ROADMAP.md #7.4 — `isLive` (media playlists only) is `true` unless `#EXT-X-ENDLIST` is
+ * present, OR `#EXT-X-PLAYLIST-TYPE:EVENT` is present (an EVENT playlist only ever appends segments
+ * until its own ENDLIST shows up — treated as still-live here too, conservatively). This is the
+ * safety gate the Merge page's segment-URL-expired recovery (ui/merge/main.ts) checks before ever
+ * remapping segments by index after a manifest refetch: a live playlist's window slides, so an index
+ * from an old fetch no longer names the same segment in a new one.
  */
 export function parseM3u8(text: string, baseUrl: string): ParsedManifest {
   const lines = text.split(/\r?\n/);
@@ -52,6 +59,8 @@ export function parseM3u8(text: string, baseUrl: string): ParsedManifest {
   let encrypted = false;
   let isMaster = false;
   let isMedia = false;
+  let hasEndList = false;
+  let playlistType: string | undefined;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!.trim();
@@ -89,10 +98,20 @@ export function parseM3u8(text: string, baseUrl: string): ParsedManifest {
     if (line.startsWith('#EXT-X-KEY')) {
       const method = line.match(/METHOD=([^,]+)/)?.[1];
       if (method && method !== 'NONE') encrypted = true;
+      continue;
+    }
+
+    if (line.startsWith('#EXT-X-ENDLIST')) {
+      hasEndList = true;
+      continue;
+    }
+
+    if (line.startsWith('#EXT-X-PLAYLIST-TYPE')) {
+      playlistType = line.split(':')[1]?.trim();
     }
   }
 
   if (isMaster) return { kind: 'master', variants };
-  if (isMedia) return { kind: 'media', segments, encrypted };
+  if (isMedia) return { kind: 'media', segments, encrypted, isLive: !hasEndList || playlistType === 'EVENT' };
   return { kind: 'unknown' };
 }

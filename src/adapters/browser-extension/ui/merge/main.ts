@@ -125,13 +125,39 @@ function render(manifest: Extract<ParsedManifest, { kind: 'media' }>, sourceUrl:
 
   const status = div({ class: 'merge-status' }, `${manifest.segments.length} segment(s) found. Ready to download.`);
   const startBtn = button({ type: 'button' }, 'Start Download');
-  startBtn.onclick = () => void run(manifest.segments, sourceUrl, status, startBtn);
+  startBtn.onclick = () => void run(manifest, sourceUrl, status, startBtn);
 
   van.add(root, header(h1('Download (merged)'), p(sourceUrl)), status, div({ class: 'merge-actions' }, startBtn));
 }
 
+/**
+ * docs/ROADMAP.md #7.4 — a segment 401/403 mid-run usually means its signed URL expired, not that
+ * the video vanished: refetching the SAME manifest almost always reissues the whole segment list
+ * with fresh signatures. Remaps by INDEX (not by matching old URLs) since that's the only stable key
+ * across two fetches of a rotating-signature playlist. Only ever attempted once per run (`budget`,
+ * mutated by the caller) and only when the manifest is confirmed VOD (`!isLive`, media-manifest-
+ * parser.ts's `isLive`) — a live playlist's segment window slides, so index i doesn't name the same
+ * segment in a re-fetch. Returns `undefined` on any failure to refetch/reparse, or when the refreshed
+ * manifest can't be trusted for a remap (still live, or too short to have an entry at `fromIndex`) —
+ * the caller treats that the same as the original failure and aborts.
+ */
+async function tryRefreshSegmentsFromIndex(
+  manifestUrl: string,
+  fromIndex: number,
+): Promise<string[] | undefined> {
+  try {
+    await replayHeadersFor(manifestUrl);
+    const text = await (await fetch(manifestUrl)).text();
+    const reparsed = parseM3u8(text, manifestUrl);
+    if (reparsed.kind !== 'media' || reparsed.isLive || reparsed.segments.length <= fromIndex) return undefined;
+    return reparsed.segments;
+  } catch {
+    return undefined;
+  }
+}
+
 async function run(
-  segments: string[],
+  manifest: Extract<ParsedManifest, { kind: 'media' }>,
   sourceUrl: string,
   status: HTMLElement,
   startBtn: HTMLButtonElement,
@@ -143,12 +169,32 @@ async function run(
   // just starts over, same "no half-finished feature" simplicity as everything else in this flow.
   const runId = crypto.randomUUID();
   const blobRefs: string[] = [];
+  // Mutable working copy — docs/ROADMAP.md #7.4's recovery replaces the still-unfetched tail (indices
+  // >= i) in place with a freshly re-signed list, without touching what's already been downloaded.
+  let segments = manifest.segments;
+  // One refresh attempt for the whole run, not per-segment (a rotating-signature CDN typically
+  // rotates the ENTIRE remaining list at once, so one refresh should fix every later segment too) —
+  // a second 401/403 after already spending this budget means something else is wrong, so it aborts
+  // instead of hammering the manifest endpoint again.
+  let refreshBudgetSpent = false;
 
   try {
     for (let i = 0; i < segments.length; i++) {
       status.textContent = `Downloading segment ${i + 1} / ${segments.length}...`;
       await replayHeadersFor(segments[i]!);
-      const bytes = await (await fetch(segments[i]!)).arrayBuffer();
+      let res = await fetch(segments[i]!);
+      if ((res.status === 401 || res.status === 403) && !refreshBudgetSpent && !manifest.isLive) {
+        refreshBudgetSpent = true;
+        status.textContent = `Segment ${i + 1} link expired — refreshing manifest...`;
+        const refreshed = await tryRefreshSegmentsFromIndex(sourceUrl, i);
+        if (refreshed) {
+          segments = [...segments.slice(0, i), ...refreshed.slice(i)];
+          await replayHeadersFor(segments[i]!);
+          res = await fetch(segments[i]!);
+        }
+      }
+      if (!res.ok) throw new Error(`Segment ${i + 1} failed: HTTP ${res.status}`);
+      const bytes = await res.arrayBuffer();
       const blobRef = `merge:${runId}:${i}`;
       // Temp storage in IndexedDB (blob-store.ts), not held in one big JS array — segments can
       // number in the hundreds, and each is only needed again once, sequentially, at remux time.

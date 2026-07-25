@@ -37,7 +37,8 @@
 }
 
 .kind-badge,
-.drm-badge {
+.drm-badge,
+.expiring-badge {
   font-size: 0.75rem;
   padding: 0.1rem 0.5rem;
   border-radius: 999px;
@@ -51,6 +52,13 @@
 
 .drm-badge {
   background: var(--pico-mark-background-color);
+}
+
+/* Softer than .drm-badge's solid fill — this is a nudge ("download soon"), not a hard blocker like
+   DRM, so it shouldn't compete visually with it. */
+.expiring-badge {
+  border: 1px solid var(--pico-muted-border-color);
+  color: var(--pico-muted-color);
 }
 
 .media-item-filename {

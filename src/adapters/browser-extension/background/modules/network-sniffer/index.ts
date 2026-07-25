@@ -1,8 +1,10 @@
 import type { CacheService, Module } from '../../../../../kernel/module';
 import type { CollectionCommand } from '../../../../../kernel/ui-schema';
 import { classifyMediaUrl, classifyMediaMimeType, type MediaKind } from '../../../../../shared/media-url-matcher';
-import { isAdNetworkDomain } from '../../../../../shared/ad-domain-denylist';
+import { sniffMediaMagicBytes } from '../../../../../shared/media-magic-bytes';
+import { isAdNetworkDomain, looksLikeAdHostnamePrefix } from '../../../../../shared/ad-domain-denylist';
 import { looksLikeAdOrTrackerPath, looksLikeAdMacroTemplate } from '../../../../../shared/junk-url-patterns';
+import { looksLikeSignedUrl } from '../../../../../shared/signed-url-detector';
 import { ensureNetworkObserver, teardownNetworkObserver, type ObservedRequest } from '../../../utils/webrequest-media-observer';
 import { syncHeaderReplayRule } from '../../../utils/header-replay-rules';
 import {
@@ -26,9 +28,17 @@ import { chromeStorageCache } from '../../services/cache';
  * catches an ad/tracker request the domain list doesn't name yet (a new domain, or one that rotates
  * — DGA-style), without needing the list updated first. `looksLikeAdMacroTemplate` catches a third
  * shape: a literal un-substituted `{macro}` query value, seen on real ad-tracker redirect pages
- * whose domain/path otherwise didn't match anything above. */
+ * whose domain/path otherwise didn't match anything above. docs/ROADMAP.md #7.5 adds a fourth:
+ * `looksLikeAdHostnamePrefix` catches a hostname LABEL (`creative.`/`ads.`/etc.) shared across many
+ * unrelated ad operators, regardless of which registrable domain it sits on — `isAdNetworkDomain`
+ * only ever matches domains already known by name. */
 function isJunkUrl(url: string): boolean {
-  return isAdNetworkDomain(url) || looksLikeAdOrTrackerPath(url) || looksLikeAdMacroTemplate(url);
+  return (
+    isAdNetworkDomain(url) ||
+    looksLikeAdOrTrackerPath(url) ||
+    looksLikeAdMacroTemplate(url) ||
+    looksLikeAdHostnamePrefix(url)
+  );
 }
 
 /** docs/ROADMAP.md §6.5 — a request's OWN url can look completely clean (e.g. a legitimate-looking
@@ -72,6 +82,61 @@ function classifyDetection(req: ObservedRequest): MediaKind | undefined {
   if (req.resourceType === 'media') return mimeKind ?? urlKind;
   if (urlKind === 'stream') return 'stream';
   return mimeKind;
+}
+
+/**
+ * docs/ROADMAP.md #7.2 — a request only qualifies for the magic-bytes rescue probe when
+ * `classifyDetection` above is genuinely BLIND, not merely rejected: a URL extension already
+ * recognized by `classifyMediaUrl` doesn't need probing (that path already works), and a junk
+ * request (ad/tracker) shouldn't be probed at all — probing it would just spend a fetch confirming
+ * what the junk filter already decided. The remaining case — Content-Type missing or one of the two
+ * "server gave up classifying" values (`application/octet-stream`/`text/plain`) on a URL whose
+ * extension is no help either — is the one real gap: a hls.js/dash.js-style manifest or a media file
+ * served with no useful Content-Type at all.
+ */
+function shouldProbeMagicBytes(req: ObservedRequest): boolean {
+  if (isJunkRequest(req.url, req.initiator)) return false;
+  if (classifyMediaUrl(req.url)) return false;
+  const mime = req.contentType?.split(';')[0]?.trim().toLowerCase();
+  return mime === undefined || mime === 'application/octet-stream' || mime === 'text/plain';
+}
+
+// docs/ROADMAP.md #7.2 — caps how many probe fetches can be in flight at once (a burst of blind
+// requests on one busy page shouldn't turn into a burst of extra fetches), and remembers which
+// origins have already been probed so the same CDN isn't probed over and over across its (likely
+// many) blind requests — regardless of whether that first probe found anything. Deliberately
+// unbounded/never evicted for the lifetime of the service worker: unlike header-replay-rules.ts's
+// MAX_HOSTS=50 (a real chrome.declarativeNetRequest rule-count budget), this is just a plain JS Set
+// with no comparable browser-imposed limit to guard against.
+const probedMagicByteOrigins = new Set<string>();
+let activeMagicByteProbes = 0;
+const MAX_CONCURRENT_MAGIC_BYTE_PROBES = 4;
+
+/** docs/ROADMAP.md #7.2 — the active half of the magic-bytes rescue: a small `Range` fetch instead
+ * of touching the page's own response (MV3 has no `webRequest.filterResponseData` to do that even if
+ * we wanted to — see the doc comment on media-magic-bytes.ts). Only ever called after
+ * `shouldProbeMagicBytes` already said this request is worth it. A `'segment'` sniff result is
+ * deliberately swallowed here, same as `classifyMediaUrl`'s existing exclusion of `.ts`/`.m4s` — a
+ * recognized segment format still isn't something to list. */
+async function probeMagicBytesKind(url: string): Promise<MediaKind | undefined> {
+  let origin: string;
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    return undefined;
+  }
+  if (probedMagicByteOrigins.has(origin) || activeMagicByteProbes >= MAX_CONCURRENT_MAGIC_BYTE_PROBES) return undefined;
+  probedMagicByteOrigins.add(origin);
+  activeMagicByteProbes++;
+  try {
+    const res = await fetch(url, { headers: { Range: 'bytes=0-1023' } });
+    const kind = sniffMediaMagicBytes(new Uint8Array(await res.arrayBuffer()));
+    return kind === 'segment' ? undefined : kind;
+  } catch {
+    return undefined;
+  } finally {
+    activeMagicByteProbes--;
+  }
 }
 
 /** Sent directly by content-scripts/dom-media-observer.ts (docs/ROADMAP.md #4 Phase 1) via
@@ -255,6 +320,12 @@ export const NetworkSnifferModule: Module<
         type: 'boolean',
       },
       {
+        key: 'expiring',
+        label: 'Link expires?',
+        hint: 'docs/ROADMAP.md #7.4 — this URL\'s query string looks signed/time-limited (S3-style presigned URL, CDN token-auth, etc.) — download it soon, not a reliable indicator on its own',
+        type: 'boolean',
+      },
+      {
         key: 'resolution',
         label: 'Resolution',
         hint: 'Set when this entry itself is a single, already-resolved HLS media/variant playlist',
@@ -298,9 +369,14 @@ export const NetworkSnifferModule: Module<
     // Idempotent — safe to call on every bus event (startup 'sync', or a Delete command), only
     // actually installs the chrome.webRequest listener the first time.
     ensureNetworkObserver((req) => {
-      const kind = classifyDetection(req);
-      if (!kind) return;
+      const syncKind = classifyDetection(req);
+      if (!syncKind && !shouldProbeMagicBytes(req)) return;
       void (async () => {
+        // docs/ROADMAP.md #7.2 — only reached when classifyDetection couldn't tell from
+        // URL/Content-Type alone; the probe fetch is what turns a genuinely blind request into a
+        // classified one (or leaves it undetected, same as before this rescue path existed).
+        const kind = syncKind ?? (await probeMagicBytesKind(req.url));
+        if (!kind) return;
         // Only computable when the observer gave us an initiator — the only source with a
         // tabId+initiator in hand (docs/ROADMAP.md #4.1's third-party signal).
         const thirdParty = req.initiator ? await isThirdPartyInitiator(req.tabId, req.initiator) : undefined;
@@ -312,6 +388,7 @@ export const NetworkSnifferModule: Module<
           detectedAt: new Date().toISOString(),
           ...(req.initiator ? { pageUrl: req.initiator } : {}),
           ...(thirdParty !== undefined ? { thirdParty } : {}),
+          ...(looksLikeSignedUrl(req.url) ? { expiring: true } : {}),
           // docs/ROADMAP.md #7.1 — only the webRequest source ever has the original request's own
           // headers in hand (report-dom-media/report-main-world-media never see them).
           ...(req.requestHeaders && Object.keys(req.requestHeaders).length > 0 ? { requestHeaders: req.requestHeaders } : {}),
@@ -353,6 +430,7 @@ export const NetworkSnifferModule: Module<
           kind,
           detectedAt: new Date().toISOString(),
           ...(command.pageUrl ? { pageUrl: command.pageUrl } : {}),
+          ...(looksLikeSignedUrl(command.url) ? { expiring: true } : {}),
         };
         if (await addDetectedMedia(media, ctx.services.cache) && kind === 'stream') {
           void inspectStreamEntry(media, ctx.services.cache);
@@ -367,9 +445,14 @@ export const NetworkSnifferModule: Module<
         if (isJunkRequest(item.url, item.pageUrl)) continue;
         const kind = classifyMediaUrl(item.url);
         if (!kind) continue;
-        const media: DetectedMedia = item.pageUrl
-          ? { id: crypto.randomUUID(), url: item.url, kind, pageUrl: item.pageUrl, detectedAt: new Date().toISOString() }
-          : { id: crypto.randomUUID(), url: item.url, kind, detectedAt: new Date().toISOString() };
+        const media: DetectedMedia = {
+          id: crypto.randomUUID(),
+          url: item.url,
+          kind,
+          detectedAt: new Date().toISOString(),
+          ...(item.pageUrl ? { pageUrl: item.pageUrl } : {}),
+          ...(looksLikeSignedUrl(item.url) ? { expiring: true } : {}),
+        };
         if (await addDetectedMedia(media, ctx.services.cache) && kind === 'stream') {
           void inspectStreamEntry(media, ctx.services.cache);
         }

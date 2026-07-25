@@ -32,6 +32,18 @@ const JUNK_PATH_SEGMENTS = [
   'banner',
   'banners',
   'popunder',
+  // docs/ROADMAP.md #7.5 — VAST/VPAID are ad-manifest formats (the XML/JS spec IAB defines for video
+  // ad creatives) and ima/imasdk/prebid name specific ad-tech SDKs (Google IMA, Prebid.js) — a path
+  // segment naming one of these is about as strong a signal as this list gets, essentially no
+  // legitimate media/page path happens to use these exact words.
+  'vast',
+  'vpaid',
+  'ima',
+  'imasdk',
+  'prebid',
+  'preroll',
+  'midroll',
+  'interstitial',
 ];
 
 const JUNK_QUERY_KEYS = [

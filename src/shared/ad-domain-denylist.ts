@@ -36,3 +36,24 @@ export function isAdNetworkDomain(url: string): boolean {
   }
   return AD_NETWORK_DOMAINS.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
 }
+
+// docs/ROADMAP.md #7.5 — a DIFFERENT shape of signal than AD_NETWORK_DOMAINS above: not a specific
+// known domain, but a hostname LABEL commonly used across many unrelated ad/tracking operators
+// (`creative.example.com`, `ads.example.net`, ...) regardless of which registrable domain it's on.
+// Kept as its own list/function rather than folded into `isAdNetworkDomain` — that one is an exact/
+// subdomain match against domains this module already knows by name; this one only ever looks at the
+// FIRST label of the hostname and matches on any domain, known or not.
+const AD_HOSTNAME_PREFIXES = ['creative.', 'ads.', 'adserver.', 'track.', 'pixel.'];
+
+/** True when `url`'s hostname itself STARTS WITH one of the ad/tracker-shaped labels above (e.g.
+ * `creative.somecdn.com`) — distinct from `isAdNetworkDomain`'s exact/subdomain match against known
+ * domains. Returns `false` on an unparsable URL, same posture as `isAdNetworkDomain`. */
+export function looksLikeAdHostnamePrefix(url: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return AD_HOSTNAME_PREFIXES.some((prefix) => hostname.startsWith(prefix));
+}

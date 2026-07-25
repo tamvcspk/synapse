@@ -120,6 +120,9 @@ function renderItem(item: DetectedMedia) {
       { class: 'media-item-badges' },
       span({ class: 'kind-badge' }, item.kind),
       item.encrypted ? span({ class: 'drm-badge' }, 'DRM') : null,
+      // docs/ROADMAP.md #7.4 — a label, not a filter (see DetectedMedia.expiring's doc comment) —
+      // just a nudge to download before a signed/time-limited link rots.
+      item.expiring ? span({ class: 'expiring-badge', title: 'This link looks signed/time-limited' }, 'Expires soon') : null,
     ),
     p({ class: 'media-item-filename', title: item.url }, fileNameFromUrl(item.url)),
     item.pageUrl ? p({ class: 'media-item-source' }, `Found on ${hostnameOf(item.pageUrl)}`) : null,

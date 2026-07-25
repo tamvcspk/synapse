@@ -16,6 +16,12 @@ export interface DetectedMedia {
    * anything. `undefined` means unknown (only ever computed for the `webRequest`-sourced path,
    * which is the only source with a tabId+initiator in hand), not "known first-party". */
   thirdParty?: boolean;
+  /** docs/ROADMAP.md #7.4 — best-effort signal that this URL's query string carries a signed/expiry
+   * key (S3-style presigned URL, CDN token-auth, etc.) — see shared/signed-url-detector.ts. A LABEL,
+   * not a filter (same reasoning as `thirdParty` above): a legitimate video being served behind a
+   * signed URL is completely normal. Computed for every detection source (unlike `thirdParty`, this
+   * is a pure string check with no tabId/initiator needed). */
+  expiring?: boolean;
   /** Only set on a `kind: 'stream'` entry that was itself detected as a single, already-resolved
    * media/variant playlist (not a master listing other resolutions) — a master's variants live in
    * `variants` below instead, not as their own entries with this field (docs/ROADMAP.md §6.3). */
