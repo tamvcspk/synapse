@@ -19,7 +19,14 @@ import { isModuleActive } from '../../../module-registry/storage';
 // file with zero `import` statements.
 import payloadPath from './main-world-payload?script&iife';
 import { MAIN_WORLD_SCRIPT_ID } from './constants';
-import { addDetectedMedia, listDetectedMedia, removeDetectedMedia, updateDetectedMedia, type DetectedMedia } from './store';
+import {
+  addDetectedMedia,
+  collapseVariantShadowedEntries,
+  listDetectedMedia,
+  removeDetectedMedia,
+  updateDetectedMedia,
+  type DetectedMedia,
+} from './store';
 import { parseM3u8 } from '../../../../../shared/media-manifest-parser';
 import { chromeStorageCache } from '../../services/cache';
 
@@ -358,7 +365,7 @@ export const NetworkSnifferModule: Module<
   // `variantsField` column expects, falling back to a 1-based index for a variant whose manifest
   // never had an `EXT-X-STREAM-INF` bandwidth/resolution tag to read a label from.
   listCollection: async () =>
-    (await listDetectedMedia()).map((m) => ({
+    collapseVariantShadowedEntries(await listDetectedMedia()).map((m) => ({
       ...m,
       downloadUrl: m.variants?.[0]?.url ?? m.url,
       variantLinks: m.variants?.map((v, i) => ({ url: v.url, label: v.resolution ?? `Option ${i + 1}` })),

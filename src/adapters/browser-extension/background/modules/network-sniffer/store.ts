@@ -86,6 +86,29 @@ export async function removeDetectedMedia(id: string, cache: CacheService = chro
   await cache.set(DETECTED_MEDIA_STORAGE_KEY, existing.filter((m) => m.id !== id));
 }
 
+/**
+ * docs/ROADMAP.md §6.3's "one real video = one item" only holds for resolutions a MASTER playlist
+ * itself lists — a page's own player very often ALSO requests one or more of those exact variant
+ * playlist URLs directly (adaptive-bitrate switching), which `chrome.webRequest` sees as just another
+ * unrelated `.m3u8` request and records as its OWN top-level entry — there's no way for the detector
+ * to know in the moment that a URL it just saw is already nested inside another entry's `variants`.
+ * A display-time filter, not a storage change: hides any entry whose `url` matches a variant URL
+ * already known on ANOTHER entry, so the master's resolution `<select>` is the only place that
+ * resolution shows up. Both the Side Panel and the Dashboard's Management View read through this
+ * (`listDetectedMedia()` itself stays raw/unfiltered — `addDetectedMedia`'s own url-dedupe check
+ * needs the untouched list, not this display view, or a variant hidden here would look "new" again
+ * and get re-inserted). Self-correcting if the master's own auto-inspect (`inspectStreamEntry`)
+ * hasn't populated `variants` yet at read time — the variant shows up standalone for one render,
+ * then collapses in on the next storage-change re-render once inspection finishes.
+ */
+export function collapseVariantShadowedEntries(items: DetectedMedia[]): DetectedMedia[] {
+  const knownVariantUrls = new Set<string>();
+  for (const item of items) {
+    for (const v of item.variants ?? []) knownVariantUrls.add(v.url);
+  }
+  return items.filter((item) => !knownVariantUrls.has(item.url));
+}
+
 /** docs/ROADMAP.md #5.1 — patches an existing entry in place (e.g. Inspect writing back
  * `segmentCount`/`encrypted` after fetching a media/variant playlist). No-op if `id` isn't found
  * (entry dismissed between the Inspect click and this write finishing). */

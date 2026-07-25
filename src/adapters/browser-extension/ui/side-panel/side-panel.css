@@ -100,8 +100,12 @@
   padding: 0.4rem 0.6rem;
 }
 
-/* docs/ROADMAP.md §7.6 — replaces .download-btn in the same footer row while a stream's Merge Tab
-   runs in the background. */
+/* docs/ROADMAP.md §7.6 — its own full-width row below .media-item-actions (not squeezed into that
+   row alongside the resolution <select>) while a stream's Merge Tab runs in the background. */
+.media-item-progress {
+  margin-top: 0.25rem;
+}
+
 .download-progress {
   display: flex;
   align-items: center;
@@ -109,7 +113,7 @@
 }
 
 .download-progress progress {
-  width: 5rem;
+  flex: 1;
   margin: 0;
 }
 

@@ -1,7 +1,7 @@
 import '@picocss/pico/css/pico.min.css';
 import './side-panel.css';
 import van from 'vanjs-core';
-import { listDetectedMedia, type DetectedMedia } from '../../background/modules/network-sniffer/store';
+import { collapseVariantShadowedEntries, listDetectedMedia, type DetectedMedia } from '../../background/modules/network-sniffer/store';
 import { DASHBOARD_PATH } from '../dashboard/dashboard-path';
 import downloadIconUrl from '../../../../assets/icon/download.svg';
 
@@ -60,14 +60,16 @@ async function load(): Promise<void> {
   // by origin, not exact string, and drop entries with no `pageUrl` at all (nothing to scope them
   // to — see store.ts's doc comment on this being a rare case).
   items = origin
-    ? all.filter((m) => {
-        if (!m.pageUrl) return false;
-        try {
-          return new URL(m.pageUrl).origin === origin;
-        } catch {
-          return false;
-        }
-      })
+    ? collapseVariantShadowedEntries(
+        all.filter((m) => {
+          if (!m.pageUrl) return false;
+          try {
+            return new URL(m.pageUrl).origin === origin;
+          } catch {
+            return false;
+          }
+        }),
+      )
     : [];
   render();
 }
@@ -212,12 +214,16 @@ function renderItem(item: DetectedMedia) {
       { class: 'media-item-actions' },
       variantSelect,
       downloadProgress
-        ? renderDownloadProgress(downloadProgress)
+        ? null
         : button(
             { class: 'download-btn', title: 'Download', 'aria-label': 'Download', onclick: () => handleDownload(item) },
             img({ src: downloadIconUrl, alt: '' }),
           ),
     ),
+    // Own full-width row, not sharing .media-item-actions with the resolution <select> — a
+    // <progress> bar/status line squeezed into that row's remaining space (next to the select) was
+    // cramped and easy to miss.
+    downloadProgress ? div({ class: 'media-item-progress' }, renderDownloadProgress(downloadProgress)) : null,
   );
 }
 
