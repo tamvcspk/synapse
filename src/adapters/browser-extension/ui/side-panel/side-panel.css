@@ -100,6 +100,29 @@
   padding: 0.4rem 0.6rem;
 }
 
+/* docs/ROADMAP.md §7.6 — replaces .download-btn in the same footer row while a stream's Merge Tab
+   runs in the background. */
+.download-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.download-progress progress {
+  width: 5rem;
+  margin: 0;
+}
+
+.download-progress-text {
+  font-size: 0.8rem;
+  color: var(--pico-muted-color);
+  white-space: nowrap;
+}
+
+.download-progress-error {
+  color: var(--pico-del-color, #c00);
+}
+
 .download-btn img {
   width: 16px;
   height: 16px;

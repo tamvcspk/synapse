@@ -14,7 +14,7 @@ import downloadIconUrl from '../../../../assets/icon/download.svg';
  * shows the entire cross-tab detected-media log unfiltered.
  */
 
-const { div, h1, p, span, select, option, button, img } = van.tags;
+const { div, h1, p, span, select, option, button, img, progress: progressTag } = van.tags;
 
 // Same literal path network-sniffer/index.ts's 'open-tab' rowAction already uses — no shared
 // constant exists for it (that rowAction is declared inline in the module's uiSchema).
@@ -26,6 +26,22 @@ let items: DetectedMedia[] = [];
 // Which variant URL is currently selected per master-playlist entry (entry.id -> variant url) —
 // UI-only state, never persisted.
 const selectedVariantUrl = new Map<string, string>();
+
+// docs/ROADMAP.md §7.6 — one in-flight background download per detected-media entry id, fed by
+// `synapse:merge-progress` messages from the Merge Tab this panel itself opened (handleDownload
+// below). UI-only, never persisted: reloading the Side Panel just loses the progress display, the
+// background Tab keeps running regardless (same "no persistence" posture as the download itself).
+interface DownloadProgress {
+  phase: 'segments' | 'remux' | 'done' | 'error';
+  done?: number | undefined;
+  total?: number | undefined;
+  message?: string | undefined;
+  tabId?: number | undefined;
+}
+const activeDownloads = new Map<string, DownloadProgress>();
+// Gives the 'done'/'error' state a moment on screen before the Tab (and this row's progress UI)
+// disappears — long enough to read "Done"/"Failed: ...", short enough not to feel stuck.
+const DOWNLOAD_SETTLE_DELAY_MS = 1500;
 
 async function activeTabOrigin(): Promise<string | undefined> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -62,14 +78,56 @@ function resolveDownloadUrl(item: DetectedMedia): string {
 
 function handleDownload(item: DetectedMedia): void {
   if (item.kind === 'stream') {
+    if (activeDownloads.has(item.id)) return; // already downloading this entry
     // DRM guard (`encrypted`) is enforced by the Merge page itself once it re-fetches+parses the
     // manifest — not duplicated here (docs/ROADMAP.md §6.3).
     const url = resolveDownloadUrl(item);
-    void chrome.tabs.create({ url: `${chrome.runtime.getURL(MERGE_PATH)}?url=${encodeURIComponent(url)}` });
+    const tabUrl = `${chrome.runtime.getURL(MERGE_PATH)}?url=${encodeURIComponent(url)}&entryId=${encodeURIComponent(item.id)}`;
+    // docs/ROADMAP.md §7.6 — background Tab (doesn't steal focus), auto-runs on its own once
+    // loaded; this panel just tracks its progress via the message listener below and shows an
+    // inline <progress> bar in place of the Download button until it settles.
+    activeDownloads.set(item.id, { phase: 'segments' });
+    render();
+    void chrome.tabs
+      .create({ url: tabUrl, active: false })
+      .then((tab) => {
+        const state = activeDownloads.get(item.id);
+        if (state) state.tabId = tab.id;
+      })
+      .catch(() => {
+        activeDownloads.delete(item.id);
+        render();
+      });
     return;
   }
   void chrome.downloads.download({ url: item.url });
 }
+
+/** docs/ROADMAP.md §7.6 — settles the row back to normal after a 'done'/'error' phase: closes the
+ * background Tab (best-effort — it may have already closed itself or been closed by the user) and
+ * clears the progress state so the Download button comes back. */
+function settleDownload(entryId: string): void {
+  setTimeout(() => {
+    const state = activeDownloads.get(entryId);
+    if (state?.tabId !== undefined) void chrome.tabs.remove(state.tabId).catch(() => {});
+    activeDownloads.delete(entryId);
+    render();
+  }, DOWNLOAD_SETTLE_DELAY_MS);
+}
+
+chrome.runtime.onMessage.addListener((message: Partial<DownloadProgress> & { type?: string; entryId?: string } | undefined) => {
+  if (message?.type !== 'synapse:merge-progress' || !message.entryId || !message.phase) return;
+  const existing = activeDownloads.get(message.entryId);
+  activeDownloads.set(message.entryId, {
+    ...existing,
+    phase: message.phase,
+    done: message.done,
+    total: message.total,
+    message: message.message,
+  });
+  render();
+  if (message.phase === 'done' || message.phase === 'error') settleDownload(message.entryId);
+});
 
 function openDashboard(): void {
   void chrome.tabs.create({ url: `${chrome.runtime.getURL(DASHBOARD_PATH)}?moduleId=network-sniffer` });
@@ -102,6 +160,28 @@ function resolutionSummary(item: DetectedMedia): string | undefined {
   return undefined;
 }
 
+/** docs/ROADMAP.md §7.6 — replaces the Download button while a `kind:'stream'` entry's Merge Tab is
+ * running in the background, so the row shows what's happening instead of looking clickable-but-
+ * inert. `'segments'`'s `total` is only known once the Merge Tab has fetched+parsed the manifest
+ * itself, so it renders a bare "Starting…" line until the first per-segment message arrives. */
+function renderDownloadProgress(state: DownloadProgress) {
+  if (state.phase === 'error') {
+    return span({ class: 'download-progress-text download-progress-error' }, `Failed: ${state.message ?? 'unknown error'}`);
+  }
+  if (state.phase === 'done') {
+    return span({ class: 'download-progress-text' }, 'Done');
+  }
+  if (state.phase === 'remux') {
+    return span({ class: 'download-progress-text' }, 'Remuxing...');
+  }
+  const total = state.total;
+  return div(
+    { class: 'download-progress' },
+    total ? progressTag({ value: state.done ?? 0, max: total }) : progressTag(),
+    span({ class: 'download-progress-text' }, total ? `Segment ${state.done ?? 0}/${total}` : 'Starting...'),
+  );
+}
+
 function renderItem(item: DetectedMedia) {
   const variantSelect =
     item.variants && item.variants.length > 0
@@ -113,6 +193,7 @@ function renderItem(item: DetectedMedia) {
         )
       : null;
   const summary = resolutionSummary(item);
+  const downloadProgress = activeDownloads.get(item.id);
 
   return div(
     { class: 'media-item' },
@@ -130,10 +211,12 @@ function renderItem(item: DetectedMedia) {
     div(
       { class: 'media-item-actions' },
       variantSelect,
-      button(
-        { class: 'download-btn', title: 'Download', 'aria-label': 'Download', onclick: () => handleDownload(item) },
-        img({ src: downloadIconUrl, alt: '' }),
-      ),
+      downloadProgress
+        ? renderDownloadProgress(downloadProgress)
+        : button(
+            { class: 'download-btn', title: 'Download', 'aria-label': 'Download', onclick: () => handleDownload(item) },
+            img({ src: downloadIconUrl, alt: '' }),
+          ),
     ),
   );
 }

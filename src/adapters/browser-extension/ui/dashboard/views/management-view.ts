@@ -76,7 +76,9 @@ export function renderManagementView(
     const url = urlOverride ?? String(item[action.urlField]);
     if (action.openTabKinds.includes(String(item[action.kindField]))) {
       const tabUrl = `${chrome.runtime.getURL(action.path)}?url=${encodeURIComponent(url)}`;
-      void chrome.tabs.create({ url: tabUrl });
+      // docs/ROADMAP.md #7.6 — background Tab, doesn't steal focus from the Dashboard the user is
+      // looking at (same reasoning as the Side Panel's own smart-download branch).
+      void chrome.tabs.create({ url: tabUrl, active: false });
     } else {
       void chrome.downloads.download({ url });
     }

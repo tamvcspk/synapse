@@ -326,7 +326,7 @@ Mục 4.1 đã ghi giới hạn hiện tại: correlation blob:→URL là **mộ
 - **Nhắc lại cảnh báo whack-a-mole đã ghi ở 5.2/6.5:** mỗi lần phải thêm tay một domain/keyword là một phiếu bầu cho hướng lớn hơn (EasyList/EasyPrivacy qua DNR). 7.5 này là lần bổ sung thủ công **cuối cùng** theo kế hoạch — lần tới cần thêm domain/keyword thủ công nên là tín hiệu để cân nhắc nghiêm túc hướng blocklist lớn hơn thay vì vá tiếp.
 - **Chưa test bằng browser thật** (agent không có browser) — chỉ verify bằng pure-function check, chưa xác nhận trên site thật có request nào thật sự mang các tín hiệu mới này.
 
-### 7.6. Download UX — bỏ bước mở Tab lộ liễu, chạy nền + hiện tiến độ tại Side Panel — chưa implement
+### 7.6. Download UX — bỏ bước mở Tab lộ liễu, chạy nền + hiện tiến độ tại Side Panel — Đã implement
 
 **Không thực sự là một hạng mục "Sniffing & Detector"** (gần mục 6.3/8 hơn — trải nghiệm của nút Download, không phải kỹ thuật phát hiện) nhưng gộp vào đây theo yêu cầu, vì nó là bước tiếp theo tự nhiên ngay sau khi đã phát hiện được một stream.
 
@@ -340,7 +340,10 @@ Mục 4.1 đã ghi giới hạn hiện tại: correlation blob:→URL là **mộ
 - **Không có persistence qua reload Side Panel:** đóng/mở lại Side Panel giữa lượt tải (Side Panel per-window, đã ghi ở §6.4) chỉ mất hiển thị tiến độ — progress relay là fire-and-forget, không lưu state (cùng giới hạn "không resume" đã chấp nhận ở 5.3/8.1). Tab nền vẫn tự chạy tiếp tới khi xong/lỗi dù không ai đang xem.
 - **Đóng Tab giữa chừng vẫn phá hỏng lượt tải (không đổi, chỉ đỡ dễ xảy ra hơn):** ffmpeg cần Tab sống suốt quá trình — Tab giờ không active nên user khó vô tình đóng nhầm hơn trước (không hiện trong thanh tab đang xem), nhưng vẫn có thể bị đóng qua `chrome://extensions`'s "Inspect views" hay việc dọn tab hàng loạt. Không có cảnh báo "bạn có chắc" — chấp nhận, cùng mức độ rủi ro như hiện tại.
 - **Câu hỏi mở, chưa chốt:** nhiều lượt tải đồng thời (nhiều `entryId` khác nhau, mỗi lượt một Tab nền riêng) — chưa có giới hạn số Tab nền chạy song song hay hàng đợi; để mặc định "không giới hạn" cho tới khi thấy vấn đề thật.
-- **Chưa test bằng browser thật** (agent không có browser) — cần verify: `chrome.tabs.create({ active: false })` có khiến Chrome throttle timer của Tab nền tới mức ảnh hưởng tốc độ fetch segment/remux hay không (background-tab throttling là hành vi đã biết của Chrome, chưa rõ mức ảnh hưởng cụ thể ở đây); progress message tới đúng Side Panel đang mở đúng cửa sổ khi có nhiều lượt tải chạy song song.
+- **`entryId` = chính `DetectedMedia.id` của entry** ([ui/side-panel/main.ts](../src/adapters/browser-extension/ui/side-panel/main.ts)) — không cần một scheme id mới, mỗi entry vốn đã là đơn vị "một video" duy nhất trong danh sách. `activeDownloads: Map<entryId, DownloadProgress>` (module-scoped, UI-only) khoá luôn `tabId` lấy từ `chrome.tabs.create()`'s trả về, dùng lại để `chrome.tabs.remove()` khi settle. Bấm Download lần hai trên cùng entry khi đang tải là no-op (`activeDownloads.has(item.id)` guard) thay vì mở Tab thứ hai.
+- **Dashboard's `smart-download` (§6.8) cũng đổi sang `active:false`** ([management-view.ts](../src/adapters/browser-extension/ui/dashboard/views/management-view.ts)'s `runSmartDownload`) — cùng lý do mất-focus, áp dụng cho MỌI schema dùng action `'smart-download'` (hiện chỉ network-sniffer), không riêng gì Tab do Side Panel mở. Dashboard **không** có UI progress riêng (đó là phần chỉ Side Panel mới có, theo đúng phạm vi đã chốt) — Tab nền vẫn tự chạy xong xuôi, chỉ là không hiện tiến độ tại chỗ; không có `entryId` nên `postProgress` trong trang Merge tự no-op cho trường hợp này.
+- **Bug tiện sửa luôn khi đụng tới `load()`'s error path:** thông báo lỗi cho master playlist còn trỏ tới nút "Inspect" đã bị xoá hẳn từ §6.3 (auto-inspect ngầm, không còn nút nào tên vậy) — sửa lại trỏ đúng UI hiện tại (chọn resolution qua `<select>`/variants column ở Side Panel hoặc Dashboard).
+- **Chưa test bằng browser thật** (agent không có browser) — cần verify: `chrome.tabs.create({ active: false })` có khiến Chrome throttle timer của Tab nền tới mức ảnh hưởng tốc độ fetch segment/remux hay không (background-tab throttling là hành vi đã biết của Chrome, chưa rõ mức ảnh hưởng cụ thể ở đây); progress message tới đúng Side Panel đang mở đúng cửa sổ khi có nhiều lượt tải chạy song song; `<progress>` Pico/status text hiện đúng qua từng phase; Tab nền tự đóng đúng lúc sau `done`/`error`.
 
 ## 8. Downloader Engine — các hạng mục còn thiếu (chưa implement)
 
@@ -399,3 +402,25 @@ Ba hướng, nên làm cả ba, hướng thứ hai là quan trọng nhất:
 - 8.1's offscreen document + 8.5's OPFS đều **chưa test bằng browser thật** (agent không có môi trường trình duyệt) — như mọi mục 5.x/6.x trước đó, coi mọi khẳng định runtime ở trên là giả thuyết cho tới khi chạy thật.
 - Nếu 8.1 (offscreen) được làm, cần xét lại 5.3's trang Merge: nó thành UI thuần hay bỏ hẳn, gộp progress vào Side Panel? Chưa chốt — quyết định sau khi biết offscreen có giữ SW sống ổn định không.
 - 7.1's replay header và 8.2's Range request đều phát request từ context extension → cả hai chờ chung một câu trả lời "DNR có áp lên request của chính extension không". Verify một lần, dùng cho cả hai.
+
+## 9. Rà soát vị trí UI theo khung nguyên tắc Popup/Dashboard/In-page/Side Panel — chưa implement
+
+Đối chiếu UI hiện có với khung quyết định ở skill [`ui-surface-placement`](../.claude/skills/ui-surface-placement/SKILL.md) (Popup=tương tác <10s/toggle toàn cục, Dashboard=New Tab cho CRUD/tác vụ dài, In-page Shadow-DOM=hành động gắn 1 phần tử cụ thể, Side Panel=tương tác nhiều lượt song song trang — bề mặt Synapse chưa dùng). Chỉ ghi nhận điểm lệch, không sửa code trong đợt rà soát này.
+
+### 9.1. Crawl & Convert Site's progress đang sống trong Popup — lệch nguyên tắc "Popup chỉ cho tương tác <10s"
+
+- **Vấn đề:** action Crawl (mục 1) chạy tuần tự tới `MAX_CRAWL_PAGES=200`, delay ~200ms/trang — tổng thời gian dễ vượt xa vòng đời Popup (đóng ngay khi click ra ngoài trang). Trade-off "đóng popup giữa chừng lúc crawl mất kết quả" đã ghi ở mục 1 chính là hệ quả trực tiếp của việc đặt sai bề mặt UI, không phải bug cô lập.
+- **Hai hướng refactor, chưa chọn (cần đo thời gian crawl thật trước khi quyết):**
+  - (a) Bấm Crawl ở popup → mở ngay Dashboard/Tab hiển thị progress trực tiếp, popup tự đóng ngay sau khi trigger.
+  - (b) Giữ trigger ở popup, nhưng progress/result chạy hẳn ở nền + `chrome.notifications` báo hoàn tất; mở lại Dashboard là thấy kết quả sẵn — không cần giữ tab mở suốt.
+- Reader Mode Converter (đơn trang, không crawl) không có vấn đề này — 1 lần fetch thường dưới ngưỡng 10s, Popup vẫn hợp lệ.
+
+### 9.2. Side Panel — bề mặt chưa từng dùng khi mục này được viết, nay đã implement qua mục 6
+
+- Mục 6 (network-sniffer) là ca dùng cụ thể đầu tiên của `chrome.sidePanel` — đã implement (mục 6.2/6.3), không còn là định hướng chờ nhu cầu.
+- Định hướng gốc vẫn đúng cho nhu cầu KHÁC: nếu về sau có Module `needs:['ai']` cần tương tác nhiều lượt gắn với 1 tab (chat hỏi-đáp về trang đang xem, dịch đoạn dài, ghi chú đối chiếu — đúng hình dạng `PersonaAutomationAgent` ở design.md §6), vẫn ưu tiên Side Panel thay vì Dashboard/Popup, dùng chung cơ chế kernel mục 6.2 dựng lên thay vì viết lại.
+- Không sửa `docs/design.md` §7 cho tới khi thấy Side Panel được dùng lại ở một Module thứ 2 (tránh generalize hoá sớm từ đúng 1 ca dùng).
+
+### 9.3. Các bề mặt đã khớp nguyên tắc, không cần đổi
+
+Popup cho Module Registry list/toggle + action ngắn; Dashboard cho Management View/Steps view/Review-ZIP (network-sniffer's Management View vẫn giữ nguyên hoạt động song song Side Panel, mục 6.3's "chưa làm"); Shadow DOM badge+toast/icon nổi (`network-sniffer`, mục 4.2/6.1, đã tự áp dụng zero-intrusion + CSSOM-not-`<style>`) — toast góc dưới-phải đổi thành icon nổi góc trên-phải, click giờ mở Side Panel thay vì Dashboard thẳng (mục 6.1/6.3). Action-button paradigm (toolbar icon) đã được cân nhắc rồi bỏ hẳn cho ca dùng này — xem lịch sử quyết định ở đầu mục 6.

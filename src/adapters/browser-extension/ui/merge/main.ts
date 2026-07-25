@@ -27,15 +27,32 @@ import { listDetectedMedia } from '../../background/modules/network-sniffer/stor
 const { header, h1, p, button, div } = van.tags;
 
 const root = document.getElementById('root')!;
-const manifestUrl = new URLSearchParams(location.search).get('url');
+const searchParams = new URLSearchParams(location.search);
+const manifestUrl = searchParams.get('url');
+// docs/ROADMAP.md #7.6 — only set when this Tab was opened by the Side Panel (which tracks one
+// in-flight download per detected-media entry); a manually-opened Merge tab (Dashboard's §6.8
+// smart-download, or a bare `ui/merge/index.html?url=...`) has none, and postProgress below is a
+// no-op in that case — nothing is listening for it anyway.
+const entryId = searchParams.get('entryId') ?? undefined;
 
 // Same courteous pacing as crawlSite (docs/ROADMAP.md #1) — this is still one browser hitting one
 // server hundreds of times in a row.
 const SEGMENT_DELAY_MS = 200;
 
+/** docs/ROADMAP.md #7.6 — fire-and-forget progress relay to whichever Side Panel opened this Tab
+ * (if any). No background relay needed: both are privileged extension pages, so the Side Panel can
+ * `chrome.runtime.onMessage.addListener` directly. `sendMessage` rejects when nothing is listening
+ * (e.g. this Tab was opened manually, or the Side Panel closed mid-download) — swallowed, since
+ * that's an expected, harmless case here, not a bug. */
+function postProgress(phase: 'segments' | 'remux' | 'done' | 'error', done?: number, total?: number, message?: string): void {
+  if (!entryId) return;
+  chrome.runtime.sendMessage({ type: 'synapse:merge-progress', entryId, phase, done, total, message }).catch(() => {});
+}
+
 function renderError(message: string): void {
   root.replaceChildren();
   van.add(root, header(h1('Download (merged)')), p({ class: 'merge-error' }, message));
+  postProgress('error', undefined, undefined, message);
 }
 
 // docs/ROADMAP.md #7.1 — the manifest's/segments' Referer/Origin/User-Agent replay headers,
@@ -93,10 +110,12 @@ async function load(): Promise<void> {
   }
 
   if (manifest.kind === 'master') {
+    // Stale reference to a removed "Inspect" button fixed here (docs/ROADMAP.md §6.3 folded master-
+    // playlist resolutions into `DetectedMedia.variants` automatically — there's no separate Inspect
+    // step anymore, just a resolution picker on the entry itself).
     renderError(
       'This is a master playlist listing multiple resolutions, not a single downloadable stream. ' +
-        'Use "Inspect" on this row in the Dashboard first (it adds one new row per resolution), then ' +
-        '"Download (merged)" on one of those rows instead.',
+        'Pick a specific resolution from this video\'s list in the Side Panel or Dashboard instead.',
     );
     return;
   }
@@ -111,23 +130,28 @@ function render(manifest: Extract<ParsedManifest, { kind: 'media' }>, sourceUrl:
   // Mandatory guard, not optional (docs/ROADMAP.md #5.3) — feeding an encrypted (Widevine/EME)
   // segment into ffmpeg.wasm's `-c copy` doesn't fail loudly, it produces a silently-corrupt file.
   if (manifest.encrypted) {
+    const message = 'This stream is DRM-protected — its manifest declares an EXT-X-KEY method other than NONE.';
     van.add(
       root,
       header(h1('Download (merged)')),
       div(
         { class: 'merge-drm' },
-        p('This stream is DRM-protected — its manifest declares an EXT-X-KEY method other than NONE.'),
+        p(message),
         p('Synapse cannot and will not attempt to download or remux DRM-protected content.'),
       ),
     );
+    postProgress('error', undefined, undefined, message);
     return;
   }
 
-  const status = div({ class: 'merge-status' }, `${manifest.segments.length} segment(s) found. Ready to download.`);
-  const startBtn = button({ type: 'button' }, 'Start Download');
+  const status = div({ class: 'merge-status' }, `${manifest.segments.length} segment(s) found. Starting download...`);
+  // docs/ROADMAP.md #7.6 — the button is now only a manual retry after a failure; the normal path
+  // runs immediately below, no click needed (the whole point of opening this Tab in the background).
+  const startBtn = button({ type: 'button' }, 'Retry');
   startBtn.onclick = () => void run(manifest, sourceUrl, status, startBtn);
 
   van.add(root, header(h1('Download (merged)'), p(sourceUrl)), status, div({ class: 'merge-actions' }, startBtn));
+  void run(manifest, sourceUrl, status, startBtn);
 }
 
 /**
@@ -200,9 +224,13 @@ async function run(
       // number in the hundreds, and each is only needed again once, sequentially, at remux time.
       await putBlob(blobRef, { mimeType: 'video/mp2t', fileName: `seg${i}.ts`, bytes });
       blobRefs.push(blobRef);
+      // Posted as "i+1 done" (segment just saved), not "i" (segment about to start) — reaches
+      // N/N right before the 'remux' phase instead of stalling one short of it.
+      postProgress('segments', i + 1, segments.length);
       if (i < segments.length - 1) await new Promise((resolve) => setTimeout(resolve, SEGMENT_DELAY_MS));
     }
 
+    postProgress('remux');
     status.textContent = 'Loading ffmpeg.wasm (first run only, ~30MB, bundled with the extension)...';
     const ffmpeg = new FFmpeg();
     await ffmpeg.load({
@@ -242,8 +270,11 @@ async function run(
     anchor.download = `${slugify(fileNameFromUrl(sourceUrl), 'stream')}.mp4`;
     anchor.click();
     URL.revokeObjectURL(blobUrl);
+    postProgress('done');
   } catch (err) {
-    status.textContent = `Failed: ${err instanceof Error ? err.message : String(err)}`;
+    const message = err instanceof Error ? err.message : String(err);
+    status.textContent = `Failed: ${message}`;
+    postProgress('error', undefined, undefined, message);
   } finally {
     for (const ref of blobRefs) void deleteBlob(ref);
     startBtn.disabled = false;
