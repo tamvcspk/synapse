@@ -255,24 +255,107 @@ User yêu cầu Dashboard's Management View (bảng legacy, mục 6.5) cũng lê
 - **`network-sniffer/index.ts`** — `rowActions` giờ chỉ 1 entry `smart-download` (`openTabKinds:['stream']`) thay 2 entry `download`/`open-tab` cũ. `variantsField:'variantLinks'` + `listCollection()` map `variants:{url,resolution}[]` sang `variantLinks:{url,label}[]` (label fallback `Option N` khi variant không có `resolution`, vd manifest thiếu bandwidth/resolution tag).
 - **Chưa test bằng browser thật** (agent không có browser) — cần verify: click từng resolution link trong Dashboard mở đúng Merge tab với URL variant đó (không phải variant đầu), nút Download chính vẫn hoạt động đúng cho `video`/`audio` (tải thẳng) lẫn `stream` không có variants (mở Merge với `url` gốc).
 
-## 7. Rà soát vị trí UI theo khung nguyên tắc Popup/Dashboard/In-page/Side Panel — chưa implement
+## 7. Sniffing & Detector — các hạng mục còn thiếu (chưa implement)
 
-Đối chiếu UI hiện có với khung quyết định ở skill [`ui-surface-placement`](../.claude/skills/ui-surface-placement/SKILL.md) (Popup=tương tác <10s/toggle toàn cục, Dashboard=New Tab cho CRUD/tác vụ dài, In-page Shadow-DOM=hành động gắn 1 phần tử cụ thể, Side Panel=tương tác nhiều lượt song song trang — bề mặt Synapse chưa dùng). Chỉ ghi nhận điểm lệch, không sửa code trong đợt rà soát này.
+Đối chiếu checklist kỹ thuật "Sniffing-Detector Module" với code hiện có (mục 4/5/6). Phần **đã có rồi, không lặp lại ở đây**: network listener qua `chrome.webRequest.onHeadersReceived` (4.1), Content-Type/MIME classification (`classifyMediaMimeType`), MAIN-world hook `window.fetch`/`XMLHttpRequest.prototype.open` (4.1 + [main-world/network-interceptor.ts](../src/adapters/browser-extension/utils/main-world/network-interceptor.ts)), `all_frames:true` phủ nested/cross-origin iframe (4.1 Part A) — kênh iframe→top **cố tình không dùng `window.postMessage`** như checklist gợi ý mà dùng `chrome.runtime.sendMessage` thẳng từ mỗi frame lên background: đã có sẵn, không bị cross-origin chi phối, và không cần frame cha hợp tác. Ad filtering (5.2/6.5) đã có 3 tầng.
 
-### 7.1. Crawl & Convert Site's progress đang sống trong Popup — lệch nguyên tắc "Popup chỉ cho tương tác <10s"
+Thứ tự ưu tiên đề xuất: **7.1 → 7.2 → 7.4 → 7.5 → 7.3**. 7.1 (đã implement) là thứ đang chặn thật (tải segment 403), 7.3 nặng nhất và giá trị mơ hồ nhất.
 
-- **Vấn đề:** action Crawl (mục 1) chạy tuần tự tới `MAX_CRAWL_PAGES=200`, delay ~200ms/trang — tổng thời gian dễ vượt xa vòng đời Popup (đóng ngay khi click ra ngoài trang). Trade-off "đóng popup giữa chừng lúc crawl mất kết quả" đã ghi ở mục 1 chính là hệ quả trực tiếp của việc đặt sai bề mặt UI, không phải bug cô lập.
-- **Hai hướng refactor, chưa chọn (cần đo thời gian crawl thật trước khi quyết):**
-  - (a) Bấm Crawl ở popup → mở ngay Dashboard/Tab hiển thị progress trực tiếp, popup tự đóng ngay sau khi trigger.
-  - (b) Giữ trigger ở popup, nhưng progress/result chạy hẳn ở nền + `chrome.notifications` báo hoàn tất; mở lại Dashboard là thấy kết quả sẵn — không cần giữ tab mở suốt.
-- Reader Mode Converter (đơn trang, không crawl) không có vấn đề này — 1 lần fetch thường dưới ngưỡng 10s, Popup vẫn hợp lệ.
+### 7.1. Bắt & tái sử dụng Request Headers (`Referer`/`Origin`/`User-Agent`) — Đã implement (DNR modifyHeaders, session-scoped), chưa test bằng browser thật
 
-### 7.2. Side Panel — bề mặt chưa từng dùng khi mục này được viết, nay đã implement qua mục 6
+**Vấn đề thật, không phải hoàn thiện cho đủ:** `DetectedMedia` trước đây chỉ lưu `pageUrl` (từ `initiator`). Mọi `fetch()` sau đó — `inspectStreamEntry` (background), trang Merge (5.3) — đi ra **không có `Referer`, `Origin: chrome-extension://<id>`**. Rất nhiều CDN media hotlink-protect bằng đúng `Referer`/`Origin`, nên đường 5.3 sẽ 403 trên một lớp site hoàn toàn hợp lệ. Đây là ứng viên số 1 cho "tải được ở trình duyệt nhưng extension tải về lỗi".
 
-- Mục 6 (network-sniffer) là ca dùng cụ thể đầu tiên của `chrome.sidePanel` — đã implement (mục 6.2/6.3), không còn là định hướng chờ nhu cầu.
-- Định hướng gốc vẫn đúng cho nhu cầu KHÁC: nếu về sau có Module `needs:['ai']` cần tương tác nhiều lượt gắn với 1 tab (chat hỏi-đáp về trang đang xem, dịch đoạn dài, ghi chú đối chiếu — đúng hình dạng `PersonaAutomationAgent` ở design.md §6), vẫn ưu tiên Side Panel thay vì Dashboard/Popup, dùng chung cơ chế kernel mục 6.2 dựng lên thay vì viết lại.
-- Không sửa `docs/design.md` §7 cho tới khi thấy Side Panel được dùng lại ở một Module thứ 2 (tránh generalize hoá sớm từ đúng 1 ca dùng).
+- **Bắt:** listener `chrome.webRequest.onSendHeaders` với `extraInfoSpec:['requestHeaders','extraHeaders']` mới trong [webrequest-media-observer.ts](../src/adapters/browser-extension/utils/webrequest-media-observer.ts) — `'extraHeaders'` là bắt buộc mới thấy được `Referer`/`Origin`/`User-Agent` trên Chrome. Ghép với `onHeadersReceived` theo `details.requestId` qua `pendingRequestHeaders` (map ngắn hạn, tự dọn sau 30s cho request lỗi/bị chặn trước khi có response). `onSendHeaders` luôn fire trước `onHeadersReceived` cho cùng requestId nên thứ tự đọc-rồi-xoá luôn đúng.
+- **Quyết định chốt: KHÔNG lưu `Cookie`/`Authorization`.** Checklist có liệt kê, nhưng (a) đổ credential của mọi site vào `chrome.storage.local` là một khoản nợ bảo mật thật, (b) đây đúng là hai header `fetch()` **không bao giờ set được** từ JS dù ở extension page (forbidden header names), nên có lưu cũng không replay được bằng đường rẻ. Chỉ lưu `referer`/`origin`/`user-agent`/`range` (`REPLAYABLE_HEADER_NAMES`) vào field mới `requestHeaders?: Record<string,string>` trên `DetectedMedia` — chỉ nhánh `webRequest` mới có (nguồn duy nhất cầm request headers gốc trong tay).
+- **Replay — đã chọn đường (a) DNR `modifyHeaders`, session-scoped.** File mới [header-replay-rules.ts](../src/adapters/browser-extension/utils/header-replay-rules.ts): `syncHeaderReplayRule(host, headers)` sync một `chrome.declarativeNetRequest` **session rule** (không phải dynamic rule như [dnr-network-rules.ts](../src/adapters/browser-extension/utils/dnr-network-rules.ts) — `condition.tabIds` chỉ được hỗ trợ cho session-scoped rule, xác nhận qua `@types/chrome`), điều kiện `requestDomains:[host]` + `tabIds:[chrome.tabs.TAB_ID_NONE]` (request không gắn tab = extension tự phát; một request thật của chính trang đó không bị đụng tới). Namespace id riêng hẳn (không dùng `dnr-network-rules.ts`'s `OWNER_RANGES` — khác hẳn ruleset dynamic vs session nên không thể/không cần đụng nhau), cap `MAX_HOSTS=50` (evict host cũ nhất). **Vẫn CHƯA xác nhận runtime** (không có browser thật): tài liệu Chrome không nói rõ liệu DNR rule của chính extension có áp lên request do chính extension phát ra hay không — đây là rủi ro lớn nhất còn lại của mục này.
+  - Loại bỏ (b) fetch từ content script của chính trang đó: từ Chrome 85 content-script fetch tuân CORS theo origin của TRANG, `host_permissions` không nới cho content script nữa → segment CDN cross-origin sẽ bị CORS chặn.
+  - (c) `chrome.debugger` `Fetch.continueRequest` không dùng tới — chắc chắn chạy được nhưng kéo theo banner "đang debug" suốt cả lượt tải, chỉ còn là phương án chót nếu (a) không hoạt động thật.
+- **Gọi ở hai nơi tiêu thụ `entry.url`/segment:** `inspectStreamEntry` ([network-sniffer/index.ts](../src/adapters/browser-extension/background/modules/network-sniffer/index.ts)) sync theo host của `entry.url` trước khi fetch manifest lần đầu (background context). Trang Merge ([ui/merge/main.ts](../src/adapters/browser-extension/ui/merge/main.ts)) tự tra lại `requestHeaders` qua `listDetectedMedia()` (so khớp `url` hoặc bất kỳ `variants[].url` nào — một variant kế thừa header của entry cha), rồi sync theo host của URL đang fetch (manifest lẫn từng segment) — cache theo host trong 1 lượt chạy (`replayHeaderHostsSynced`) để không gọi `updateSessionRules` lặp lại hàng trăm lần cho từng segment cùng CDN.
+- **Không có fallback "thử trần trước, 403 mới replay"** — bỏ qua nhánh này để giữ đơn giản: sync rule là no-op rẻ (chỉ khi có `requestHeaders`) nên luôn làm trước, không cần logic thử-rồi-rơi-xuống.
 
-### 7.3. Các bề mặt đã khớp nguyên tắc, không cần đổi
+### 7.2. Magic Bytes / payload sniffing — chưa implement
 
-Popup cho Module Registry list/toggle + action ngắn; Dashboard cho Management View/Steps view/Review-ZIP (network-sniffer's Management View vẫn giữ nguyên hoạt động song song Side Panel, mục 6.3's "chưa làm"); Shadow DOM badge+toast/icon nổi (`network-sniffer`, mục 4.2/6.1, đã tự áp dụng zero-intrusion + CSSOM-not-`<style>`) — toast góc dưới-phải đổi thành icon nổi góc trên-phải, click giờ mở Side Panel thay vì Dashboard thẳng (mục 6.1/6.3). Action-button paradigm (toolbar icon) đã được cân nhắc rồi bỏ hẳn cho ca dùng này — xem lịch sử quyết định ở đầu mục 6.
+**Rào cản kiến trúc phải ghi rõ trước:** MV3 **không có** `webRequest.filterResponseData` (Firefox-only) — `chrome.webRequest` ở đây vĩnh viễn headers-only, đúng như 5.2 đã kết luận khi loại "DPI-style payload sniffing". Nghĩa là không có cách đọc body của request TRANG tự phát mà không đổi mechanism.
+
+Ba đường đọc được byte thật, và lý do chọn đường thứ ba:
+- MAIN-world `fetch` patch `response.clone().arrayBuffer()` — clone một response media là nhân đôi bộ nhớ cho thứ có thể vài trăm MB. Loại cho mọi response; may ra chỉ dùng cho response nhỏ nghi là manifest.
+- `chrome.debugger` `Network.getResponseBody` — banner, quá đắt cho việc chỉ nhận dạng định dạng.
+- **Probe fetch chủ động `Range: bytes=0-1023` từ background (đề xuất chọn)** — không cần chạm response của trang tí nào, chạy lazy, và tự nhiên dùng chung đường header của 7.1. Chỉ probe khi **thực sự mù**: Content-Type là `application/octet-stream`/`text/plain`/vắng mặt, VÀ `classifyMediaUrl` không nhận ra đuôi. Cap song song, cache theo origin để không probe lại cùng một CDN mãi.
+
+- File mới `shared/media-magic-bytes.ts` (Global SDK, thuần, không I/O — cùng tầng `media-url-matcher.ts`): `sniffMediaMagicBytes(bytes: Uint8Array): MediaKind | 'segment' | undefined`. Chữ ký: `#EXTM3U` → HLS manifest; `0x47` tại offset 0 **và** 188 **và** 376 (kiểm 3 điểm, không chỉ 1 byte — `0x47` đơn lẻ là ký tự `G`, false positive tràn lan) → MPEG-TS; `ftyp` tại offset 4 (`isom`/`mp42`/`iso5`...) → MP4/fMP4; `1A 45 DF A3` → Matroska/WebM; `OggS`; `RIFF....WAVE`; `ID3`/`FF FB` → MP3; `ADTS` (`FF F1`/`FF F9`) → AAC.
+- **Giữ nguyên quyết định cũ:** nhận diện được segment (`.ts`/`.m4s`/`video/mp2t`) **không có nghĩa là liệt kê nó ra UI** — mục 4 đã chốt loại segment khỏi danh sách và điều đó không đổi. Magic bytes ở đây chỉ để cứu **manifest/file hoàn chỉnh bị giấu Content-Type**, còn segment nhận ra thì dùng làm tín hiệu "có stream ở origin này" chứ không thành một dòng.
+
+### 7.3. Hook `URL.createObjectURL` / `MediaSource` / `SourceBuffer.appendBuffer` — chưa implement, tách làm 2 bài toán khác hẳn nhau
+
+Mục 4.1 đã ghi giới hạn hiện tại: correlation blob:→URL là **một biến toàn cục "lần quan sát gần nhất"** ([dom-media-observer.ts:53](../src/adapters/browser-extension/content-scripts/dom-media-observer.ts#L53)), trang có nhiều player MSE cùng lúc sẽ gán lẫn lộn. Checklist gộp chung, nhưng thực tế là hai feature rất lệch nhau về giá/trị:
+
+- **(a) Correlation chính xác — nên làm, vừa sức.** Hook `URL.createObjectURL` trong MAIN world: khi đối số là một `MediaSource`, gán id cho nó và nhớ `blobUrl → mediaSourceId`; hook `MediaSource.prototype.addSourceBuffer` để biết codec/mimeType của từng player. Vẫn **không** có liên kết trực tiếp giữa một `fetch()` và MediaSource nào đã tiêu thụ nó (không API nào cho biết) — nhưng thay "URL cuối cùng toàn cục" bằng "URL quan sát được trong cửa sổ thời gian quanh lúc `addSourceBuffer` của chính player đó" là đã đủ tốt cho ca thường gặp, và cho biết chắc chắn phần tử nào là MSE thay vì đoán qua tiền tố `blob:`.
+- **(b) Bắt thẳng byte ở `appendBuffer` — ghi lại, nhưng đề xuất HOÃN.** Đây là "quay lại video đang phát" chứ không phải sniff URL: hoạt động cả khi URL segment ký một-lần/hết hạn, nhưng đổi lại (i) chỉ lấy được đúng phần đã phát, **không nhanh hơn tốc độ xem**, (ii) phải gom toàn bộ byte qua kênh MAIN→ISOLATED→background (structured clone từng chunk, rất tốn), (iii) không lấy được audio/video track ghép sẵn nếu player dùng nhiều SourceBuffer — vẫn phải remux. So với 5.3 (tải segment theo manifest, nhanh hơn realtime nhiều lần), đây chỉ nên là **đường chót cho trang không lộ manifest nào**. Chưa gặp ca thật nào bắt buộc phải dùng.
+
+### 7.4. URL ký/hết hạn (signed/expiring) — chưa implement
+
+- **Nhãn (rẻ, làm trước):** `shared/junk-url-patterns.ts` (hoặc file mới cùng tầng) thêm `looksLikeSignedUrl(url)` — có query key trong `{expires, expire, e, st, token, sig, signature, hmac, hash, key, policy, Signature, X-Amz-Signature, X-Amz-Expires}`. Set `expiring?: boolean` trên `DetectedMedia`, Side Panel hiện hint "link có hạn — tải sớm". Không dùng làm filter loại trừ (cùng lý do `thirdParty` ở 4.1: video hợp lệ ký URL là chuyện bình thường).
+- **Tự phục hồi khi segment 403 giữa chừng (đây mới là phần có giá trị thật):** checklist đề xuất "kích hoạt lại player trên DOM để bắt URL signed mới" — **đề xuất không làm theo hướng đó**: chọc `<video>.play()`/reload iframe từ content script là xâm lấn, dễ vỡ, và phụ thuộc tab còn mở đúng trang. Hướng rẻ và đúng bản chất hơn: **fetch lại chính manifest** — media playlist của HLS gần như luôn phát lại danh sách segment với chữ ký mới. Kế hoạch: segment thứ `i` trả 401/403 → fetch lại manifest 1 lần → khớp lại theo **index**, tiếp tục từ `i`; thất bại lần hai thì dừng hẳn.
+  - **Điều kiện an toàn bắt buộc:** chỉ remap theo index khi playlist là VOD (`#EXT-X-ENDLIST` có mặt). Live playlist trượt cửa sổ, index không còn nghĩa. → `parseM3u8` cần trả thêm `isLive: boolean` (thiếu `#EXT-X-ENDLIST`, hoặc `#EXT-X-PLAYLIST-TYPE:EVENT`).
+
+### 7.5. Bổ sung ad-filter theo checklist (`vast`/`vpaid`/`creative.*`) — chưa implement
+
+- `JUNK_PATH_SEGMENTS` thêm: `vast`, `vpaid`, `ima`, `imasdk`, `prebid`, `preroll`, `midroll`, `interstitial`. VAST/VPAID là định dạng manifest quảng cáo — path segment mang tên chúng là tín hiệu rất mạnh, gần như không có false positive.
+- `creative.*` **không khớp được bằng cơ chế hiện tại** — `looksLikeAdOrTrackerPath` khớp path segment/query key, còn `creative.` là **tiền tố hostname**. Cần rule mới dạng hostname-prefix (`creative.`, `ads.`, `adserver.`, `track.`, `pixel.`) trong [ad-domain-denylist.ts](../src/shared/ad-domain-denylist.ts) — tách hàm riêng, không nhét vào `isAdNetworkDomain` (hàm đó là exact/subdomain match của domain đã biết, ngữ nghĩa khác).
+- **Nhắc lại cảnh báo whack-a-mole đã ghi ở 5.2/6.5:** mỗi lần phải thêm tay một domain/keyword là một phiếu bầu cho hướng lớn hơn (EasyList/EasyPrivacy qua DNR). 7.5 này là lần bổ sung thủ công **cuối cùng** nên làm trước khi cân nhắc nghiêm túc hướng đó.
+
+## 8. Downloader Engine — các hạng mục còn thiếu (chưa implement)
+
+Đối chiếu checklist "Web Worker Downloader Engine" với trang Merge hiện tại (5.3). Phần **đã có**: parse master/variant playlist + resolve relative→absolute URL (`parseM3u8`), staging xuống IndexedDB rồi xoá ngay sau khi nạp vào ffmpeg, remux `-c copy` qua concat demuxer, export bằng Blob + anchor click.
+
+Thứ tự ưu tiên đề xuất: **8.5 → 8.3 → 8.4 → 8.1 → 8.2**. 8.5 sửa một giới hạn đang âm thầm chặn mọi video lớn; 8.2 giá trị thấp nhất so với công sức.
+
+### 8.1. Worker/Offscreen + message protocol (START/PAUSE/RESUME/CANCEL, PROGRESS/ETA) — chưa implement
+
+**Đánh giá thẳng: "UI bị đơ" KHÔNG phải vấn đề thật của bản hiện tại** — fetch đã async, ffmpeg.wasm tự chạy trong Worker riêng của nó. Ba giới hạn thật là: (i) không có Cancel/Pause, (ii) progress chỉ là một dòng text "segment i / N", không có tốc độ/ETA, (iii) **đóng tab Merge là mất sạch tiến độ** — và một Web Worker nằm trong chính tab đó **không sửa được (iii)**.
+
+- **Đề xuất: engine sống trong Offscreen Document** (`chrome.offscreen`, lý do `WORKERS`), không phải Worker trong tab. Trang Merge / Side Panel tụt xuống chỉ còn là UI đọc progress. Tải sống sót qua việc đóng tab; ffmpeg.wasm chạy được trong offscreen (vẫn là document context, CSP `wasm-unsafe-eval` ở 5.3 đã cover `extension_pages`).
+  - **Rào cản MV3 phải lường:** chỉ được **một** offscreen document tại một thời điểm cho cả extension → engine phải là hàng đợi đa-job dùng chung, không phải "mỗi lần tải mở một cái". Cần verify: offscreen document đang mở có thật sự giữ service worker sống suốt quá trình không (tài liệu nói có, chưa test).
+  - **Lợi ích phụ đáng kể:** offscreen document **có `DOMParser`** — đây chính là thứ mục 5.1 thiếu khi cắt scope bỏ DASH (`.mpd` là XML, service worker không parse được). Làm 8.1 là mở khoá luôn đường DASH sau này, không phải viết lại chỗ khác.
+- **Message protocol** (`shared/download-engine-protocol.ts`, Global SDK, chỉ type): UI→Engine `START_DOWNLOAD`/`PAUSE`/`RESUME`/`CANCEL`; Engine→UI `PROGRESS`/`COMPLETE`/`ERROR`. `PROGRESS` mang `{jobId, segmentsDone, segmentsTotal, bytesDone, bytesPerSec, etaMs?}`.
+  - **ETA cho HLS là ước lượng, phải nói rõ trên UI:** tổng dung lượng không biết trước (manifest chỉ cho thời lượng `#EXTINF`, không cho byte). Tính ETA từ bitrate quan sát được × thời lượng còn lại, hiển thị kèm dấu "~". Đừng giả vờ chính xác.
+- **PAUSE/RESUME chỉ có nghĩa trong phiên** — dừng ở ranh giới segment, giữ state trong bộ nhớ engine. Resume **qua lần khởi động lại extension** thì không (kéo theo phải persist cả manifest lẫn danh sách segment đã tải, mà URL ký có thể hết hạn — xem 7.4). Ghi rõ giới hạn này thay vì hứa.
+
+### 8.2. Multi-connection Range downloader cho file tĩnh — chưa implement, giá trị thấp nhất
+
+**Cân nhắc trước khi làm:** hiện `video`/`audio` đi thẳng `chrome.downloads.download` — tức là dùng downloader của chính Chrome: có resume gốc, không tốn RAM/đĩa của extension, hiện trong download shelf, người dùng quen. Tự viết bộ tải N-kết-nối (đặc sản IDM) chỉ thắng ở server bóp băng thông theo từng kết nối, nhưng **mất sạch bốn thứ trên** và bắt toàn bộ file phải chảy qua storage của extension rồi mới phát lại thành Blob.
+
+- **Nếu làm: là tuỳ chọn (opt-in "Turbo download"), không phải mặc định.** Chỉ bật khi probe xác nhận server hỗ trợ thật: `HEAD` lấy `Content-Length` + `Accept-Ranges: bytes`; server trả 405 cho HEAD (khá phổ biến) thì fallback `GET Range: bytes=0-0` rồi đọc `Content-Range`. Không xác nhận được → im lặng dùng `chrome.downloads`.
+- Chia $N$ chunk, pool 4–8 kết nối, mỗi chunk mang `index` và ghi thẳng vào **đúng offset** trong file OPFS (8.5) — không có bước "sort rồi ghép mảng `Uint8Array`" như checklist mô tả, vì ghi theo offset thì thứ tự về đích không còn quan trọng và không cần giữ chunk nào trong RAM.
+
+### 8.3. Pool tải segment song song + retry — chưa implement
+
+- Hiện **tuần tự tuyệt đối**, `SEGMENT_DELAY_MS = 200` giữa mỗi segment ([merge/main.ts:32](../src/adapters/browser-extension/ui/merge/main.ts#L32)). Một video 1 tiếng ≈ 600 segment → riêng phần delay đã 2 phút, chưa tính thời gian tải. Đổi sang pool 4–6 (cấu hình được), bỏ delay cố định — bản thân giới hạn concurrency đã là "lịch sự" rồi, delay chồng lên nữa là phạt hai lần.
+- **Đảo lại một phần quyết định 5.3 "lỗi giữa chừng là dừng hẳn":** giữ nguyên nguyên tắc **không bao giờ skip-and-continue** (thiếu segment = video đứt, khác hẳn `fetch-images`), nhưng chèn **retry 3 lần với backoff** trước khi kết luận là lỗi. Lỗi mạng thoáng qua không nên giết một lượt tải 20 phút. Retry hết vẫn hỏng → dừng hẳn như cũ (và với 401/403 thì thử đường refresh manifest ở 7.4 trước khi bỏ cuộc).
+
+### 8.4. Giải mã HLS AES-128 (`#EXT-X-KEY`) — chưa implement
+
+**Phân biệt bắt buộc, vì code hiện tại đang gộp làm một và chặn cứng cả hai:** [store.ts](../src/adapters/browser-extension/background/modules/network-sniffer/store.ts) và trang Merge coi mọi `#EXT-X-KEY:METHOD != NONE` là "DRM (Widevine/EME)". Không đúng:
+
+- **`METHOD=AES-128`** là mã hoá segment thường, khoá phục vụ **công khai** qua chính `URI=` trong manifest, không có hệ thống kiểm soát truy cập nào — ffmpeg/VLC/hls.js phát nó như phát HLS bình thường. Đây là phần **nên hỗ trợ**.
+- **`METHOD=SAMPLE-AES`, hoặc `KEYFORMAT` khác `"identity"`** (`urn:uuid:edef8ba9-...` = Widevine, PlayReady, FairPlay `skd://`) mới là DRM thật. **Giữ nguyên chặn cứng, không tìm cách vượt** — quyết định này không đổi.
+
+Kế hoạch:
+- `parseM3u8` trả `key?: {method, uri, iv?, keyFormat?}` **theo từng segment** (khoá xoay giữa chừng playlist là hợp lệ trong HLS, `#EXT-X-KEY` áp cho mọi segment tới khi gặp thẻ kế) thay vì một cờ `encrypted` phẳng cho cả playlist. Giữ `encrypted` như trường dẫn xuất cho UI để không phải sửa `DetectedMedia`/Side Panel cùng lúc.
+- Engine: fetch khoá (16 byte) một lần, cache theo `uri`; `crypto.subtle.importKey('raw', key, 'AES-CBC', false, ['decrypt'])`; IV = `IV=0x...` khi có, không thì **media sequence number của segment, big-endian, đệm về 16 byte** (mặc định theo spec HLS — sai chỗ này thì giải mã ra rác chứ không báo lỗi). `crypto.subtle.decrypt` xử lý PKCS#7 sẵn, đúng padding HLS dùng.
+- Guard: `keyFormat` khác `identity` (hoặc vắng) → từ chối, y như hiện tại.
+
+### 8.5. OPFS thay IndexedDB — và vấn đề OOM thật mà 5.3 chưa ghi — chưa implement
+
+**Phát hiện khi rà lại 5.3: staging xuống IndexedDB rồi `deleteBlob` ngay sau `writeFile` KHÔNG giải quyết được OOM.** `ffmpeg.writeFile` copy byte vào MEMFS — tức là vào **heap WebAssembly**, giữ nguyên ở đó tới hết lượt chạy. Đỉnh bộ nhớ ≈ (toàn bộ segment) + (file output) trong một heap wasm32 trần ~4GB, thực tế vỡ sớm hơn nhiều. Nghĩa là **bản hiện tại về nguyên tắc không tải nổi video >1–2GB**, đúng cái ngưỡng checklist nêu — IndexedDB staging chỉ tránh giữ byte trong mảng JS, không tránh được chỗ tốn thật.
+
+Ba hướng, nên làm cả ba, hướng thứ hai là quan trọng nhất:
+- **Chuyển staging sang OPFS** (`navigator.storage.getDirectory()`): mở **một** file cho cả lượt tải, `FileSystemWritableFileStream` append từng segment (hoặc ghi theo offset cho 8.2) thay vì N record IndexedDB rời. Cuối lượt `getFile()` ra `File` **file-backed** — `URL.createObjectURL` trên nó không nạp gì vào RAM. Giữ [blob-store.ts](../src/adapters/browser-extension/utils/blob-store.ts) nguyên vẹn cho `http-error-mocker` (file upload nhỏ, IndexedDB hợp lý ở đó) — không migrate cái đó theo.
+- **Đường "không cần ffmpeg" cho ca phổ biến nhất (đề xuất làm mặc định):** nối byte thô các segment MPEG-TS **đã là một file `.ts` phát được** (TS là định dạng stream, tự đồng bộ theo packet 188 byte). fMP4 cũng vậy: init segment + các `.m4s` nối lại là fMP4 hợp lệ. Nghĩa là với OPFS append, ta có file phát được **ngay khi segment cuối ghi xong**, không đụng wasm, không trần bộ nhớ, không phụ thuộc 32MB core tải lần đầu. → Hai nút: **"Save (.ts, nhanh)"** và **"Remux → .mp4"**; nút thứ hai chỉ cho file đủ nhỏ, và chính là đường duy nhất còn dính giới hạn heap.
+- **Nếu vẫn muốn remux file lớn:** `ffmpeg.mount(WORKERFS, {blobs}, '/input')` (@ffmpeg/ffmpeg ≥0.12) mount Blob **không copy vào MEMFS** — bỏ được nửa đỉnh bộ nhớ ở phía input. Output vẫn nằm trong MEMFS, nên đây là nới trần chứ không phải gỡ trần. Chưa verify runtime.
+
+### 8.6. Rủi ro/quyết định mở còn lại
+
+- 8.1's offscreen document + 8.5's OPFS đều **chưa test bằng browser thật** (agent không có môi trường trình duyệt) — như mọi mục 5.x/6.x trước đó, coi mọi khẳng định runtime ở trên là giả thuyết cho tới khi chạy thật.
+- Nếu 8.1 (offscreen) được làm, cần xét lại 5.3's trang Merge: nó thành UI thuần hay bỏ hẳn, gộp progress vào Side Panel? Chưa chốt — quyết định sau khi biết offscreen có giữ SW sống ổn định không.
+- 7.1's replay header và 8.2's Range request đều phát request từ context extension → cả hai chờ chung một câu trả lời "DNR có áp lên request của chính extension không". Verify một lần, dùng cho cả hai.

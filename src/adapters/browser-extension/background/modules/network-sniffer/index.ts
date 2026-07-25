@@ -4,6 +4,7 @@ import { classifyMediaUrl, classifyMediaMimeType, type MediaKind } from '../../.
 import { isAdNetworkDomain } from '../../../../../shared/ad-domain-denylist';
 import { looksLikeAdOrTrackerPath, looksLikeAdMacroTemplate } from '../../../../../shared/junk-url-patterns';
 import { ensureNetworkObserver, teardownNetworkObserver, type ObservedRequest } from '../../../utils/webrequest-media-observer';
+import { syncHeaderReplayRule } from '../../../utils/header-replay-rules';
 import {
   isMainWorldScriptRegistered,
   registerMainWorldScript,
@@ -130,6 +131,13 @@ function notifyTabMediaFound(tabId: number): void {
  * `encrypted` in place, same as before. */
 async function inspectStreamEntry(entry: DetectedMedia, cache: CacheService = chromeStorageCache): Promise<void> {
   try {
+    // docs/ROADMAP.md #7.1 — replay the original page request's Referer/Origin/User-Agent before
+    // this background fetch, for hosts that hotlink-protect on them. No-op when this entry has no
+    // captured headers (the common case). Scoped to entry.url's own host — the manifest and its
+    // segments (fetched later by the Merge page, not here) are typically same-CDN-host.
+    if (entry.requestHeaders) {
+      await syncHeaderReplayRule(new URL(entry.url).hostname, entry.requestHeaders);
+    }
     const manifest = parseM3u8(await (await fetch(entry.url)).text(), entry.url);
     if (manifest.kind === 'master') {
       await updateDetectedMedia(entry.id, { variants: manifest.variants }, cache);
@@ -304,6 +312,9 @@ export const NetworkSnifferModule: Module<
           detectedAt: new Date().toISOString(),
           ...(req.initiator ? { pageUrl: req.initiator } : {}),
           ...(thirdParty !== undefined ? { thirdParty } : {}),
+          // docs/ROADMAP.md #7.1 — only the webRequest source ever has the original request's own
+          // headers in hand (report-dom-media/report-main-world-media never see them).
+          ...(req.requestHeaders && Object.keys(req.requestHeaders).length > 0 ? { requestHeaders: req.requestHeaders } : {}),
         };
         // docs/ROADMAP.md #4.2 — only push the floating-icon notice on a genuine new detection (not
         // a repeat request for an already-known URL), same "don't spam a chatty page" philosophy as

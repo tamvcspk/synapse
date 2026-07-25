@@ -33,6 +33,14 @@ export interface DetectedMedia {
    * no longer a separately-tracked `DetectedMedia` row per resolution (that was #5.1's original
    * behavior, replaced so one real video is one list item in the Side Panel, not N). */
   variants?: { url: string; resolution?: string }[];
+  /** docs/ROADMAP.md #7.1 — a small allowlisted subset of the ORIGINAL page request's own headers
+   * (`referer`/`origin`/`user-agent`/`range`, lowercase keys — see header-replay-rules.ts's
+   * REPLAYABLE_HEADER_NAMES), captured so Synapse's own later `fetch()` of this URL (or its
+   * segments) can replay them via a session DNR rule when a CDN hotlink-protects on them.
+   * Deliberately never `Cookie`/`Authorization` — see header-replay-rules.ts's doc comment for why.
+   * Only ever set on the `webRequest`-sourced detection path (the only source with the original
+   * request's headers in hand). */
+  requestHeaders?: Record<string, string>;
 }
 
 const DETECTED_MEDIA_STORAGE_KEY = 'synapse:network-sniffer:detected-media';

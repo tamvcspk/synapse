@@ -10,6 +10,8 @@ import ffmpegWasmUrl from '@ffmpeg/core/wasm?url';
 import { parseM3u8, type ParsedManifest } from '../../../../shared/media-manifest-parser';
 import { slugify } from '../../../../shared/slugify';
 import { deleteBlob, getBlob, putBlob } from '../../utils/blob-store';
+import { syncHeaderReplayRule } from '../../utils/header-replay-rules';
+import { listDetectedMedia } from '../../background/modules/network-sniffer/store';
 
 /**
  * Merge page (docs/ROADMAP.md #5.3) — a standalone Tab (opened via a `rowActions` 'open-tab'
@@ -36,14 +38,48 @@ function renderError(message: string): void {
   van.add(root, header(h1('Download (merged)')), p({ class: 'merge-error' }, message));
 }
 
+// docs/ROADMAP.md #7.1 — the manifest's/segments' Referer/Origin/User-Agent replay headers,
+// captured at original detection time (webrequest-media-observer.ts) and looked up once in load()
+// below. Module-scoped so run()'s per-segment fetches (well after load() returns) can reuse it
+// without re-querying storage per segment.
+let replayHeaders: Record<string, string> | undefined;
+const replayHeaderHostsSynced = new Set<string>();
+
+/** docs/ROADMAP.md #7.1 — the entry that had this URL (as its own `url`, or as one of its
+ * `variants`) is the one whose captured headers apply here; a variant inherits its parent master
+ * entry's headers since both were served by the same original page/CDN. */
+async function findReplayHeaders(url: string): Promise<Record<string, string> | undefined> {
+  const all = await listDetectedMedia();
+  return all.find((m) => m.url === url || m.variants?.some((v) => v.url === url))?.requestHeaders;
+}
+
+/** No-ops when there are no captured headers for this download, or this URL's host already has a
+ * rule synced this run (segments overwhelmingly share one host with the manifest — this avoids
+ * hundreds of redundant chrome.declarativeNetRequest calls for a long segment list). */
+async function replayHeadersFor(url: string): Promise<void> {
+  if (!replayHeaders) return;
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return;
+  }
+  if (replayHeaderHostsSynced.has(host)) return;
+  replayHeaderHostsSynced.add(host);
+  await syncHeaderReplayRule(host, replayHeaders);
+}
+
 async function load(): Promise<void> {
   if (!manifestUrl) {
     renderError('No manifest URL given — open this page via a stream row\'s "Download (merged)" action in the Dashboard.');
     return;
   }
 
+  replayHeaders = await findReplayHeaders(manifestUrl).catch(() => undefined);
+
   let manifest: ParsedManifest;
   try {
+    await replayHeadersFor(manifestUrl);
     const text = await (await fetch(manifestUrl)).text();
     manifest = parseM3u8(text, manifestUrl);
   } catch {
@@ -111,6 +147,7 @@ async function run(
   try {
     for (let i = 0; i < segments.length; i++) {
       status.textContent = `Downloading segment ${i + 1} / ${segments.length}...`;
+      await replayHeadersFor(segments[i]!);
       const bytes = await (await fetch(segments[i]!)).arrayBuffer();
       const blobRef = `merge:${runId}:${i}`;
       // Temp storage in IndexedDB (blob-store.ts), not held in one big JS array — segments can
