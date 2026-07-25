@@ -16,6 +16,19 @@ export interface DetectedMedia {
    * anything. `undefined` means unknown (only ever computed for the `webRequest`-sourced path,
    * which is the only source with a tabId+initiator in hand), not "known first-party". */
   thirdParty?: boolean;
+  /** docs/ROADMAP.md #5.1 — only set on a `kind: 'stream'` entry, and only once its manifest has
+   * been fetched via the "Inspect" rowAction. A *master* playlist's variant gets its own new
+   * `DetectedMedia` entry per resolution (this field), while a *media/variant* playlist patches
+   * `segmentCount`/`encrypted` in place onto the entry that was already inspected. */
+  resolution?: string;
+  /** Set on a `kind: 'stream'` entry once Inspect determines it's a media/variant playlist (not a
+   * master listing other resolutions) — segment count alone, not a downloadable file (see
+   * docs/ROADMAP.md #5.3 for why turning this into one is its own, much larger, feature). */
+  segmentCount?: number;
+  /** Set alongside `segmentCount` — a `#EXT-X-KEY:METHOD=...` other than `NONE` was present, i.e.
+   * DRM (Widevine/EME). #5.3's download+remux flow must refuse these outright rather than produce
+   * a silently-corrupt file. */
+  encrypted?: boolean;
 }
 
 const DETECTED_MEDIA_STORAGE_KEY = 'synapse:network-sniffer:detected-media';
@@ -53,4 +66,19 @@ export async function addDetectedMedia(media: DetectedMedia, cache: CacheService
 export async function removeDetectedMedia(id: string, cache: CacheService = chromeStorageCache): Promise<void> {
   const existing = await listDetectedMedia(cache);
   await cache.set(DETECTED_MEDIA_STORAGE_KEY, existing.filter((m) => m.id !== id));
+}
+
+/** docs/ROADMAP.md #5.1 — patches an existing entry in place (e.g. Inspect writing back
+ * `segmentCount`/`encrypted` after fetching a media/variant playlist). No-op if `id` isn't found
+ * (entry dismissed between the Inspect click and this write finishing). */
+export async function updateDetectedMedia(
+  id: string,
+  patch: Partial<DetectedMedia>,
+  cache: CacheService = chromeStorageCache,
+): Promise<void> {
+  const existing = await listDetectedMedia(cache);
+  await cache.set(
+    DETECTED_MEDIA_STORAGE_KEY,
+    existing.map((m) => (m.id === id ? { ...m, ...patch } : m)),
+  );
 }

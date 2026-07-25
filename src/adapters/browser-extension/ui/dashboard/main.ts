@@ -3,7 +3,7 @@ import './dashboard.css';
 import type { RegistryEntry } from '../../../../kernel/module-registry';
 import { isCollectionSchema, type UICollectionSchema } from '../../../../kernel/ui-schema';
 import { ChromeModuleRegistryService } from '../../module-registry/chrome-module-registry';
-import { getModuleDataSource, type ModuleDataSource } from '../module-data-sources';
+import { getModuleDataSource, emitRowActionTrigger, type ModuleDataSource } from '../module-data-sources';
 import { renderManagementView } from './views/management-view';
 import { renderItemFormView } from './views/item-form-view';
 import { renderStepsView } from './views/steps-view';
@@ -109,6 +109,7 @@ function render(): void {
       onAdd: () => navigate({ kind: 'item-form' }),
       onEdit: (item) => navigate({ kind: 'item-form', itemId: String(item[idField]) }),
       onDelete: (item) => activeDataSource.delete(String(item[idField])),
+      onTrigger: (op, item) => emitRowActionTrigger(activeEntry.id, op, String(item[idField])),
     };
     if (activeSchema.activeField) {
       const activeField = activeSchema.activeField;

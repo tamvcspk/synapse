@@ -83,13 +83,32 @@ export interface UICollectionSchema {
    * docs/ROADMAP.md #4), not user-authored. Delete (✕) still renders — "dismiss this entry" stays
    * meaningful even when "create"/"edit" don't. */
   readOnly?: boolean;
-  /** Renders one extra per-row button in the Management View, labeled `label`, that opens
+  /** Names a boolean field (elsewhere in `fields`) whose truthy rows the Management View hides by
+   * default behind a "Show hidden" toggle (docs/ROADMAP.md #5.2) — not a delete, still visible with
+   * one click, and still counted/searchable once shown. First use: network-sniffer's `thirdParty`
+   * label (#4.1), which used to be a pure label with no effect on row count. */
+  defaultHideField?: string;
+  /** Extra per-row buttons in the Management View, rendered in order. `'download'` opens
    * `item[urlField]` via `chrome.downloads.download` — the Dashboard tab already has full
    * `chrome.*` access (design.md §7), so this needs no new callback plumbing through
-   * dashboard/main.ts. First use: network-sniffer's "Download" action on a detected media URL
-   * (docs/ROADMAP.md #4). */
-  rowAction?: { label: string; urlField: string };
+   * dashboard/main.ts (first use: network-sniffer's "Download" action, docs/ROADMAP.md #4).
+   * `'trigger'` sends `{op, id}` straight to the Module's own bus listener, bypassing
+   * `CollectionCommand` entirely — same pattern network-sniffer's `report-dom-media`/
+   * `report-main-world-media` already use for a Module-specific op that isn't generic CRUD (first
+   * use: network-sniffer's "Inspect" manifest action, docs/ROADMAP.md #5.1). `'open-tab'` is pure
+   * UI, like `'download'` — `chrome.tabs.create`s `path` (an extension-relative page, resolved via
+   * `chrome.runtime.getURL`) with `item[urlField]` appended as a `?url=` query param (first use:
+   * network-sniffer's "Download (merged)" action opening the Merge page, docs/ROADMAP.md #5.3). No
+   * visibility condition on any kind — every kind here is expected to no-op/error gracefully on
+   * rows it doesn't apply to (e.g. Inspect or Merge on a non-manifest URL), rather than needing
+   * per-row show/hide wiring for a single button. */
+  rowActions?: UIRowAction[];
 }
+
+export type UIRowAction =
+  | { kind: 'download'; label: string; urlField: string }
+  | { kind: 'trigger'; label: string; op: string }
+  | { kind: 'open-tab'; label: string; urlField: string; path: string };
 
 export interface UIActionDef {
   /** Passed as `{ action: id }` in `run()`'s input (docs/ROADMAP.md #1's Crawl & Convert Site) —

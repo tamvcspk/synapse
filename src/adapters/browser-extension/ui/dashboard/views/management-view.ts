@@ -2,13 +2,17 @@ import van from 'vanjs-core';
 import type { RegistryEntry } from '../../../../../kernel/module-registry';
 import type { UICollectionSchema } from '../../../../../kernel/ui-schema';
 
-const { div, h1, button, input, table, thead, tbody, tr, th, td, p, header, section } = van.tags;
+const { div, h1, button, input, label, table, thead, tbody, tr, th, td, p, header, section } = van.tags;
 
 export interface ManagementViewCallbacks {
   onAdd(): void;
   onEdit(item: Record<string, unknown>): void;
   onToggleActive?(item: Record<string, unknown>): void;
   onDelete(item: Record<string, unknown>): void;
+  /** Only needed when `schema.rowActions` contains a `'trigger'` kind — sends the op straight to
+   * the Module's own bus listener (docs/ROADMAP.md #5.1), same "generic renderer, per-kind
+   * optional callback" shape as `onToggleActive`. */
+  onTrigger?(op: string, item: Record<string, unknown>): void;
 }
 
 /**
@@ -33,6 +37,9 @@ export function renderManagementView(
   // item form. Filtering (below) only searches what's actually displayed, for the same reason.
   const columns = schema.fields.filter((f) => f.key !== idField && !f.advanced);
   const filter = van.state('');
+  // docs/ROADMAP.md #5.2 — starts hidden (unchecked): schema.defaultHideField rows don't show up
+  // until the user opts in, but nothing about them (search, dismiss) is disabled while hidden.
+  const showHidden = van.state(false);
 
   // A 'file' field's stored value (see item-form-view.ts) is a blobRef/blob-store.ts id — an opaque
   // UUID, meaningless to a reader looking at this table. `fileNameKey` (when the Module declares
@@ -47,6 +54,7 @@ export function renderManagementView(
   }
 
   function matchesFilter(item: Record<string, unknown>): boolean {
+    if (schema.defaultHideField && !showHidden.val && item[schema.defaultHideField] === true) return false;
     const query = filter.val.trim().toLowerCase();
     if (!query) return true;
     const haystack = columns
@@ -71,15 +79,24 @@ export function renderManagementView(
       ),
       td(
         { class: 'row-actions' },
-        schema.rowAction
-          ? button(
-              {
-                title: schema.rowAction.label,
-                onclick: () => chrome.downloads.download({ url: String(item[schema.rowAction!.urlField]) }),
+        ...(schema.rowActions ?? []).map((action) =>
+          button(
+            {
+              title: action.label,
+              onclick: () => {
+                if (action.kind === 'download') {
+                  void chrome.downloads.download({ url: String(item[action.urlField]) });
+                } else if (action.kind === 'open-tab') {
+                  const url = `${chrome.runtime.getURL(action.path)}?url=${encodeURIComponent(String(item[action.urlField]))}`;
+                  void chrome.tabs.create({ url });
+                } else {
+                  callbacks.onTrigger?.(action.op, item);
+                }
               },
-              schema.rowAction.label,
-            )
-          : null,
+            },
+            action.label,
+          ),
+        ),
         schema.readOnly ? null : button({ title: 'Edit', onclick: () => callbacks.onEdit(item) }, '✎'),
         button({ title: 'Delete', onclick: () => callbacks.onDelete(item) }, '✕'),
       ),
@@ -125,6 +142,21 @@ export function renderManagementView(
           filter.val = (e.target as HTMLInputElement).value;
         },
       }),
+      // docs/ROADMAP.md #5.2 — only rendered when the schema actually declares a field to hide;
+      // most Collection schemas have no `defaultHideField` and get no toggle.
+      schema.defaultHideField
+        ? label(
+            { class: 'show-hidden-toggle' },
+            input({
+              type: 'checkbox',
+              checked: showHidden.val,
+              onchange: (e: Event) => {
+                showHidden.val = (e.target as HTMLInputElement).checked;
+              },
+            }),
+            ` Show hidden ${schema.itemLabel}s`,
+          )
+        : null,
       tableSlot,
     ),
   );

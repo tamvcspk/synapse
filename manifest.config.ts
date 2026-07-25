@@ -59,7 +59,7 @@ export default defineManifest({
   // (utils/webrequest-media-observer.ts, docs/ROADMAP.md #4) — read-only request observation, no
   // 'webRequestBlocking' (not needed here, and MV3 service workers can't register blocking
   // webRequest listeners anyway). Shows no banner, unlike 'debugger'.
-  // 'downloads' backs the Management View's generic per-row `rowAction` button
+  // 'downloads' backs the Management View's generic per-row `rowActions` 'download' kind
   // (kernel/ui-schema.ts), first used by network-sniffer's "Download" action on a detected media URL.
   permissions: ['storage', 'userScripts', 'scripting', 'debugger', 'declarativeNetRequest', 'webRequest', 'downloads'],
   // chrome.scripting.registerContentScripts (used for the MAIN-world interceptor) needs its own
@@ -67,6 +67,13 @@ export default defineManifest({
   // both show the same install-time warning. Without this, registerContentScripts resolves with no
   // error but silently never actually injects anything.
   host_permissions: ['<all_urls>'],
+  // 'wasm-unsafe-eval' widens MV3's default extension_pages CSP (which blocks WebAssembly
+  // compilation the same as it blocks eval()) — required by ffmpeg.wasm's WebAssembly.instantiate
+  // on the Merge page (docs/ROADMAP.md #5.3, HLS segment download+remux). Scoped to
+  // extension_pages only (the Merge tab), not sandbox or content scripts.
+  content_security_policy: {
+    extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
+  },
   // 'assets/*' covers http-error-mocker/mock-files.ts's build-time-enumerated files (docs/ROADMAP.md
   // #2.6) once they're big enough that Vite emits them as a real file instead of inlining as a
   // data: URL (build.assetsInlineLimit, ~4KB) — those need a real chrome-extension://<id>/... URL to

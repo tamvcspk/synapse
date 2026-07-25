@@ -19,6 +19,9 @@ export default defineConfig({
         // Review page (docs/ROADMAP.md #3) — same "extra Vite HTML entry" treatment as `dashboard`
         // above, opened the same way (chrome.tabs.create from the popup), no manifest field fits it.
         review: 'src/adapters/browser-extension/ui/review/index.html',
+        // Merge page (docs/ROADMAP.md #5.3) — same treatment, opened via a `rowActions` 'open-tab'
+        // action (kernel/ui-schema.ts) from the Dashboard's Management View instead of the popup.
+        merge: 'src/adapters/browser-extension/ui/merge/index.html',
       },
     },
   },

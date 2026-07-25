@@ -1,6 +1,8 @@
 import type { Module } from '../../../../../kernel/module';
 import type { CollectionCommand } from '../../../../../kernel/ui-schema';
 import { classifyMediaUrl, classifyMediaMimeType, type MediaKind } from '../../../../../shared/media-url-matcher';
+import { isAdNetworkDomain } from '../../../../../shared/ad-domain-denylist';
+import { looksLikeAdOrTrackerPath } from '../../../../../shared/junk-url-patterns';
 import { ensureNetworkObserver, teardownNetworkObserver, type ObservedRequest } from '../../../utils/webrequest-media-observer';
 import {
   isMainWorldScriptRegistered,
@@ -14,7 +16,16 @@ import { isModuleActive } from '../../../module-registry/storage';
 // file with zero `import` statements.
 import payloadPath from './main-world-payload?script&iife';
 import { MAIN_WORLD_SCRIPT_ID } from './constants';
-import { addDetectedMedia, listDetectedMedia, removeDetectedMedia, type DetectedMedia } from './store';
+import { addDetectedMedia, listDetectedMedia, removeDetectedMedia, updateDetectedMedia, type DetectedMedia } from './store';
+import { parseM3u8 } from '../../../../../shared/media-manifest-parser';
+
+/** docs/ROADMAP.md #5.2 — combines both junk signals (static domain denylist + path/query keyword
+ * heuristic) into the one check used at all three detection entry points below. The keyword half
+ * catches an ad/tracker request the domain list doesn't name yet (a new domain, or one that rotates
+ * — DGA-style), without needing the list updated first. */
+function isJunkUrl(url: string): boolean {
+  return isAdNetworkDomain(url) || looksLikeAdOrTrackerPath(url);
+}
 
 /**
  * docs/ROADMAP.md #4.1's junk-URL filtering, the "what counts as media" policy half (the observer
@@ -25,12 +36,28 @@ import { addDetectedMedia, listDetectedMedia, removeDetectedMedia, type Detected
  * (exactly as before this filtering was added). Anything else (`xmlhttprequest`/`object`/`other`)
  * is the noisy bucket where a URL merely *looking* like media (an ad/analytics XHR ending in
  * `.mp4`, say) used to be enough on its own — now it REQUIRES a genuine, server-confirmed
- * Content-Type match. A response with no/mismatched Content-Type is silently excluded, same
- * "partial result over false positive" posture as fetch-images'/crawlSite's per-item skip.
+ * Content-Type match, UNLESS the URL is already unambiguously a stream manifest (`.m3u8`/`.mpd`):
+ * unlike `.mp4`/`.mp3`, an ad/analytics endpoint essentially never happens to end in a manifest
+ * extension, and a lot of manifest servers are sloppy about Content-Type — a hls.js/dash.js-style
+ * player's own manifest fetch (often issued from a Worker, which `chrome.webRequest` still sees
+ * fine even though the MAIN-world observer's `window.fetch` patch can't) was getting silently
+ * dropped here, exactly the case docs/ROADMAP.md #4.1's MAIN-world/blob: correlation work exists
+ * to rescue — trusting the URL alone for `stream` closes that gap without reopening the original
+ * `video`/`audio` false-positive problem this filtering was added for. A response with no/mismatched
+ * Content-Type is still silently excluded for `video`/`audio`, same "partial result over false
+ * positive" posture as fetch-images'/crawlSite's per-item skip.
+ *
+ * docs/ROADMAP.md #5.2 — checked first, ahead of the resourceType/Content-Type split above: a junk
+ * URL (known ad-network domain, or an ad/tracker-shaped path/query) is rejected outright regardless
+ * of resourceType, since these networks routinely serve real `video/*` Content-Types for what's
+ * still an ad, which the `resourceType === 'media'` branch would otherwise trust unconditionally.
  */
 function classifyDetection(req: ObservedRequest): MediaKind | undefined {
+  if (isJunkUrl(req.url)) return undefined;
+  const urlKind = classifyMediaUrl(req.url);
   const mimeKind = req.contentType ? classifyMediaMimeType(req.contentType) : undefined;
-  if (req.resourceType === 'media') return mimeKind ?? classifyMediaUrl(req.url);
+  if (req.resourceType === 'media') return mimeKind ?? urlKind;
+  if (urlKind === 'stream') return 'stream';
   return mimeKind;
 }
 
@@ -49,6 +76,14 @@ interface ReportDomMediaCommand {
 interface ReportMainWorldMediaCommand {
   op: 'report-main-world-media';
   url: string;
+}
+
+/** Sent by the Management View's "Inspect" rowAction (docs/ROADMAP.md #5.1, kernel/ui-schema.ts's
+ * `'trigger'` UIRowAction) — `id` is the DetectedMedia entry to fetch+parse as an HLS manifest.
+ * Same "module-specific op, bypasses CollectionCommand" reasoning as the two commands above. */
+interface InspectCommand {
+  op: 'inspect';
+  id: string;
 }
 
 /** docs/ROADMAP.md #4.1's third-party/initiator-origin signal — a LABEL, not a filter (see
@@ -105,10 +140,10 @@ chrome.runtime.onMessage.addListener((message: { type?: string; url?: string } |
  * Read-only Collection schema: detected media is a running, capped log across all tabs (not
  * scoped to "the active tab" — the Dashboard opens in its own tab, which would otherwise be the
  * "active tab" by the time anyone reads it), so there's no sensible Add/Edit, only Delete
- * ("dismiss this entry") and a per-row Download action (UICollectionSchema's `rowAction`).
+ * ("dismiss this entry") and per-row Download/Inspect actions (UICollectionSchema's `rowActions`).
  */
 export const NetworkSnifferModule: Module<
-  CollectionCommand<DetectedMedia> | ReportDomMediaCommand | ReportMainWorldMediaCommand | undefined,
+  CollectionCommand<DetectedMedia> | ReportDomMediaCommand | ReportMainWorldMediaCommand | InspectCommand | undefined,
   void
 > = {
   id: 'network-sniffer',
@@ -123,7 +158,19 @@ export const NetworkSnifferModule: Module<
     itemLabel: 'detected media',
     idField: 'id',
     readOnly: true,
-    rowAction: { label: 'Download', urlField: 'url' },
+    // docs/ROADMAP.md #5.2 — `thirdParty` (#4.1) was a pure label until now; this makes it actually
+    // reduce visible row count, without losing the entries (still there behind "Show hidden").
+    defaultHideField: 'thirdParty',
+    // 'Inspect'/'Download (merged)' are on every row unconditionally, not just 'stream'-kind ones
+    // (docs/ROADMAP.md #5.1/#5.3) — both no-op/error gracefully on a URL that isn't an HLS media
+    // playlist (ParsedManifest's {kind:'unknown'} for Inspect, the Merge page's own error state for
+    // Download (merged)), so a per-row show/hide condition would be pure overhead for the same
+    // result.
+    rowActions: [
+      { kind: 'download', label: 'Download', urlField: 'url' },
+      { kind: 'trigger', label: 'Inspect', op: 'inspect' },
+      { kind: 'open-tab', label: 'Download (merged)', urlField: 'url', path: 'src/adapters/browser-extension/ui/merge/index.html' },
+    ],
     fields: [
       { key: 'url', label: 'URL', type: 'string' },
       { key: 'kind', label: 'Type', type: 'string' },
@@ -133,6 +180,24 @@ export const NetworkSnifferModule: Module<
         key: 'thirdParty',
         label: 'Third-party?',
         hint: 'Best-effort signal only — a legitimate video is often served from a different-origin CDN too, this is not a reliable ad indicator on its own',
+        type: 'boolean',
+      },
+      {
+        key: 'resolution',
+        label: 'Resolution',
+        hint: 'Set on a stream entry created by Inspect-ing a master HLS playlist — one entry per resolution variant',
+        type: 'string',
+      },
+      {
+        key: 'segmentCount',
+        label: 'Segments',
+        hint: 'Set by Inspect once a stream entry is confirmed to be a media/variant HLS playlist, not a master listing other resolutions',
+        type: 'number',
+      },
+      {
+        key: 'encrypted',
+        label: 'DRM?',
+        hint: 'Set by Inspect — an EXT-X-KEY other than NONE was present (Widevine/EME), not independently downloadable',
         type: 'boolean',
       },
     ],
@@ -188,8 +253,10 @@ export const NetworkSnifferModule: Module<
 
     if (command?.op === 'report-main-world-media') {
       // Re-validates server-side rather than trusting the content script's own relay — same "never
-      // trust the shim to self-limit" posture as report-dom-media below.
-      const kind = classifyMediaUrl(command.url);
+      // trust the shim to self-limit" posture as report-dom-media below. docs/ROADMAP.md #5.2 — same
+      // junk check as classifyDetection's webRequest path, so this second detection source doesn't
+      // reopen the ad-network hole the webRequest path just closed.
+      const kind = !isJunkUrl(command.url) ? classifyMediaUrl(command.url) : undefined;
       if (kind) {
         await addDetectedMedia(
           { id: crypto.randomUUID(), url: command.url, kind, detectedAt: new Date().toISOString() },
@@ -202,12 +269,55 @@ export const NetworkSnifferModule: Module<
       // Re-validates server-side rather than trusting the content script's own filtering — same
       // "never trust the shim to self-limit" posture rpc-handler.ts already documents.
       for (const item of command.items) {
+        if (isJunkUrl(item.url)) continue;
         const kind = classifyMediaUrl(item.url);
         if (!kind) continue;
         const media: DetectedMedia = item.pageUrl
           ? { id: crypto.randomUUID(), url: item.url, kind, pageUrl: item.pageUrl, detectedAt: new Date().toISOString() }
           : { id: crypto.randomUUID(), url: item.url, kind, detectedAt: new Date().toISOString() };
         await addDetectedMedia(media, ctx.services.cache);
+      }
+    }
+
+    if (command?.op === 'inspect') {
+      // docs/ROADMAP.md #5.1 — fetch+parse only reached via an explicit user click (the
+      // Management View's "Inspect" rowAction), not run automatically on every detection: most
+      // detected URLs aren't manifests at all, and even `stream`-kind ones may never get inspected.
+      const entry = (await listDetectedMedia(ctx.services.cache)).find((m) => m.id === command.id);
+      if (entry) {
+        try {
+          const manifest = parseM3u8(await (await fetch(entry.url)).text(), entry.url);
+          if (manifest.kind === 'master') {
+            // One NEW entry per resolution variant (dedupe-by-URL in addDetectedMedia makes a
+            // repeat Inspect idempotent), inheriting the manifest entry's own pageUrl.
+            for (const variant of manifest.variants) {
+              const media: DetectedMedia = {
+                id: crypto.randomUUID(),
+                url: variant.url,
+                kind: 'stream',
+                detectedAt: new Date().toISOString(),
+                ...(entry.pageUrl ? { pageUrl: entry.pageUrl } : {}),
+                ...(variant.resolution ? { resolution: variant.resolution } : {}),
+              };
+              await addDetectedMedia(media, ctx.services.cache);
+            }
+          } else if (manifest.kind === 'media') {
+            // Patches the inspected entry itself in place, not a new row. Only the count is
+            // persisted here — the segment URLs themselves are re-fetched+parsed by the Merge page
+            // (docs/ROADMAP.md #5.3) when the user actually clicks "Download (merged)", not stashed
+            // in DetectedMedia (hundreds of URLs per stream, and stale the moment the manifest
+            // rotates, unlike the count).
+            await updateDetectedMedia(
+              entry.id,
+              { segmentCount: manifest.segments.length, encrypted: manifest.encrypted },
+              ctx.services.cache,
+            );
+          }
+          // {kind:'unknown'} — silent no-op, same as a fetch failure below.
+        } catch {
+          // Fetch failure or unparsable manifest — graceful no-op, same "partial result over
+          // failure" posture as fetch-images'/crawlSite's per-item skip.
+        }
       }
     }
   },

@@ -1,0 +1,30 @@
+header {
+  margin-bottom: 1em;
+}
+
+header h1 {
+  margin: 0;
+  word-break: break-all;
+}
+
+.merge-status {
+  font-family: var(--pico-font-family-monospace, monospace);
+  white-space: pre-wrap;
+}
+
+.merge-error {
+  color: var(--pico-del-color);
+}
+
+.merge-drm {
+  border: 1px solid var(--pico-del-color);
+  border-radius: var(--pico-border-radius);
+  padding: 1rem;
+}
+
+.merge-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}

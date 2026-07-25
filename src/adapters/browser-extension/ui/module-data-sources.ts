@@ -8,6 +8,14 @@ export interface ModuleDataSource {
   delete(id: string): void;
 }
 
+/** Wire format for a `'trigger'`-kind `UIRowAction` (kernel/ui-schema.ts, docs/ROADMAP.md #5.1) —
+ * sent straight to the Module's own bus listener, bypassing `CollectionCommand` entirely, same
+ * `{event, payload}` shape as `emitCollectionCommand` below but with a Module-defined `payload`
+ * shape instead of the generic upsert/delete/sync one. */
+export function emitRowActionTrigger(moduleId: string, op: string, id: string): void {
+  chrome.runtime.sendMessage({ event: moduleId, payload: { op, id } });
+}
+
 /**
  * Wire format matching background/services/bus.ts (`{event, payload}` over
  * chrome.runtime.sendMessage) — generic across any collection-schema Module, so a new one never

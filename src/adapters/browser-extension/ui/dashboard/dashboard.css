@@ -25,6 +25,17 @@ header h1 {
   gap: 0.5rem;
 }
 
+.show-hidden-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: fit-content;
+}
+
+.show-hidden-toggle input[type='checkbox'] {
+  margin: 0;
+}
+
 .form-actions {
   display: flex;
   justify-content: flex-end;
