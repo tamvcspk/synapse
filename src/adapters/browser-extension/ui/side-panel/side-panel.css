@@ -84,3 +84,19 @@
 .media-item-actions select {
   flex: 1;
 }
+
+.download-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.4rem 0.6rem;
+}
+
+.download-btn img {
+  width: 16px;
+  height: 16px;
+  /* download.svg is `stroke="currentColor"` for inline SVG use — an <img>-loaded SVG doesn't
+     inherit page CSS, so it renders black by default; forced to white to read against Pico's
+     colored button background. */
+  filter: brightness(0) invert(1);
+}

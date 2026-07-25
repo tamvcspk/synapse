@@ -1,8 +1,8 @@
 import van from 'vanjs-core';
 import type { RegistryEntry } from '../../../../../kernel/module-registry';
-import type { UICollectionSchema } from '../../../../../kernel/ui-schema';
+import type { UICollectionSchema, UIRowAction } from '../../../../../kernel/ui-schema';
 
-const { div, h1, button, input, label, table, thead, tbody, tr, th, td, p, header, section } = van.tags;
+const { div, h1, button, input, label, table, thead, tbody, tr, th, td, p, header, section, ul, li, a } = van.tags;
 
 export interface ManagementViewCallbacks {
   onAdd(): void;
@@ -64,6 +64,56 @@ export function renderManagementView(
     return haystack.includes(query);
   }
 
+  // `'smart-download'` (docs/ROADMAP.md §6.8) picks direct-download vs. open-tab at click time,
+  // based on the item's own `kindField` value — same decision the Side Panel's single "Download"
+  // button already makes (docs/ROADMAP.md §6). `urlOverride` lets a variants-column link (below)
+  // reuse this exact branching for a specific variant's url instead of the row's own `urlField`.
+  function runSmartDownload(
+    action: Extract<UIRowAction, { kind: 'smart-download' }>,
+    item: Record<string, unknown>,
+    urlOverride?: string,
+  ): void {
+    const url = urlOverride ?? String(item[action.urlField]);
+    if (action.openTabKinds.includes(String(item[action.kindField]))) {
+      const tabUrl = `${chrome.runtime.getURL(action.path)}?url=${encodeURIComponent(url)}`;
+      void chrome.tabs.create({ url: tabUrl });
+    } else {
+      void chrome.downloads.download({ url });
+    }
+  }
+
+  // docs/ROADMAP.md §6.8 — `schema.variantsField` names an item field holding `{url,label}[]`
+  // (e.g. network-sniffer's per-video HLS resolution options, folded onto one entry since §6.3);
+  // each one renders as its own small link in the same cell rather than as a separate row, so one
+  // real item stays one table row no matter how many download options it offers. Clicking a
+  // variant link runs the SAME `'smart-download'` action as the row's own button, just aimed at
+  // that variant's url instead of the row's default `urlField`.
+  const smartDownloadAction = schema.rowActions?.find(
+    (a): a is Extract<UIRowAction, { kind: 'smart-download' }> => a.kind === 'smart-download',
+  );
+
+  function renderVariantsCell(item: Record<string, unknown>) {
+    const variants = schema.variantsField ? item[schema.variantsField] : undefined;
+    if (!Array.isArray(variants) || variants.length === 0) return null;
+    return ul(
+      { class: 'variant-list' },
+      ...variants.map((v: { url: string; label: string }) =>
+        li(
+          a(
+            {
+              href: '#',
+              onclick: (e: Event) => {
+                e.preventDefault();
+                if (smartDownloadAction) runSmartDownload(smartDownloadAction, item, v.url);
+              },
+            },
+            v.label,
+          ),
+        ),
+      ),
+    );
+  }
+
   function renderRow(item: Record<string, unknown>) {
     return tr(
       ...columns.map((field) =>
@@ -77,6 +127,7 @@ export function renderManagementView(
             : cellText(field, item),
         ),
       ),
+      schema.variantsField ? td(renderVariantsCell(item)) : null,
       td(
         { class: 'row-actions' },
         ...(schema.rowActions ?? []).map((action) =>
@@ -89,6 +140,8 @@ export function renderManagementView(
                 } else if (action.kind === 'open-tab') {
                   const url = `${chrome.runtime.getURL(action.path)}?url=${encodeURIComponent(String(item[action.urlField]))}`;
                   void chrome.tabs.create({ url });
+                } else if (action.kind === 'smart-download') {
+                  runSmartDownload(action, item);
                 } else {
                   callbacks.onTrigger?.(action.op, item);
                 }
@@ -114,7 +167,13 @@ export function renderManagementView(
       // `title` (not shown here in `f.label` itself) gives the same hover-only explanation as the
       // item form's info icon (see item-form-view.ts's infoIcon) — no icon glyph in a `<th>`,
       // since the whole header cell is already a natural hover target.
-      thead(tr(...columns.map((f) => th(f.hint ? { title: f.hint } : {}, f.label)), th())),
+      thead(
+        tr(
+          ...columns.map((f) => th(f.hint ? { title: f.hint } : {}, f.label)),
+          schema.variantsField ? th(schema.variantsLabel ?? 'Options') : null,
+          th(),
+        ),
+      ),
       tbody(...visible.map(renderRow)),
     );
   });

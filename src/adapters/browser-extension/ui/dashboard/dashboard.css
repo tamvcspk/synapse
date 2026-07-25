@@ -25,6 +25,29 @@ header h1 {
   gap: 0.5rem;
 }
 
+.variant-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.variant-list li {
+  margin: 0;
+}
+
+.variant-list a {
+  display: inline-block;
+  padding: 0.15em 0.6em;
+  border: 1px solid var(--pico-muted-border-color, currentColor);
+  border-radius: 999px;
+  font-size: 0.85em;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
 .show-hidden-toggle {
   display: flex;
   align-items: center;

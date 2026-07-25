@@ -7,6 +7,7 @@ import { registerRpcHandler } from '../module-registry/rpc-handler';
 import { BACKGROUND_MODULES } from '../module-registry/background-modules';
 import { setUserScriptsPermissionGranted } from '../module-registry/storage';
 import { DASHBOARD_PATH } from '../ui/dashboard/dashboard-path';
+import { SIDE_PANEL_PATH } from '../ui/side-panel/side-panel-path';
 import { chromeRuntimeBus } from './services/bus';
 import { chromeStorageCache } from './services/cache';
 // import a concrete ai factory once a Module actually declares it — see kernel-bootstrap skill
@@ -53,15 +54,62 @@ chrome.runtime.onMessage.addListener((message: { type?: string; moduleId?: strin
 // docs/ROADMAP.md §6.2 — network-sniffer's floating icon (utils/floating-widget.ts's
 // showFloatingIcon, wired up in content-scripts/index.ts) can't call chrome.sidePanel itself
 // (content scripts don't have that API), so it messages background to open it for its own tab.
-// RISK, not yet verified in a real browser (agent has no browser): chrome.sidePanel.open() must be
-// called within a user gesture — whether that gesture survives a content-script
-// chrome.runtime.sendMessage round trip to the service worker is unconfirmed. If Chrome rejects
-// this, the fallback is chrome.sidePanel.setOptions({tabId, enabled:true}) and letting the user
-// click Chrome's own Side Panel toolbar icon instead.
+// docs/ROADMAP.md §6.7 — `chrome.sidePanel.open()` must be called SYNCHRONOUSLY within this
+// listener, with nothing awaited first — the user-gesture "activation" this relies on (carried
+// across the chrome.runtime.sendMessage round trip from the content script's click handler)
+// expires after even one microtask tick. §6.6 previously added an `await
+// chrome.sidePanel.setOptions(...)` right before this call to fix a DIFFERENT bug ("No active side
+// panel for tabId") — that awaited call is exactly what broke the gesture and produced "may only
+// be called in response to a user gesture" instead. The original "No active side panel" bug's real
+// cause was syncSidePanelForTab (below) calling setOptions on every tab unconditionally — already
+// fixed by narrowing it to only ever touch a tab it has itself disabled — so no setOptions call is
+// needed here anymore at all.
 chrome.runtime.onMessage.addListener((message: { type?: string } | undefined, sender) => {
   if (message?.type !== 'synapse:open-network-sniffer-panel' || !sender.tab?.id) return;
-  void chrome.sidePanel.open({ tabId: sender.tab.id });
+  chrome.sidePanel.open({ tabId: sender.tab.id }).catch((err) => {
+    console.error('Synapse: failed to open network-sniffer Side Panel', err);
+  });
 });
+
+// docs/ROADMAP.md §6.5 — the Side Panel makes no sense while a Synapse extension page itself is
+// the active tab (e.g. Dashboard, opened from the Side Panel's own "Settings" button) — per-tab
+// disable so Chrome hides/collapses the panel automatically when such a tab becomes active,
+// instead of leaving network-sniffer's panel showing over the Dashboard. Only Dashboard is handled
+// for now (the only case reported so far); extend this list if Merge/Review need the same.
+const SIDE_PANEL_DISABLED_URL_PREFIXES = [chrome.runtime.getURL(DASHBOARD_PATH)];
+
+// docs/ROADMAP.md §6.6 — only ever calls chrome.sidePanel.setOptions for a tab THIS module itself
+// previously disabled (re-enabling it once its tab navigates away from Dashboard), never for the
+// many ordinary tabs it hasn't touched — narrowed after the "No active side panel for tabId" bug,
+// to minimize how much of chrome.sidePanel's per-tab state this file reaches into.
+const disabledSidePanelTabs = new Set<number>();
+
+async function syncSidePanelForTab(tabId: number, url: string | undefined): Promise<void> {
+  const shouldDisable = !!url && SIDE_PANEL_DISABLED_URL_PREFIXES.some((prefix) => url.startsWith(prefix));
+  if (shouldDisable === disabledSidePanelTabs.has(tabId)) return; // already in the right state
+  try {
+    if (shouldDisable) {
+      await chrome.sidePanel.setOptions({ tabId, enabled: false });
+      disabledSidePanelTabs.add(tabId);
+    } else {
+      await chrome.sidePanel.setOptions({ tabId, path: SIDE_PANEL_PATH, enabled: true });
+      disabledSidePanelTabs.delete(tabId);
+    }
+  } catch {
+    // Tab may have closed between the event firing and this call — best-effort.
+  }
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.url) void syncSidePanelForTab(tabId, changeInfo.url);
+});
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  void chrome.tabs
+    .get(tabId)
+    .then((tab) => syncSidePanelForTab(tabId, tab.url))
+    .catch(() => {});
+});
+chrome.tabs.onRemoved.addListener((tabId) => disabledSidePanelTabs.delete(tabId));
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   kernel.run(/* resolve modules for message.workflowId */ [], message.input, (failure) => {

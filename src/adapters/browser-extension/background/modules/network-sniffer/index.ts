@@ -206,16 +206,35 @@ export const NetworkSnifferModule: Module<
     // docs/ROADMAP.md #5.2 — `thirdParty` (#4.1) was a pure label until now; this makes it actually
     // reduce visible row count, without losing the entries (still there behind "Show hidden").
     defaultHideField: 'thirdParty',
-    // 'Download (merged)' is on every row unconditionally, not just 'stream'-kind ones (docs/
-    // ROADMAP.md #5.3) — no-op/errors gracefully on a URL that isn't an HLS media playlist (the
-    // Merge page's own error state), so a per-row show/hide condition would be pure overhead for
-    // the same result. Manifest inspection itself is no longer a user-facing rowAction (docs/
-    // ROADMAP.md §6.3 — auto-inspect runs automatically on every `stream`-kind detection now, see
-    // inspectStreamEntry above) — this legacy Management View table just no longer has that button.
+    // docs/ROADMAP.md §6.8 — single "Download" button, same one-action UX the Side Panel already
+    // has (docs/ROADMAP.md §6): `kind:'video'|'audio'` downloads straight via `chrome.downloads`,
+    // `kind:'stream'` opens the Merge tab instead (`openTabKinds`) — no-op/errors gracefully on a
+    // URL that isn't an HLS media playlist (the Merge page's own error state). Manifest inspection
+    // itself is no longer a user-facing rowAction (docs/ROADMAP.md §6.3 — auto-inspect runs
+    // automatically on every `stream`-kind detection now, see inspectStreamEntry above). Reads
+    // `downloadUrl` (below), not `url` — a master-playlist entry's OWN `url` is just the manifest
+    // listing other resolutions, not downloadable/mergeable on its own since §6.3 folded its
+    // variants into `variants` instead of separate rows; `downloadUrl` resolves to the first
+    // variant automatically (same default the Side Panel's own `<select>` starts on) — the
+    // `variantsField` column below lets a row pick a different resolution instead of that default.
     rowActions: [
-      { kind: 'download', label: 'Download', urlField: 'url' },
-      { kind: 'open-tab', label: 'Download (merged)', urlField: 'url', path: 'src/adapters/browser-extension/ui/merge/index.html' },
+      {
+        kind: 'smart-download',
+        label: 'Download',
+        urlField: 'downloadUrl',
+        kindField: 'kind',
+        openTabKinds: ['stream'],
+        path: 'src/adapters/browser-extension/ui/merge/index.html',
+      },
     ],
+    // docs/ROADMAP.md §6.8 — one row per video even when its manifest has N resolutions (§6.3
+    // already folds them onto one entry's `variants`); this surfaces them as their own column of
+    // clickable options instead of leaving them invisible (previously only `downloadUrl`'s silent
+    // first-variant default used `variants` at all). `variantLinks` is computed in listCollection()
+    // below, same reasoning as `downloadUrl` — `{url,resolution}[]` renamed to the generic
+    // `{url,label}[]` shape management-view.ts's variantsField rendering expects.
+    variantsField: 'variantLinks',
+    variantsLabel: 'Resolutions',
     fields: [
       { key: 'url', label: 'URL', type: 'string' },
       { key: 'kind', label: 'Type', type: 'string' },
@@ -247,7 +266,18 @@ export const NetworkSnifferModule: Module<
       },
     ],
   },
-  listCollection: async () => (await listDetectedMedia()) as unknown as Record<string, unknown>[],
+  // `downloadUrl` (docs/ROADMAP.md §6.5) is computed here, not stored — a master entry's own `url`
+  // is the manifest listing other resolutions, not itself downloadable/mergeable; this resolves to
+  // its first variant instead, same default the Side Panel's `<select>` starts on. `variantLinks`
+  // (docs/ROADMAP.md §6.8) renames each variant's `resolution` to the generic `label` the schema's
+  // `variantsField` column expects, falling back to a 1-based index for a variant whose manifest
+  // never had an `EXT-X-STREAM-INF` bandwidth/resolution tag to read a label from.
+  listCollection: async () =>
+    (await listDetectedMedia()).map((m) => ({
+      ...m,
+      downloadUrl: m.variants?.[0]?.url ?? m.url,
+      variantLinks: m.variants?.map((v, i) => ({ url: v.url, label: v.resolution ?? `Option ${i + 1}` })),
+    })) as unknown as Record<string, unknown>[],
   async run(command, ctx) {
     if (!(await isModuleActive('network-sniffer'))) {
       teardownNetworkObserver();

@@ -18,6 +18,10 @@ const AD_NETWORK_DOMAINS = [
   'eroadvertising.com',
   'popads.net',
   'popcash.net',
+  // docs/ROADMAP.md §6.5 — video ad-syndication CDN, seen serving an HLS ad manifest from a
+  // `.mp4.m3u8` path with no query string at all (so neither the path-keyword nor macro-template
+  // heuristics in junk-url-patterns.ts had anything to match on).
+  /* 'tsyndicate.com', */
 ];
 
 /** True when `url`'s hostname is (or is a subdomain of) a known ad-network domain. Returns `false`

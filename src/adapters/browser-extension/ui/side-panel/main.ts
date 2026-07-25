@@ -3,6 +3,7 @@ import './side-panel.css';
 import van from 'vanjs-core';
 import { listDetectedMedia, type DetectedMedia } from '../../background/modules/network-sniffer/store';
 import { DASHBOARD_PATH } from '../dashboard/dashboard-path';
+import downloadIconUrl from '../../../../assets/icon/download.svg';
 
 /**
  * network-sniffer's Side Panel (docs/ROADMAP.md §6) — bespoke renderer, not
@@ -13,7 +14,7 @@ import { DASHBOARD_PATH } from '../dashboard/dashboard-path';
  * shows the entire cross-tab detected-media log unfiltered.
  */
 
-const { div, h1, p, span, select, option, button } = van.tags;
+const { div, h1, p, span, select, option, button, img } = van.tags;
 
 // Same literal path network-sniffer/index.ts's 'open-tab' rowAction already uses — no shared
 // constant exists for it (that rowAction is declared inline in the module's uiSchema).
@@ -123,7 +124,14 @@ function renderItem(item: DetectedMedia) {
     p({ class: 'media-item-filename', title: item.url }, fileNameFromUrl(item.url)),
     item.pageUrl ? p({ class: 'media-item-source' }, `Found on ${hostnameOf(item.pageUrl)}`) : null,
     summary ? p({ class: 'media-item-summary' }, summary) : null,
-    div({ class: 'media-item-actions' }, variantSelect, button({ onclick: () => handleDownload(item) }, 'Download')),
+    div(
+      { class: 'media-item-actions' },
+      variantSelect,
+      button(
+        { class: 'download-btn', title: 'Download', 'aria-label': 'Download', onclick: () => handleDownload(item) },
+        img({ src: downloadIconUrl, alt: '' }),
+      ),
+    ),
   );
 }
 
