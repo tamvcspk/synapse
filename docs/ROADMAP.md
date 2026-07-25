@@ -131,10 +131,10 @@ Business case: phát hiện URL video/audio/stream trang tự request, liệt k�
 - Badge tự nhiên đúng theo từng frame (mỗi frame anchor video của chính nó) — không có vấn đề "N cái chồng nhau".
 - **Chưa test bằng browser thật** (agent không có môi trường trình duyệt) — cần verify: badge bám đúng vị trí khi cuộn/resize, tự ẩn/gỡ đúng lúc, toast fallback vẫn hoạt động.
 
-### 4.3. Action-button paradigm — vẫn hoãn
+### 4.3. Action-button paradigm — không còn hoãn vô thời hạn, xem mục 6.1
 
-- Rào cản kỹ thuật thật: `action.default_popup` khai tĩnh trong manifest sẽ nuốt trọn click, `chrome.action.onClicked` không bao giờ fire — cần chuyển sang `chrome.action.setPopup({popup:''})` động theo module đang active trước khi bất kỳ module nào được khai paradigm này. Coi là Future Adapter, không phải lựa chọn ngang hàng Dedicated Management Page hiện tại.
-- `uiParadigm:'action-button'` đã là giá trị hợp lệ trên type (thêm cùng lúc `'float-widget'`) nhưng chưa Module nào dùng — chỉ gán khi paradigm này thật sự implement.
+- Rào cản kỹ thuật thật: `action.default_popup` khai tĩnh trong manifest sẽ nuốt trọn click, `chrome.action.onClicked` không bao giờ fire — cần chuyển sang `chrome.action.setPopup({popup:''})` động theo module đang active trước khi bất kỳ module nào được khai paradigm này. Từng coi là Future Adapter treo vô thời hạn; **mục 6.1 giờ là kế hoạch cụ thể để gỡ rào cản này** (dùng `chrome.sidePanel.setPanelBehavior` thay vì `setPopup` động — network-sniffer cần mở Side Panel, không phải một Popup khác theo module).
+- `uiParadigm:'action-button'` đã là giá trị hợp lệ trên type (thêm cùng lúc `'float-widget'`) nhưng chưa Module nào dùng — mục 6.1/6.3 là lần gán đầu tiên (network-sniffer).
 
 ## 5. Kế hoạch tiếp theo cho `network-sniffer`
 
@@ -179,11 +179,62 @@ Chưa làm (dự phòng nếu ba hướng trên chưa đủ sạch): ngưỡng k
 - **Fetch segment lỗi giữa chừng → dừng hẳn, không skip-and-continue** — khác hẳn `fetch-images`'/`crawlSite`'s per-item skip: thiếu 1 ảnh chỉ làm trang xấu hơn, thiếu 1 segment làm video đứt đoạn. Không có resume — thử lại là chạy lại từ đầu.
 - **Chưa test bằng browser thật** (agent không có môi trường trình duyệt) — cần verify: ffmpeg.wasm's Worker thật sự load được `coreURL`/`wasmURL` bundle nội bộ dưới CSP mới (dynamic `import()` một `chrome-extension://` URL bên trong Worker chưa từng verify runtime), remux TS→MP4 ra file phát được, DRM guard chặn đúng lúc, "Download (merged)" trên URL không phải manifest báo lỗi đúng thay vì treo.
 
-## 6. Rà soát vị trí UI theo khung nguyên tắc Popup/Dashboard/In-page/Side Panel — chưa implement
+## 6. `network-sniffer` UI/UX redesign — Action-button + Side Panel paradigm — chưa implement
+
+**Vấn đề với UX hiện tại (mục 4/5):** quá nhiều thao tác lộ ra cho user không cần biết — "Inspect" là bước kỹ thuật (fetch+parse manifest) bị lộ thành nút riêng; "Download"/"Download (merged)" là hai nút cho cùng một ý định "tôi muốn video này"; Inspect một master playlist tạo ra N dòng mới (một dòng/resolution) trong bảng — user thấy N dòng rời rạc thay vì 1 video với N lựa chọn resolution; bảng (table) trong Dashboard rộng, nhiều cột không liên quan; badge/toast (mục 4.2) mở hẳn Dashboard/Tab mới cho một thao tác lẽ ra nên tại chỗ.
+
+**Mục tiêu UX mới (đã chốt với user):**
+- Auto-inspect ngầm — user không thấy nút "Inspect" nữa. `stream`-kind entry tự động được fetch+parse ngay khi phát hiện (hoặc ngay trước khi hiển thị), không chờ click.
+- Một action duy nhất: **"Download"**. Bấm vào tự quyết định nhánh (tải thẳng qua `chrome.downloads` cho `video`/`audio`, hay chạy flow merge ffmpeg.wasm cho `stream`), không có nút thứ hai.
+- Một video thật = một item trong danh sách, kể cả khi manifest của nó có N resolution — N resolution gộp vào **một `<select>`** trong item đó, không phải N dòng.
+- Danh sách hiển thị dạng **list/card**, không phải `<table>` (mục #2's `management-view.ts` là generic renderer dùng chung nhiều module khác — bảng vẫn hợp lý ở đó; network-sniffer cần renderer riêng, xem 6.3).
+- Bấm icon **trên toolbar cạnh address bar** (chỗ đặt icon extension chuẩn của Chrome — xem giới hạn kỹ thuật ở 6.1 về vì sao không thể là icon "trong" address bar kiểu Cốc Cốc) mở **Side Panel** — CHỈ khi network-sniffer đang là module được "đưa lên" action button qua radio option mới trong Popup (mục 6.1, đã chốt với user); mặc định (chưa chọn module nào) icon vẫn mở Popup như hiện tại, không đổi hành vi toàn cục ngay khi cài đặt.
+- Side Panel = danh sách video + nút "Settings" (gear icon) mở Dashboard. Side Panel **không** có bảng riêng cho download list nữa một khi đã hiện ở đây — Dashboard **thôi hiển thị `DetectedMedia` collection** (không còn Management View table cho module này), chỉ còn giữ vai trò List Modules/toggle active + settings chung (mục 2/2.5) như mọi module khác.
+
+**Thứ tự làm (activate từng paradigm mới ở kernel trước, rồi mới áp dụng vào module) — 3 bước, cộng rủi ro/quyết định mở ở 6.4:**
+
+### 6.1. Activate Action-button paradigm (kernel) — gỡ block đã ghi ở mục 4.3
+
+- Rào cản cũ (mục 4.3): `action.default_popup` khai tĩnh trong manifest nuốt trọn click, `chrome.action.onClicked` không bao giờ fire.
+- **Giới hạn kỹ thuật (vẫn đúng, quyết định chốt bên dưới thiết kế xung quanh nó):** action button là **toàn cục cho cả extension**, không phải per-module — Chrome chỉ cho MỘT hành vi click tại một thời điểm (mở Popup tĩnh, HOẶC chạy `onClicked`), không thể vừa mở Popup vừa mở Side Panel tuỳ module đang "active" cùng lúc. Icon "trong address bar" kiểu Cốc Cốc là UI browser-chrome-level của Cốc Cốc, không phải API một extension Chrome chuẩn có quyền tạo — điểm gần nhất đạt được vẫn là action button hiện tại (cạnh puzzle-piece icon).
+- **Đã chốt với user — hướng (c): Popup chọn "module nào được lên action button", không đổi hành vi toàn cục mặc định:**
+  - **Popup thêm radio option** bên cạnh Slide Toggle activation hiện có của mỗi module (mục 2's Navigation Flow), nhưng CHỈ hiện ở module có `uiParadigm: 'action-button'` — module khác (dedicated-page/float-widget/none) không có gì để "đưa lên" nên không hiện radio. Radio là **mutually exclusive trên toàn Popup** (một nhóm `name` chung xuyên suốt list, không phải theo từng module riêng) — chọn module này tự bỏ chọn module kia, tại một thời điểm chỉ 1 module "sở hữu" action button, đúng giới hạn kỹ thuật ở trên.
+  - **Storage mới**, cùng chỗ với `module-registry/storage.ts`'s `isModuleActive` — 1 key đơn (vd `synapse:action-button-module`) giữ id module đang được chọn, hoặc rỗng/absent = "không module nào" (trạng thái mặc định, action button giữ nguyên hành vi Popup như hiện tại).
+  - **Background sync khi key đổi** (cùng pattern `pingBusModule`/always-re-register-while-active đã dùng ở mục 4/2.6):
+    - Có module được chọn → `chrome.action.setPopup({popup: ''})` (tắt Popup tĩnh để `onClicked` thật sự fire) + `chrome.action.setIcon(...)` theo icon module đó khai + `onClicked` dispatch tới đúng hành vi action-button của module đó (network-sniffer → mở Side Panel, mục 6.3).
+    - Không module nào được chọn → khôi phục `chrome.action.setPopup({popup: 'ui/popup/index.html'})` + icon mặc định của Synapse.
+  - **Mỗi module đủ điều kiện cần khai thêm icon đại diện — 1 file SVG duy nhất, không phải bộ nhiều size PNG** (`16/32/48/128` như manifest icon truyền thống) — field mới kernel-level trên `Module` (vd `actionIcon?: string`, đường dẫn tới file `.svg`). Vị trí file theo đúng chủ sở hữu: icon dùng chung (global, không thuộc module nào) nằm ở **[src/assets/icon/](../src/assets/icon/)** — đã có sẵn 4 icon Lucide: `download.svg`, `rotate-ccw.svg` (refresh), `settings.svg`, `upload.svg`; icon riêng của module cụ thể (nếu không icon global nào phù hợp) nằm trong chính folder module đó (vd `network-sniffer/icon.svg`, cạnh `index.ts`/`store.ts`).
+  - **Gán icon cụ thể (dùng lại bộ 4 global, chưa cần vẽ mới):** `network-sniffer` được chọn lên action button → `download.svg` (khớp đúng action chính, mục 6.3's nút Download duy nhất). Synapse's default action icon (không module nào được chọn, action button mở Popup như hiện tại) → `settings.svg`. Side Panel's nút "Settings" mở Dashboard (mục 6.3) → cũng `settings.svg`, dùng lại cùng file. `rotate-ccw.svg` để dành cho một nút refresh/re-scan trong Side Panel's list nếu cần (chưa quyết có làm hay không). `upload.svg` chưa có chỗ dùng trong phase này — dành cho module tương lai.
+  - **Lưu ý kỹ thuật khi thật sự code (không phải quyết định, chỉ ghi trước để khỏi bất ngờ):** `chrome.action.setIcon`/manifest's `action.default_icon` không nhận thẳng file `.svg` — chỉ nhận bitmap (PNG) hoặc `ImageData`. SVG ở đây là *nguồn* duy nhất mỗi module/Synapse cần maintain; cần thêm bước rasterize SVG→PNG (build-time qua Vite plugin, hoặc runtime qua `OffscreenCanvas`/`createImageBitmap` ngay trong service worker) trước khi gọi `setIcon`. Bản thân Synapse hiện **chưa có icon riêng nào khai trong `manifest.config.ts`** (không có `icons`/`action.default_icon`, dùng icon generic của Chrome) — cần thêm icon mặc định của chính Synapse trước, để có gì "khôi phục về" khi không module nào được chọn.
+  - **Edge case phải xử lý:** module đang được chọn mà bị tắt Slide Toggle (active=false) → action button phải tự rơi về Popup mặc định ngay, không kẹt ở icon/click-behavior của module đã tắt (cùng chỗ code xử lý `isModuleActive` check hiện có ở mỗi module's `run()`).
+- `uiParadigm: 'action-button'` đã có sẵn trên type (mục 4.3) — chỉ cần Popup's list-view.ts đọc field này để biết module nào đủ điều kiện hiện radio, thay vì mãi là giá trị chưa dùng.
+
+### 6.2. Activate Side Panel paradigm (kernel) — biến định hướng ở mục 7.2 (trước đây 6.2) thành implementation đầu tiên
+
+- `chrome.sidePanel` cần permission mới trong `manifest.config.ts` (`"sidePanel"`) + `side_panel.default_path` hoặc `chrome.sidePanel.setOptions` per-tab.
+- Layout dùng lại quy ước `ui/` hiện có (giống `ui/dashboard/`, `ui/merge/` — Rollup input riêng trong `vite.config.ts`, VanJS + Pico.css, không Alpine — mục 2.5), **không phải Shadow DOM** (Side Panel là page thật của extension, không tiêm vào trang khách như mục 4.2's badge/toast).
+- Renderer mới `side-panel/list-view.ts` — KHÔNG tái dùng `management-view.ts`'s table renderer (đó là generic CRUD table cho N module khác, ép nó thành list/card sẽ phải nhánh theo module ngay trong code dùng chung — ngược nguyên tắc "generic renderer, per-kind optional callback" của `ui-schema.ts`). Thay vào đó: field mới, kernel-level, tương tự các field khác đã thêm dần ở `ui-schema.ts` (`defaultHideField`, `advanced`, `rowActions`...) — ví dụ `UICollectionSchema.displayAs?: 'table' | 'list'` — nhưng bản thân "list" layout cho network-sniffer đặc thù tới mức (group-by-video, `<select>` resolution) nhiều khả năng cần một schema shape mới hẳn chứ không chỉ đổi `displayAs`; **quyết định chi tiết field/type để lúc thật sự code, không chốt cứng ở plan này.**
+
+### 6.3. Áp dụng vào `network-sniffer`: auto-inspect + gộp resolution + 1 nút Download
+
+- Auto-inspect: `stream`-kind entry tự fetch+parse manifest ngay khi `addDetectedMedia` thêm nó (hoặc lazy — ngay trước khi Side Panel render), không chờ user bấm gì. Giữ nguyên `parseM3u8`/`updateDetectedMedia` (mục 5.1) — chỉ đổi TRIGGER, không đổi logic parse.
+- Gộp resolution: thay vì Inspect tạo N `DetectedMedia` mới (một/resolution, hành vi hiện tại của mục 5.1), nhóm N variant vào **một array field trên chính entry gốc** (vd `variants?: {url, resolution}[]`) thay vì N row độc lập — đổi cách `store.ts`/`index.ts`'s `command?.op === 'inspect'` ghi kết quả. Side Panel's item render `<select>` từ `variants`.
+- Một nút Download, tự rẽ nhánh theo `kind`/trạng thái entry (video/audio → `chrome.downloads.download` thẳng; stream có `variants` → dùng `<select>` đang chọn; stream `encrypted` → disable nút, báo DRM giống guard hiện tại của mục 5.3) — không còn `rowActions` kiểu `download`/`trigger`/`open-tab` riêng lẻ như `management-view.ts` hiện dùng.
+- **Merge flow (mục 5.3) chạy Ở ĐÂU:** Side Panel tự nó là page thật (không phải service worker) — về lý thuyết ffmpeg.wasm's Worker+WebAssembly chạy được ngay trong Side Panel, không bắt buộc phải mở Tab `ui/merge/` riêng như hiện tại nữa (khớp đúng ý "mở side bar thay vì mở trang mới" của user). Cần xác nhận runtime thật (agent không có browser) trước khi coi đây là quyết định cuối — nếu Side Panel's process có giới hạn không chạy nổi ffmpeg.wasm, giữ nguyên Tab `ui/merge/` làm fallback nhưng bấm Download trong Side Panel tự mở Tab đó thay vì user tự bấm "Download (merged)" như bây giờ.
+- Dashboard: bỏ `listCollection`/Management View khỏi entry của module này (hoặc giữ field nhưng Dashboard route thẳng qua Side Panel thay vì tự render) — cần xem lại `chrome-module-registry.ts`/`dashboard/main.ts`'s routing logic (mục 2/2.5) để biết cách tắt Management View cho riêng 1 module mà không phá vỡ module khác.
+
+### 6.4. Chưa quyết / rủi ro cần đo trước khi code
+
+- **Icon asset đã có sẵn** ([src/assets/icon/](../src/assets/icon/), 4 icon Lucide: `download`/`rotate-ccw`/`settings`/`upload`) — không còn là việc cần thiết kế/chọn, chỉ còn bước rasterize SVG→PNG cho `setIcon` (ghi chú kỹ thuật ở 6.1) là chưa chọn cách làm (build-time vs runtime).
+- ffmpeg.wasm chạy trong Side Panel context chưa từng verify (6.3).
+- Side Panel do Chrome quản lý per-window (không phải per-tab mặc định) — cần kiểm tra hành vi khi user chuyển tab/window có ảnh hưởng gì tới danh sách đang hiện không (khác hẳn Popup's vòng đời "đóng khi mất focus").
+- Chỉ 1 module (`network-sniffer`) đủ điều kiện `uiParadigm:'action-button'` hiện tại, nên radio group ở 6.1 mới có 2 trạng thái thực tế ("network-sniffer" / "không module nào") — cần nhớ lại thiết kế mutually-exclusive khi có module thứ 2 dùng paradigm này về sau, tránh vá tạm theo kiểu hardcode 1 module.
+
+## 7. Rà soát vị trí UI theo khung nguyên tắc Popup/Dashboard/In-page/Side Panel — chưa implement
 
 Đối chiếu UI hiện có với khung quyết định ở skill [`ui-surface-placement`](../.claude/skills/ui-surface-placement/SKILL.md) (Popup=tương tác <10s/toggle toàn cục, Dashboard=New Tab cho CRUD/tác vụ dài, In-page Shadow-DOM=hành động gắn 1 phần tử cụ thể, Side Panel=tương tác nhiều lượt song song trang — bề mặt Synapse chưa dùng). Chỉ ghi nhận điểm lệch, không sửa code trong đợt rà soát này.
 
-### 6.1. Crawl & Convert Site's progress đang sống trong Popup — lệch nguyên tắc "Popup chỉ cho tương tác <10s"
+### 7.1. Crawl & Convert Site's progress đang sống trong Popup — lệch nguyên tắc "Popup chỉ cho tương tác <10s"
 
 - **Vấn đề:** action Crawl (mục 1) chạy tuần tự tới `MAX_CRAWL_PAGES=200`, delay ~200ms/trang — tổng thời gian dễ vượt xa vòng đời Popup (đóng ngay khi click ra ngoài trang). Trade-off "đóng popup giữa chừng lúc crawl mất kết quả" đã ghi ở mục 1 chính là hệ quả trực tiếp của việc đặt sai bề mặt UI, không phải bug cô lập.
 - **Hai hướng refactor, chưa chọn (cần đo thời gian crawl thật trước khi quyết):**
@@ -191,11 +242,12 @@ Chưa làm (dự phòng nếu ba hướng trên chưa đủ sạch): ngưỡng k
   - (b) Giữ trigger ở popup, nhưng progress/result chạy hẳn ở nền + `chrome.notifications` báo hoàn tất; mở lại Dashboard là thấy kết quả sẵn — không cần giữ tab mở suốt.
 - Reader Mode Converter (đơn trang, không crawl) không có vấn đề này — 1 lần fetch thường dưới ngưỡng 10s, Popup vẫn hợp lệ.
 
-### 6.2. Side Panel — bề mặt chưa từng dùng, candidate tự nhiên cho tương tác AI nhiều lượt song song trang
+### 7.2. Side Panel — bề mặt chưa từng dùng khi mục này được viết, nay là target của mục 6
 
-- Chưa module nào dùng `chrome.sidePanel`. Nếu về sau có Module `needs:['ai']` cần tương tác nhiều lượt gắn với 1 tab (chat hỏi-đáp về trang đang xem, dịch đoạn dài, ghi chú đối chiếu — đúng hình dạng `PersonaAutomationAgent` ở design.md §6), ưu tiên Side Panel thay vì nhét vào Dashboard (mất tính "song song, không che trang gốc") hoặc Popup (mất khi click ra ngoài).
-- Chưa có nhu cầu thật — chỉ ghi định hướng, không implement tới khi có Module cụ thể cần. Không sửa `docs/design.md` §7 cho tới lúc đó (Side Panel không phải Execution Context đã implement).
+- Chưa module nào dùng `chrome.sidePanel` **tính tới trước mục 6** — mục 6 ở trên giờ là ca dùng cụ thể đầu tiên (network-sniffer), không còn là định hướng chờ nhu cầu nữa.
+- Định hướng gốc vẫn đúng cho nhu cầu KHÁC: nếu về sau có Module `needs:['ai']` cần tương tác nhiều lượt gắn với 1 tab (chat hỏi-đáp về trang đang xem, dịch đoạn dài, ghi chú đối chiếu — đúng hình dạng `PersonaAutomationAgent` ở design.md §6), vẫn ưu tiên Side Panel thay vì Dashboard/Popup, dùng chung cơ chế kernel mục 6.2 dựng lên thay vì viết lại.
+- Không sửa `docs/design.md` §7 cho tới khi mục 6 thật sự implement (Side Panel chưa phải Execution Context đã implement, chỉ đang ở plan).
 
-### 6.3. Các bề mặt đã khớp nguyên tắc, không cần đổi
+### 7.3. Các bề mặt đã khớp nguyên tắc, không cần đổi
 
-Popup cho Module Registry list/toggle + action ngắn; Dashboard cho Management View/Steps view/Review-ZIP; Shadow DOM badge+toast (`network-sniffer`, mục 4.2, đã tự áp dụng zero-intrusion + CSSOM-not-`<style>` trước khi khung nguyên tắc này được viết ra); Action-button paradigm hoãn (mục 4.3) vẫn đúng hướng single-action cho tương lai per-module.
+Popup cho Module Registry list/toggle + action ngắn; Dashboard cho Management View/Steps view/Review-ZIP; Shadow DOM badge+toast (`network-sniffer`, mục 4.2, đã tự áp dụng zero-intrusion + CSSOM-not-`<style>` trước khi khung nguyên tắc này được viết ra) — **sẽ đổi hành vi click khi mục 6 implement** (badge/toast vẫn đúng chỗ để BÁO có media mới, nhưng nút Download bên trong chuyển sang mở Side Panel thay vì `chrome.downloads.download`/mở Dashboard thẳng, xem mục 6.3); Action-button paradigm không còn "hoãn" nữa — mục 6.1 là kế hoạch activate nó, thay vì chờ vô thời hạn như mục 4.3 từng ghi.
