@@ -78,9 +78,15 @@ function isJunkRequest(url: string, pageUrl: string | undefined): boolean {
 function classifyDetection(req: ObservedRequest): MediaKind | undefined {
   if (isJunkRequest(req.url, req.initiator)) return undefined;
   const urlKind = classifyMediaUrl(req.url);
+  // Checked before the resourceType/Content-Type split below, not just within the non-'media'
+  // branch — a manifest server's Content-Type is unreliable enough (real-world example: Google
+  // Cloud Storage serving .m3u8 as `audio/mpegurl`, which Chrome then classifies as
+  // `resourceType: 'media'` AND which `classifyMediaMimeType` reads as plain 'audio' — silently
+  // downgrading an HLS manifest to a non-stream kind) that the URL extension alone should always
+  // win for `.m3u8`/`.mpd`, regardless of what resourceType Chrome guessed.
+  if (urlKind === 'stream') return 'stream';
   const mimeKind = req.contentType ? classifyMediaMimeType(req.contentType) : undefined;
   if (req.resourceType === 'media') return mimeKind ?? urlKind;
-  if (urlKind === 'stream') return 'stream';
   return mimeKind;
 }
 

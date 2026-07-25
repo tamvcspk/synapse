@@ -47,7 +47,11 @@ export function classifyMediaUrl(url: string): MediaKind | undefined {
 // Same deliberate segment exclusion as STREAM_EXTENSIONS above — video/mp2t is the MIME type
 // servers use for HLS .ts segments, not something worth surfacing on its own (docs/ROADMAP.md #4).
 const SEGMENT_MIME_TYPES = ['video/mp2t'];
-const STREAM_MIME_TYPES = ['application/vnd.apple.mpegurl', 'application/x-mpegurl', 'application/dash+xml'];
+// `audio/mpegurl` confirmed in the wild (Google Cloud Storage serving a plain .m3u8 with no
+// HLS-specific Content-Type override) — `classifyDetection` (network-sniffer/index.ts) no longer
+// depends on this list alone for `.m3u8`/`.mpd` (it trusts the URL extension unconditionally for
+// those), but this function should still classify the MIME type correctly on its own terms.
+const STREAM_MIME_TYPES = ['application/vnd.apple.mpegurl', 'application/x-mpegurl', 'application/dash+xml', 'audio/mpegurl'];
 
 /** Classifies a response's `Content-Type` header value as media, or `undefined` if it isn't one
  * this Module cares about — the server-confirmed counterpart to `classifyMediaUrl`'s URL-extension
