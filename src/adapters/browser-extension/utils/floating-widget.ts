@@ -236,3 +236,69 @@ export function dismissAnchoredBadge(id: string): void {
   badge.el.remove();
   anchoredBadges.delete(id);
 }
+
+// --- Persistent top-right icon — docs/ROADMAP.md §6.1's replacement for the bottom-right toast as
+// network-sniffer's trigger to open the Side Panel. A fixed, always-in-the-same-spot icon rather
+// than a toast card: this is meant to stay visible for as long as the page has detected media, not
+// flash briefly like a notification. Deliberately no count/number on it (see index.ts's
+// `notifyTabMediaFound` doc comment for why) — just shown/hidden. ---
+
+export interface FloatingIconOptions {
+  /** Stable id — a second call with the same id updates the existing icon's label/title/handler in
+   * place instead of stacking a duplicate. */
+  id: string;
+  /** Glyph/emoji shown inside the icon — same convention as dom-media-observer.ts's badge label. */
+  label: string;
+  /** Native `title` attribute (hover tooltip). */
+  title?: string;
+  onClick: () => void;
+}
+
+let floatingIcons: HTMLDivElement | null = null;
+
+function ensureFloatingIcons(): HTMLDivElement {
+  if (floatingIcons) return floatingIcons;
+  floatingIcons = styled('div', {
+    position: 'fixed',
+    top: '16px',
+    right: '16px',
+    zIndex: '2147483647',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    ...BASE_FONT,
+  });
+  ensureShadowRoot().appendChild(floatingIcons);
+  return floatingIcons;
+}
+
+/** Shows (or updates, if `options.id` is already showing) one persistent icon top-right. */
+export function showFloatingIcon(options: FloatingIconOptions): void {
+  const container = ensureFloatingIcons();
+  let el = container.querySelector<HTMLButtonElement>(`[data-icon-id="${CSS.escape(options.id)}"]`);
+  if (!el) {
+    el = styled('button', {
+      background: '#1f2328',
+      color: '#f4f4f4',
+      border: 'none',
+      borderRadius: '999px',
+      width: '32px',
+      height: '32px',
+      lineHeight: '1',
+      cursor: 'pointer',
+      boxShadow: '0 2px 8px rgba(0, 0, 0, 0.35)',
+      ...BASE_FONT,
+    });
+    el.type = 'button';
+    el.dataset.iconId = options.id;
+    container.appendChild(el);
+  }
+  el.textContent = options.label;
+  el.title = options.title ?? '';
+  el.onclick = options.onClick;
+}
+
+/** Removes a floating icon by id, if currently showing — no-op otherwise. */
+export function dismissFloatingIcon(id: string): void {
+  floatingIcons?.querySelector(`[data-icon-id="${CSS.escape(id)}"]`)?.remove();
+}

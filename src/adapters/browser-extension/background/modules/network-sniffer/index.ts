@@ -1,8 +1,8 @@
-import type { Module } from '../../../../../kernel/module';
+import type { CacheService, Module } from '../../../../../kernel/module';
 import type { CollectionCommand } from '../../../../../kernel/ui-schema';
 import { classifyMediaUrl, classifyMediaMimeType, type MediaKind } from '../../../../../shared/media-url-matcher';
 import { isAdNetworkDomain } from '../../../../../shared/ad-domain-denylist';
-import { looksLikeAdOrTrackerPath } from '../../../../../shared/junk-url-patterns';
+import { looksLikeAdOrTrackerPath, looksLikeAdMacroTemplate } from '../../../../../shared/junk-url-patterns';
 import { ensureNetworkObserver, teardownNetworkObserver, type ObservedRequest } from '../../../utils/webrequest-media-observer';
 import {
   isMainWorldScriptRegistered,
@@ -18,13 +18,25 @@ import payloadPath from './main-world-payload?script&iife';
 import { MAIN_WORLD_SCRIPT_ID } from './constants';
 import { addDetectedMedia, listDetectedMedia, removeDetectedMedia, updateDetectedMedia, type DetectedMedia } from './store';
 import { parseM3u8 } from '../../../../../shared/media-manifest-parser';
+import { chromeStorageCache } from '../../services/cache';
 
 /** docs/ROADMAP.md #5.2 — combines both junk signals (static domain denylist + path/query keyword
  * heuristic) into the one check used at all three detection entry points below. The keyword half
  * catches an ad/tracker request the domain list doesn't name yet (a new domain, or one that rotates
- * — DGA-style), without needing the list updated first. */
+ * — DGA-style), without needing the list updated first. `looksLikeAdMacroTemplate` catches a third
+ * shape: a literal un-substituted `{macro}` query value, seen on real ad-tracker redirect pages
+ * whose domain/path otherwise didn't match anything above. */
 function isJunkUrl(url: string): boolean {
-  return isAdNetworkDomain(url) || looksLikeAdOrTrackerPath(url);
+  return isAdNetworkDomain(url) || looksLikeAdOrTrackerPath(url) || looksLikeAdMacroTemplate(url);
+}
+
+/** docs/ROADMAP.md §6.5 — a request's OWN url can look completely clean (e.g. a legitimate-looking
+ * CDN filename) while the PAGE/FRAME that made the request is itself an ad-tracker redirect page
+ * (classic pattern: an ad iframe's own src is a tracker/redirect URL, which then loads a real media
+ * file from a separate, innocuous-looking CDN domain). Checking the request's own url isn't enough
+ * on its own — also check `pageUrl`/`initiator` wherever the caller has one in hand. */
+function isJunkRequest(url: string, pageUrl: string | undefined): boolean {
+  return isJunkUrl(url) || (pageUrl !== undefined && isJunkUrl(pageUrl));
 }
 
 /**
@@ -53,7 +65,7 @@ function isJunkUrl(url: string): boolean {
  * still an ad, which the `resourceType === 'media'` branch would otherwise trust unconditionally.
  */
 function classifyDetection(req: ObservedRequest): MediaKind | undefined {
-  if (isJunkUrl(req.url)) return undefined;
+  if (isJunkRequest(req.url, req.initiator)) return undefined;
   const urlKind = classifyMediaUrl(req.url);
   const mimeKind = req.contentType ? classifyMediaMimeType(req.contentType) : undefined;
   if (req.resourceType === 'media') return mimeKind ?? urlKind;
@@ -72,18 +84,13 @@ interface ReportDomMediaCommand {
 
 /** Sent by content-scripts/index.ts, relaying main-world-payload.ts's MAIN-world channel report
  * (docs/ROADMAP.md #4.1's third detection source) — same "module-specific op, bypasses the generic
- * CollectionCommand shape" reasoning as ReportDomMediaCommand above. */
+ * CollectionCommand shape" reasoning as ReportDomMediaCommand above. `pageUrl` (added docs/ROADMAP.md
+ * §6.5, `location.href` at the sender) is required for the Side Panel's per-tab scoping (§6.3) to
+ * ever show an entry detected via this source — previously omitted entirely. */
 interface ReportMainWorldMediaCommand {
   op: 'report-main-world-media';
   url: string;
-}
-
-/** Sent by the Management View's "Inspect" rowAction (docs/ROADMAP.md #5.1, kernel/ui-schema.ts's
- * `'trigger'` UIRowAction) — `id` is the DetectedMedia entry to fetch+parse as an HLS manifest.
- * Same "module-specific op, bypasses CollectionCommand" reasoning as the two commands above. */
-interface InspectCommand {
-  op: 'inspect';
-  id: string;
+  pageUrl?: string;
 }
 
 /** docs/ROADMAP.md #4.1's third-party/initiator-origin signal — a LABEL, not a filter (see
@@ -101,19 +108,55 @@ async function isThirdPartyInitiator(tabId: number, initiator: string): Promise<
 }
 
 /** Fire-and-forget push to a specific tab telling its top-frame content script new media was
- * found — docs/ROADMAP.md #4.2's In-Page Float Widget. Only reached from the `webRequest` path
- * below: the DOM-detection path (dom-media-observer.ts) shows its own badge locally without a
- * round trip, since it already has the element and URL in hand — this toast is purely the
- * fallback for media `chrome.webRequest` sees but that has no corresponding on-page DOM element to
- * anchor a badge to (e.g. a JS player using MediaSource/blob:, so nothing in the DOM to point at).
- * No count/URL in the payload on purpose: the content-script listener (content-scripts/index.ts)
- * owns composing the display message and building the Dashboard link, this module just signals
- * "something new happened on this tab". */
+ * found — shows the floating icon (docs/ROADMAP.md §6.1's `showFloatingIcon`), which opens the
+ * Side Panel on click. docs/ROADMAP.md §6.3 widened this to fire from every `addDetectedMedia`
+ * success path (webRequest, report-main-world-media, report-dom-media), not just `webRequest` as
+ * before — the floating icon now stands in for what used to be the DOM-detection path's own local
+ * badge draw too, so it needs to know about every source, not only the one with no DOM element to
+ * anchor to. No count/URL in the payload on purpose: the content-script listener
+ * (content-scripts/index.ts) just shows/keeps the icon visible, the Side Panel itself is the
+ * source of truth for the actual list. */
 function notifyTabMediaFound(tabId: number): void {
   chrome.tabs.sendMessage(tabId, { type: 'synapse:media-found' }).catch(() => {
     // No content script listening on this tab (e.g. a chrome:// page) — not an error.
   });
 }
+
+/** docs/ROADMAP.md §6.3 — fetch+parse a `kind:'stream'` entry's manifest, called automatically
+ * right after it's newly added (no more explicit user-facing "Inspect" step). A *master* playlist's
+ * variants are folded into `variants` on the SAME entry (one real video = one Side Panel item,
+ * however many resolutions it offers) rather than each becoming its own new `DetectedMedia` row
+ * (that was #5.1's original behavior). A *media/variant* playlist patches `segmentCount`/
+ * `encrypted` in place, same as before. */
+async function inspectStreamEntry(entry: DetectedMedia, cache: CacheService = chromeStorageCache): Promise<void> {
+  try {
+    const manifest = parseM3u8(await (await fetch(entry.url)).text(), entry.url);
+    if (manifest.kind === 'master') {
+      await updateDetectedMedia(entry.id, { variants: manifest.variants }, cache);
+    } else if (manifest.kind === 'media') {
+      // Segment URLs themselves are re-fetched+parsed by the Merge page (docs/ROADMAP.md #5.3) when
+      // the user actually clicks Download, not stashed here (hundreds of URLs per stream, and stale
+      // the moment the manifest rotates, unlike the count).
+      await updateDetectedMedia(entry.id, { segmentCount: manifest.segments.length, encrypted: manifest.encrypted }, cache);
+    }
+    // {kind:'unknown'} — silent no-op, same as a fetch failure below.
+  } catch {
+    // Fetch failure or unparsable manifest — graceful no-op, same "partial result over failure"
+    // posture as fetch-images'/crawlSite's per-item skip.
+  }
+}
+
+// docs/ROADMAP.md §6.3 — a second, independent listener on the SAME `report-dom-media` bus message
+// the Kernel/run() also handles below (Chrome allows multiple onMessage listeners per message; this
+// one only peeks at `sender` for the tabId, which the generic BusService.on() handler shape doesn't
+// expose). dom-media-observer.ts runs in every frame (frame-media-observer.ts, all_frames:true), so
+// this is the only way to notify the top frame's floating icon when the detection happened in a
+// nested/cross-origin iframe — chrome.tabs.sendMessage broadcasts to every frame with no frameId,
+// but only content-scripts/index.ts's top-frame instance is listening for `synapse:media-found`.
+chrome.runtime.onMessage.addListener((message: { event?: string; payload?: { op?: string } } | undefined, sender) => {
+  if (message?.event !== 'network-sniffer' || message.payload?.op !== 'report-dom-media' || !sender.tab?.id) return;
+  notifyTabMediaFound(sender.tab.id);
+});
 
 // docs/ROADMAP.md #4.2 — the anchored badge's click handler (dom-media-observer.ts) can't call
 // chrome.downloads.download() itself (content scripts don't have that API), so it messages
@@ -140,10 +183,12 @@ chrome.runtime.onMessage.addListener((message: { type?: string; url?: string } |
  * Read-only Collection schema: detected media is a running, capped log across all tabs (not
  * scoped to "the active tab" — the Dashboard opens in its own tab, which would otherwise be the
  * "active tab" by the time anyone reads it), so there's no sensible Add/Edit, only Delete
- * ("dismiss this entry") and per-row Download/Inspect actions (UICollectionSchema's `rowActions`).
+ * ("dismiss this entry") and per-row Download actions (UICollectionSchema's `rowActions`). The
+ * primary UI is now the Side Panel (docs/ROADMAP.md §6) — this Management View stays as a
+ * secondary, unscoped-to-tab view of the same underlying log.
  */
 export const NetworkSnifferModule: Module<
-  CollectionCommand<DetectedMedia> | ReportDomMediaCommand | ReportMainWorldMediaCommand | InspectCommand | undefined,
+  CollectionCommand<DetectedMedia> | ReportDomMediaCommand | ReportMainWorldMediaCommand | undefined,
   void
 > = {
   id: 'network-sniffer',
@@ -161,14 +206,14 @@ export const NetworkSnifferModule: Module<
     // docs/ROADMAP.md #5.2 — `thirdParty` (#4.1) was a pure label until now; this makes it actually
     // reduce visible row count, without losing the entries (still there behind "Show hidden").
     defaultHideField: 'thirdParty',
-    // 'Inspect'/'Download (merged)' are on every row unconditionally, not just 'stream'-kind ones
-    // (docs/ROADMAP.md #5.1/#5.3) — both no-op/error gracefully on a URL that isn't an HLS media
-    // playlist (ParsedManifest's {kind:'unknown'} for Inspect, the Merge page's own error state for
-    // Download (merged)), so a per-row show/hide condition would be pure overhead for the same
-    // result.
+    // 'Download (merged)' is on every row unconditionally, not just 'stream'-kind ones (docs/
+    // ROADMAP.md #5.3) — no-op/errors gracefully on a URL that isn't an HLS media playlist (the
+    // Merge page's own error state), so a per-row show/hide condition would be pure overhead for
+    // the same result. Manifest inspection itself is no longer a user-facing rowAction (docs/
+    // ROADMAP.md §6.3 — auto-inspect runs automatically on every `stream`-kind detection now, see
+    // inspectStreamEntry above) — this legacy Management View table just no longer has that button.
     rowActions: [
       { kind: 'download', label: 'Download', urlField: 'url' },
-      { kind: 'trigger', label: 'Inspect', op: 'inspect' },
       { kind: 'open-tab', label: 'Download (merged)', urlField: 'url', path: 'src/adapters/browser-extension/ui/merge/index.html' },
     ],
     fields: [
@@ -185,19 +230,19 @@ export const NetworkSnifferModule: Module<
       {
         key: 'resolution',
         label: 'Resolution',
-        hint: 'Set on a stream entry created by Inspect-ing a master HLS playlist — one entry per resolution variant',
+        hint: 'Set when this entry itself is a single, already-resolved HLS media/variant playlist',
         type: 'string',
       },
       {
         key: 'segmentCount',
         label: 'Segments',
-        hint: 'Set by Inspect once a stream entry is confirmed to be a media/variant HLS playlist, not a master listing other resolutions',
+        hint: 'Set by auto-inspect once a stream entry is confirmed to be a media/variant HLS playlist, not a master listing other resolutions',
         type: 'number',
       },
       {
         key: 'encrypted',
         label: 'DRM?',
-        hint: 'Set by Inspect — an EXT-X-KEY other than NONE was present (Widevine/EME), not independently downloadable',
+        hint: 'Set by auto-inspect — an EXT-X-KEY other than NONE was present (Widevine/EME), not independently downloadable',
         type: 'boolean',
       },
     ],
@@ -230,10 +275,13 @@ export const NetworkSnifferModule: Module<
           ...(req.initiator ? { pageUrl: req.initiator } : {}),
           ...(thirdParty !== undefined ? { thirdParty } : {}),
         };
-        // docs/ROADMAP.md #4.2 — only push the float-widget notice on a genuine new detection (not
+        // docs/ROADMAP.md #4.2 — only push the floating-icon notice on a genuine new detection (not
         // a repeat request for an already-known URL), same "don't spam a chatty page" philosophy as
         // the store's own dedupe/cap.
-        if (await addDetectedMedia(media, ctx.services.cache)) notifyTabMediaFound(req.tabId);
+        if (await addDetectedMedia(media, ctx.services.cache)) {
+          notifyTabMediaFound(req.tabId);
+          if (kind === 'stream') void inspectStreamEntry(media, ctx.services.cache);
+        }
       })();
     });
 
@@ -253,15 +301,21 @@ export const NetworkSnifferModule: Module<
 
     if (command?.op === 'report-main-world-media') {
       // Re-validates server-side rather than trusting the content script's own relay — same "never
-      // trust the shim to self-limit" posture as report-dom-media below. docs/ROADMAP.md #5.2 — same
-      // junk check as classifyDetection's webRequest path, so this second detection source doesn't
-      // reopen the ad-network hole the webRequest path just closed.
-      const kind = !isJunkUrl(command.url) ? classifyMediaUrl(command.url) : undefined;
+      // trust the shim to self-limit" posture as report-dom-media below. docs/ROADMAP.md #5.2/§6.5 —
+      // same junk check (now including pageUrl) as classifyDetection's webRequest path, so this
+      // second detection source doesn't reopen the ad-network hole the webRequest path just closed.
+      const kind = !isJunkRequest(command.url, command.pageUrl) ? classifyMediaUrl(command.url) : undefined;
       if (kind) {
-        await addDetectedMedia(
-          { id: crypto.randomUUID(), url: command.url, kind, detectedAt: new Date().toISOString() },
-          ctx.services.cache,
-        );
+        const media: DetectedMedia = {
+          id: crypto.randomUUID(),
+          url: command.url,
+          kind,
+          detectedAt: new Date().toISOString(),
+          ...(command.pageUrl ? { pageUrl: command.pageUrl } : {}),
+        };
+        if (await addDetectedMedia(media, ctx.services.cache) && kind === 'stream') {
+          void inspectStreamEntry(media, ctx.services.cache);
+        }
       }
     }
 
@@ -269,54 +323,14 @@ export const NetworkSnifferModule: Module<
       // Re-validates server-side rather than trusting the content script's own filtering — same
       // "never trust the shim to self-limit" posture rpc-handler.ts already documents.
       for (const item of command.items) {
-        if (isJunkUrl(item.url)) continue;
+        if (isJunkRequest(item.url, item.pageUrl)) continue;
         const kind = classifyMediaUrl(item.url);
         if (!kind) continue;
         const media: DetectedMedia = item.pageUrl
           ? { id: crypto.randomUUID(), url: item.url, kind, pageUrl: item.pageUrl, detectedAt: new Date().toISOString() }
           : { id: crypto.randomUUID(), url: item.url, kind, detectedAt: new Date().toISOString() };
-        await addDetectedMedia(media, ctx.services.cache);
-      }
-    }
-
-    if (command?.op === 'inspect') {
-      // docs/ROADMAP.md #5.1 — fetch+parse only reached via an explicit user click (the
-      // Management View's "Inspect" rowAction), not run automatically on every detection: most
-      // detected URLs aren't manifests at all, and even `stream`-kind ones may never get inspected.
-      const entry = (await listDetectedMedia(ctx.services.cache)).find((m) => m.id === command.id);
-      if (entry) {
-        try {
-          const manifest = parseM3u8(await (await fetch(entry.url)).text(), entry.url);
-          if (manifest.kind === 'master') {
-            // One NEW entry per resolution variant (dedupe-by-URL in addDetectedMedia makes a
-            // repeat Inspect idempotent), inheriting the manifest entry's own pageUrl.
-            for (const variant of manifest.variants) {
-              const media: DetectedMedia = {
-                id: crypto.randomUUID(),
-                url: variant.url,
-                kind: 'stream',
-                detectedAt: new Date().toISOString(),
-                ...(entry.pageUrl ? { pageUrl: entry.pageUrl } : {}),
-                ...(variant.resolution ? { resolution: variant.resolution } : {}),
-              };
-              await addDetectedMedia(media, ctx.services.cache);
-            }
-          } else if (manifest.kind === 'media') {
-            // Patches the inspected entry itself in place, not a new row. Only the count is
-            // persisted here — the segment URLs themselves are re-fetched+parsed by the Merge page
-            // (docs/ROADMAP.md #5.3) when the user actually clicks "Download (merged)", not stashed
-            // in DetectedMedia (hundreds of URLs per stream, and stale the moment the manifest
-            // rotates, unlike the count).
-            await updateDetectedMedia(
-              entry.id,
-              { segmentCount: manifest.segments.length, encrypted: manifest.encrypted },
-              ctx.services.cache,
-            );
-          }
-          // {kind:'unknown'} — silent no-op, same as a fetch failure below.
-        } catch {
-          // Fetch failure or unparsable manifest — graceful no-op, same "partial result over
-          // failure" posture as fetch-images'/crawlSite's per-item skip.
+        if (await addDetectedMedia(media, ctx.services.cache) && kind === 'stream') {
+          void inspectStreamEntry(media, ctx.services.cache);
         }
       }
     }

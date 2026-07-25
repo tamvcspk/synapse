@@ -4,7 +4,7 @@ import { BUNDLED_MODULES } from '../module-registry/bundled-modules';
 import { isModuleActive } from '../module-registry/storage';
 import { installStorageToMainWorldRelay } from '../utils/main-world/storage-relay';
 import { createMainWorldChannel } from '../utils/main-world/event-channel';
-import { showFloatingWidget } from '../utils/floating-widget';
+import { showFloatingIcon } from '../utils/floating-widget';
 import { MOCK_CONFIG_CHANNEL_ID, MOCK_CONFIG_STORAGE_KEY } from '../background/modules/http-error-mocker/constants';
 import { MAIN_WORLD_REPORT_CHANNEL_ID } from '../background/modules/network-sniffer/constants';
 
@@ -19,29 +19,29 @@ installStorageToMainWorldRelay(MOCK_CONFIG_STORAGE_KEY, MOCK_CONFIG_CHANNEL_ID);
 // every frame when no frameId is given, and putting registerDomModule (below) in every iframe would
 // let multiple frames race to answer the same trigger message.
 
-// docs/ROADMAP.md #4.2 — In-Page Float Widget listener for network-sniffer's push
-// (background/modules/network-sniffer/index.ts's notifyTabMediaFound). Registered here (not
-// frame-media-observer.ts) for the same top-frame-only reason as registerDomModule above: showing
-// one widget per page, not one per iframe. The count/message live entirely here rather than in the
-// background — network-sniffer's push carries no payload, just "something new happened". The
-// action button messages background to open the Dashboard (synapse:open-dashboard,
-// background/index.ts) rather than a real `<a href="chrome-extension://...">` — Chrome blocks a
-// page-context navigation to an extension URL unless it's listed in web_accessible_resources, and
-// widening that just for this link would expose the whole Dashboard to any arbitrary website.
-let mediaFoundCount = 0;
+// docs/ROADMAP.md §6.1 — persistent floating icon (top-right), replacing the old bottom-right
+// toast, for network-sniffer's push (background/modules/network-sniffer/index.ts's
+// notifyTabMediaFound). Registered here (not frame-media-observer.ts) for the same top-frame-only
+// reason as registerDomModule above: showing one icon per page, not one per iframe. No
+// count/message — see showFloatingIcon's doc comment for why. Click messages background to open
+// the Side Panel (synapse:open-network-sniffer-panel, background/index.ts) rather than a real
+// `chrome.sidePanel` call — content scripts don't have that API at all.
+function showNetworkSnifferIcon(): void {
+  showFloatingIcon({
+    id: 'network-sniffer',
+    label: '⬇',
+    title: 'Media detected on this page — click to view',
+    onClick: () => {
+      chrome.runtime.sendMessage({ type: 'synapse:open-network-sniffer-panel' }).catch(() => {});
+    },
+  });
+}
+
 chrome.runtime.onMessage.addListener((message: { type?: string } | undefined) => {
   if (message?.type !== 'synapse:media-found') return;
   void (async () => {
     if (!(await isModuleActive('network-sniffer'))) return;
-    mediaFoundCount += 1;
-    showFloatingWidget({
-      id: 'network-sniffer',
-      message: mediaFoundCount === 1 ? 'Found 1 media item — click to view' : `Found ${mediaFoundCount} media items — click to view`,
-      actionLabel: 'View',
-      onAction: () => {
-        chrome.runtime.sendMessage({ type: 'synapse:open-dashboard', moduleId: 'network-sniffer' }).catch(() => {});
-      },
-    });
+    showNetworkSnifferIcon();
   })();
 });
 
@@ -53,7 +53,16 @@ chrome.runtime.onMessage.addListener((message: { type?: string } | undefined) =>
 // no relay needed there — see that file) — two independent listeners on the same shared-window
 // CustomEvent, one per purpose.
 createMainWorldChannel<{ url: string }>(MAIN_WORLD_REPORT_CHANNEL_ID).onUpdate(({ url }) => {
-  chrome.runtime.sendMessage({ event: 'network-sniffer', payload: { op: 'report-main-world-media', url } }).catch(() => {});
+  chrome.runtime
+    .sendMessage({ event: 'network-sniffer', payload: { op: 'report-main-world-media', url, pageUrl: location.href } })
+    .catch(() => {});
+  // docs/ROADMAP.md §6.3 — shown optimistically, without waiting for background's own junk-filter
+  // re-validation (report-main-world-media's server-side isJunkUrl/classifyMediaUrl check) — this
+  // content script is already the top frame, the same one that owns the floating icon, so there's
+  // no round trip needed to know "this page has media" the way the webRequest-only path does.
+  void (async () => {
+    if (await isModuleActive('network-sniffer')) showNetworkSnifferIcon();
+  })();
 });
 
 const domModules = BUNDLED_MODULES.filter((mod) => mod.needs?.includes('dom'));

@@ -16,19 +16,23 @@ export interface DetectedMedia {
    * anything. `undefined` means unknown (only ever computed for the `webRequest`-sourced path,
    * which is the only source with a tabId+initiator in hand), not "known first-party". */
   thirdParty?: boolean;
-  /** docs/ROADMAP.md #5.1 — only set on a `kind: 'stream'` entry, and only once its manifest has
-   * been fetched via the "Inspect" rowAction. A *master* playlist's variant gets its own new
-   * `DetectedMedia` entry per resolution (this field), while a *media/variant* playlist patches
-   * `segmentCount`/`encrypted` in place onto the entry that was already inspected. */
+  /** Only set on a `kind: 'stream'` entry that was itself detected as a single, already-resolved
+   * media/variant playlist (not a master listing other resolutions) — a master's variants live in
+   * `variants` below instead, not as their own entries with this field (docs/ROADMAP.md §6.3). */
   resolution?: string;
-  /** Set on a `kind: 'stream'` entry once Inspect determines it's a media/variant playlist (not a
-   * master listing other resolutions) — segment count alone, not a downloadable file (see
-   * docs/ROADMAP.md #5.3 for why turning this into one is its own, much larger, feature). */
+  /** Set on a `kind: 'stream'` entry once auto-inspected and determined to be a media/variant
+   * playlist (not a master listing other resolutions) — segment count alone, not a downloadable
+   * file (see docs/ROADMAP.md #5.3 for why turning this into one is its own, much larger, feature). */
   segmentCount?: number;
   /** Set alongside `segmentCount` — a `#EXT-X-KEY:METHOD=...` other than `NONE` was present, i.e.
    * DRM (Widevine/EME). #5.3's download+remux flow must refuse these outright rather than produce
    * a silently-corrupt file. */
   encrypted?: boolean;
+  /** docs/ROADMAP.md §6.3 — set on a master-playlist `kind:'stream'` entry once auto-inspected
+   * (index.ts's `inspectStreamEntry`). Each variant is its own resolution's media-playlist URL —
+   * no longer a separately-tracked `DetectedMedia` row per resolution (that was #5.1's original
+   * behavior, replaced so one real video is one list item in the Side Panel, not N). */
+  variants?: { url: string; resolution?: string }[];
 }
 
 const DETECTED_MEDIA_STORAGE_KEY = 'synapse:network-sniffer:detected-media';

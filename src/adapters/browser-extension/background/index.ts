@@ -50,6 +50,19 @@ chrome.runtime.onMessage.addListener((message: { type?: string; moduleId?: strin
   void chrome.tabs.create({ url: `${chrome.runtime.getURL(DASHBOARD_PATH)}?moduleId=${encodeURIComponent(message.moduleId)}` });
 });
 
+// docs/ROADMAP.md §6.2 — network-sniffer's floating icon (utils/floating-widget.ts's
+// showFloatingIcon, wired up in content-scripts/index.ts) can't call chrome.sidePanel itself
+// (content scripts don't have that API), so it messages background to open it for its own tab.
+// RISK, not yet verified in a real browser (agent has no browser): chrome.sidePanel.open() must be
+// called within a user gesture — whether that gesture survives a content-script
+// chrome.runtime.sendMessage round trip to the service worker is unconfirmed. If Chrome rejects
+// this, the fallback is chrome.sidePanel.setOptions({tabId, enabled:true}) and letting the user
+// click Chrome's own Side Panel toolbar icon instead.
+chrome.runtime.onMessage.addListener((message: { type?: string } | undefined, sender) => {
+  if (message?.type !== 'synapse:open-network-sniffer-panel' || !sender.tab?.id) return;
+  void chrome.sidePanel.open({ tabId: sender.tab.id });
+});
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   kernel.run(/* resolve modules for message.workflowId */ [], message.input, (failure) => {
     console.error(`Synapse: module "${failure.moduleId}" failed`, failure.error);

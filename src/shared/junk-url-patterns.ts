@@ -66,3 +66,25 @@ export function looksLikeAdOrTrackerPath(url: string): boolean {
   }
   return false;
 }
+
+/** A query-string value that's still a literal, un-substituted `{macroName}` placeholder — e.g.
+ * `cv1={impressionId}`, `cv5={campaignId}`. Ad-tech click-trackers/postback URLs template their
+ * redirect/pixel URLs this way (macros get filled in by the ad server at fire time); a real page
+ * or media URL essentially never contains a literal, unescaped `{word}` query value. Caught this
+ * pattern on a real ad-tracker frame (`t.rallytrck.website/s1/...?cv1={impressionId}&...`) whose
+ * domain/path didn't match any of the checks above — the generic `cv1`..`cv10` query KEYS carry no
+ * signal on their own, but their VALUES are the macro giveaway. Whole-value match (not substring),
+ * same "don't false-positive on a legitimate query value that merely contains a brace" caution as
+ * the whole-segment/whole-key matching above. */
+export function looksLikeAdMacroTemplate(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  for (const value of parsed.searchParams.values()) {
+    if (/^\{[a-zA-Z0-9_]+\}$/.test(value)) return true;
+  }
+  return false;
+}

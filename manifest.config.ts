@@ -44,6 +44,12 @@ export default defineManifest({
   action: {
     default_popup: 'src/adapters/browser-extension/ui/popup/index.html',
   },
+  // docs/ROADMAP.md §6.2 — network-sniffer's Side Panel, opened on demand via
+  // chrome.sidePanel.open({tabId}) from a background relay (background/index.ts), triggered by
+  // the on-page floating icon's click (utils/floating-widget.ts's showFloatingIcon).
+  side_panel: {
+    default_path: 'src/adapters/browser-extension/ui/side-panel/index.html',
+  },
   // 'debugger' is required by http-error-mocker's 'debugger' mechanism (docs/ROADMAP.md #2.6) —
   // it attaches Chrome's remote debugging protocol (CDP) to tabs so mocked requests/responses
   // are real network-stack traffic (visible in DevTools' Network tab, catches non-fetch/XHR
@@ -61,7 +67,8 @@ export default defineManifest({
   // webRequest listeners anyway). Shows no banner, unlike 'debugger'.
   // 'downloads' backs the Management View's generic per-row `rowActions` 'download' kind
   // (kernel/ui-schema.ts), first used by network-sniffer's "Download" action on a detected media URL.
-  permissions: ['storage', 'userScripts', 'scripting', 'debugger', 'declarativeNetRequest', 'webRequest', 'downloads'],
+  // 'sidePanel' backs network-sniffer's Side Panel (docs/ROADMAP.md #6.2).
+  permissions: ['storage', 'userScripts', 'scripting', 'debugger', 'declarativeNetRequest', 'webRequest', 'downloads', 'sidePanel'],
   // chrome.scripting.registerContentScripts (used for the MAIN-world interceptor) needs its own
   // host permission grant — a static content_scripts.matches entry doesn't satisfy it, even though
   // both show the same install-time warning. Without this, registerContentScripts resolves with no
