@@ -10,7 +10,7 @@ import ffmpegWasmUrl from '@ffmpeg/core/wasm?url';
 import { parseM3u8, type ManifestSegment, type ParsedManifest, type SegmentKey } from '../../../../shared/media-manifest-parser';
 import { slugify } from '../../../../shared/slugify';
 import { createOpfsRun, removeOpfsRun } from '../../utils/opfs-store';
-import { syncHeaderReplayRule } from '../../utils/header-replay-rules';
+import { describeHeaderReplay, syncHeaderReplayRule } from '../../utils/header-replay-rules';
 import { listDetectedMedia } from '../../background/modules/network-sniffer/store';
 
 /**
@@ -74,6 +74,23 @@ function postProgress(phase: 'segments' | 'remux' | 'done' | 'error', done?: num
   chrome.runtime.sendMessage({ type: 'synapse:merge-progress', entryId, phase, done, total, message }).catch(() => {});
 }
 
+/**
+ * Last-resort visibility. This page is opened in the BACKGROUND by the Side Panel (docs/ROADMAP.md
+ * #7.6) and its only user-facing channel is `postProgress`, so anything that escapes the normal
+ * error paths — a throw during module evaluation, an unhandled rejection in a `void`-ed promise —
+ * leaves the Side Panel showing whatever phase it last heard about, forever, with no clue anywhere.
+ * Registered before any other work in this module so it also covers failures during that work.
+ */
+function reportUncaught(what: string, detail: unknown): void {
+  const message = detail instanceof Error ? detail.message : String(detail);
+  console.error(`Synapse merge: ${what}`, detail);
+  const status = document.querySelector('.merge-status');
+  if (status) status.textContent = `Failed: ${message}`;
+  postProgress('error', undefined, undefined, `${what}: ${message}`);
+}
+window.addEventListener('unhandledrejection', (event) => reportUncaught('unhandled rejection', event.reason));
+window.addEventListener('error', (event) => reportUncaught('uncaught error', event.error ?? event.message));
+
 function renderError(message: string): void {
   root.replaceChildren();
   van.add(root, header(h1('Download (merged)')), p({ class: 'merge-error' }, message));
@@ -104,8 +121,8 @@ let selfTabIdPromise: Promise<number[]> | undefined;
 function selfTabIds(): Promise<number[]> {
   selfTabIdPromise ??= chrome.tabs
     .getCurrent()
-    .then((tab) => (tab?.id !== undefined ? [tab.id] : []))
-    .catch(() => []);
+    .then((tab) => (tab?.id !== undefined ? [tab.id] : [chrome.tabs.TAB_ID_NONE]))
+    .catch(() => [chrome.tabs.TAB_ID_NONE]);
   return selfTabIdPromise;
 }
 
@@ -123,6 +140,58 @@ async function replayHeadersFor(url: string): Promise<void> {
   if (replayHeaderHostsSynced.has(host)) return;
   replayHeaderHostsSynced.add(host);
   await syncHeaderReplayRule(host, replayHeaders, await selfTabIds());
+}
+
+/**
+ * docs/ROADMAP.md #7.1 — one-shot diagnostic on the FIRST segment 401/403 of a run.
+ *
+ * Exists because this failure has many distinct causes that all present identically as a bare 403,
+ * and working out which one cost several rounds of manual investigation the first time (the real
+ * cause turned out to be the rule's `tabIds` condition never matching this page's fetches, after a
+ * long detour into the stream's site-specific `#EXT-X-TOKEN` manifest tag, which was a red herring).
+ * Everything needed to tell those causes apart is already in memory here — it just wasn't reported
+ * anywhere. So this doesn't merely dump state: it narrows to a single `likelyCause`, since the dump
+ * on its own is what was already available via ad-hoc logging.
+ *
+ * Console-only (plus a pointer in the thrown error's message, since docs/ROADMAP.md #7.6 auto-closes
+ * this Tab shortly after an error and the Side Panel only ever shows the message). Never throws —
+ * it runs on an error path and must not fail on top of the failure it's explaining.
+ */
+/** Order-insensitive: `condition.tabIds` comes back from Chrome, not from us, so its ordering is not
+ * something to depend on. `undefined` (no tabIds condition at all) never equals an intended list. */
+function sameTabIds(live: number[] | undefined, intended: number[]): boolean {
+  if (!live || live.length !== intended.length) return false;
+  const sortedLive = [...live].sort((a, b) => a - b);
+  const sortedIntended = [...intended].sort((a, b) => a - b);
+  return sortedLive.every((id, i) => id === sortedIntended[i]);
+}
+
+let authDiagnosticLogged = false;
+async function logSegmentAuthDiagnostics(url: string, statusCode: number): Promise<void> {
+  if (authDiagnosticLogged) return;
+  authDiagnosticLogged = true;
+  try {
+    const host = new URL(url).hostname;
+    const replay = await describeHeaderReplay(host);
+    const tabIds = await selfTabIds();
+
+    const likelyCause = !replayHeaders
+      ? 'No headers were captured for this manifest — no DetectedMedia entry matched it, so NOTHING was ever replayed and the CDN saw a bare extension request. Check that the stream was detected by the webRequest observer (which is what records requestHeaders) rather than only by the DOM/MAIN-world sources.'
+      : !replay.intended
+        ? `Headers WERE captured (${Object.keys(replayHeaders).join(', ')}) but syncHeaderReplayRule was never called for ${host} — replayHeadersFor() skipped it or threw.`
+        : !replay.liveRule
+          ? `Rule ${replay.intended.ruleId} was synced for ${host} but is not in the live session ruleset — evicted by MAX_HOSTS, or updateSessionRules failed (check for an earlier console error from header-replay-rules).`
+          : !sameTabIds(replay.liveRule.condition.tabIds, replay.intended.tabIds)
+            ? `Rule ${replay.intended.ruleId} EXISTS but is not the one this page wrote: its condition.tabIds is [${replay.liveRule.condition.tabIds?.join(', ') ?? 'none'}] where this page asked for [${replay.intended.tabIds.join(', ')}]. Another extension context (background auto-inspect, or another Merge tab) owns that id and overwrote it, so the rule no longer matches this tab's requests.`
+            : `Rule ${replay.intended.ruleId} is live, matches this tab, and carries ${replay.intended.headerNames.join(', ')}. So either (a) Chrome overrode a value after the rule applied, which it does for Origin on CORS-mode requests; or (b) this CDN gates on something other than these headers.`;
+
+    console.warn(
+      `Synapse: segment fetch got HTTP ${statusCode} — header replay did not satisfy ${host}.\n\nLikely cause: ${likelyCause}`,
+      { segmentUrl: url, manifestUrl, capturedHeaders: replayHeaders ?? null, thisPageTabIds: tabIds, ...replay },
+    );
+  } catch {
+    // Diagnostics must never mask the real error the caller is already reporting.
+  }
 }
 
 /**
@@ -167,6 +236,20 @@ function ivForSegment(key: SegmentKey, sequenceNumber: number): Uint8Array<Array
   const bytes = new Uint8Array(16);
   new DataView(bytes.buffer).setUint32(12, sequenceNumber >>> 0, false);
   return bytes;
+}
+
+/** HLS writes a byte range as `<length>[@<offset>]`; HTTP wants `bytes=<first>-<last>`. A missing
+ * `@offset` means "continue from the previous sub-range" per the spec, which for an `#EXT-X-MAP`
+ * init segment (the only place this is honored, see ManifestSegment.byteRange) has no previous —
+ * so 0 is the only reading available. Returns `undefined` for unparsable input, which the caller
+ * treats as "fetch the whole resource" — the same graceful-degradation posture as the parser's
+ * per-item skips. */
+function byteRangeToHeader(byteRange: string): string | undefined {
+  const [lengthText, offsetText] = byteRange.trim().split('@');
+  const length = Number(lengthText);
+  const offset = offsetText === undefined ? 0 : Number(offsetText);
+  if (!Number.isFinite(length) || !Number.isFinite(offset) || length <= 0) return undefined;
+  return `bytes=${offset}-${offset + length - 1}`;
 }
 
 /** `crypto.subtle.decrypt`'s AES-CBC mode strips PKCS#7 padding itself — the exact padding HLS's
@@ -238,15 +321,39 @@ function render(manifest: Extract<ParsedManifest, { kind: 'media' }>, sourceUrl:
     return;
   }
 
-  const status = div({ class: 'merge-status' }, `${manifest.segments.length} segment(s) found. Starting download...`);
+  // Warns rather than blocks on a live playlist: `isLive` is inferred from a MISSING #EXT-X-ENDLIST,
+  // and plenty of ordinary VOD playlists omit it by mistake — those download fine today and must keep
+  // doing so. The warning exists so that when it does fail partway (see the 404/410 branch in
+  // fetchSegment) the reason was already on screen instead of arriving as a bare HTTP error.
+  const status = div(
+    { class: 'merge-status' },
+    manifest.isLive
+      ? `${manifest.segments.length} segment(s) found, but this playlist has no #EXT-X-ENDLIST — it looks like a live/sliding-window stream, whose segments expire as it advances. Trying anyway; expect it to stop partway if it really is live.`
+      : `${manifest.segments.length} segment(s) found. Starting download...`,
+  );
   // docs/ROADMAP.md #7.6 — the button is now only a manual retry after a failure; the normal path
   // runs immediately below, no click needed (the whole point of opening this Tab in the background).
   const startBtn = button({ type: 'button' }, 'Retry');
   const actions = div({ class: 'merge-actions' }, startBtn);
-  startBtn.onclick = () => void run(manifest, sourceUrl, status, startBtn, actions);
+  /**
+   * `run()` does real work BEFORE its own try/catch (`createOpfsRun`, which can reject on an OPFS
+   * quota/permission failure), and it was invoked as a bare `void run(...)` — so a rejection there
+   * became an unhandled promise rejection: no error rendered, no `postProgress('error')` sent, and
+   * the status frozen on whatever `render()` last set. That reads as a hang, and it's the worst kind
+   * because the failing operation reports nothing at all. Every path out of `run()` must surface.
+   */
+  const startRun = (): void => {
+    void run(manifest, sourceUrl, status, startBtn, actions).catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      status.textContent = `Failed before the download could start: ${message}`;
+      postProgress('error', undefined, undefined, message);
+      startBtn.disabled = false;
+    });
+  };
+  startBtn.onclick = startRun;
 
   van.add(root, header(h1('Download (merged)'), p(sourceUrl)), status, actions);
-  void run(manifest, sourceUrl, status, startBtn, actions);
+  startRun();
 }
 
 /**
@@ -288,12 +395,19 @@ function downloadBlob(blob: Blob, fileName: string): void {
   URL.revokeObjectURL(blobUrl);
 }
 
-/** docs/ROADMAP.md #8.5 — the "no ffmpeg" fast path: concatenated MPEG-TS segments are ALREADY a
- * playable .ts file (TS is self-syncing per 188-byte packet, unlike raw byte concatenation of most
- * other container formats) — `file` here is exactly that, written by the OPFS run in `run()` below.
- * No wasm, no memory ceiling, works at any size. */
-function saveTs(file: File, sourceUrl: string): void {
-  downloadBlob(file, `${slugify(fileNameFromUrl(sourceUrl), 'stream')}.ts`);
+/** Which container the concatenated OPFS bytes already ARE — decided by whether the manifest
+ * carried an `#EXT-X-MAP` init segment, not by preference. Naming fMP4 output `.ts` (as this page
+ * did unconditionally before) hands the user a file every player refuses to open. */
+type OutputContainer = 'ts' | 'mp4';
+
+/** docs/ROADMAP.md #8.5 — the "no ffmpeg" fast path, and it holds for BOTH containers, for two
+ * different reasons: concatenated MPEG-TS segments are playable because TS is self-syncing per
+ * 188-byte packet, while concatenated fMP4 is playable because `init + moof/mdat + moof/mdat + ...`
+ * is precisely how a fragmented MP4 is laid out to begin with (that's the CMAF wire format, so the
+ * concatenation isn't an approximation of a valid file — it IS one, provided `run()` wrote the init
+ * segment first). Either way: no wasm, no memory ceiling, works at any size. */
+function saveConcatenated(file: File, sourceUrl: string, container: OutputContainer): void {
+  downloadBlob(file, `${slugify(fileNameFromUrl(sourceUrl), 'stream')}.${container}`);
 }
 
 /** docs/ROADMAP.md #8.5 — remux path, only reachable for files under `REMUX_SIZE_CAP_BYTES`.
@@ -306,6 +420,11 @@ async function remuxToMp4(file: File, sourceUrl: string, status: HTMLElement): P
   postProgress('remux');
   status.textContent = 'Loading ffmpeg.wasm (first run only, ~30MB, bundled with the extension)...';
   const ffmpeg = new FFmpeg();
+  // Without this subscription @ffmpeg/ffmpeg prints NOTHING — its worker forwards ffmpeg's stderr
+  // as 'log' events and drops them when nobody is listening. The "see the browser console for its
+  // log" this function's own error message promises was therefore never true, which is exactly how
+  // a failing remux ends up with no diagnosable cause at all.
+  ffmpeg.on('log', ({ message }) => console.log(`ffmpeg: ${message}`));
   await ffmpeg.load({
     // Bundled with the extension (manifest.config.ts's `wasm-unsafe-eval` CSP), not fetched from
     // a CDN — an MV3 extension can't execute remotely-hosted code regardless.
@@ -341,14 +460,22 @@ async function remuxToMp4(file: File, sourceUrl: string, status: HTMLElement): P
 /** docs/ROADMAP.md #8.5 — renders the two output choices once all segments are staged in OPFS.
  * Auto-fires ONE of them (no click needed, same automation posture as the rest of this flow,
  * docs/ROADMAP.md #7.6): remux when the file is small enough to safely fit ffmpeg's wasm heap,
- * otherwise the always-safe .ts save — this auto-fallback (not a dead-end error) is what actually
+ * otherwise the always-safe direct save — this auto-fallback (not a dead-end error) is what actually
  * unblocks large streams that used to OOM. Both buttons stay available afterward for a manual
- * retry/alternate choice. */
-function renderOutputOptions(file: File, sourceUrl: string, status: HTMLElement, actions: HTMLElement): void {
+ * retry/alternate choice. `container` is what the staged bytes already are (see OutputContainer):
+ * for an fMP4 stream the direct save is already a `.mp4`, so remux is a cleanup pass (fragmented →
+ * plain, faststart) rather than the format conversion it is for MPEG-TS. */
+function renderOutputOptions(
+  file: File,
+  sourceUrl: string,
+  status: HTMLElement,
+  actions: HTMLElement,
+  container: OutputContainer,
+): void {
   const underCap = file.size <= REMUX_SIZE_CAP_BYTES;
 
-  const saveTsBtn = button({ type: 'button' }, 'Save (.ts, fast)');
-  saveTsBtn.onclick = () => saveTs(file, sourceUrl);
+  const saveDirectBtn = button({ type: 'button' }, `Save (.${container}, fast)`);
+  saveDirectBtn.onclick = () => saveConcatenated(file, sourceUrl, container);
 
   const remuxBtn = button({ type: 'button', disabled: !underCap }, 'Remux → .mp4');
   const attemptRemux = () => {
@@ -371,17 +498,17 @@ function renderOutputOptions(file: File, sourceUrl: string, status: HTMLElement,
       ? p(
           { class: 'merge-error' },
           `File is ${formatBytes(file.size)} — over the ${formatBytes(REMUX_SIZE_CAP_BYTES)} remux limit ` +
-            "(ffmpeg.wasm's heap can't safely hold a file this size), so it was saved as .ts directly instead.",
+            `(ffmpeg.wasm's heap can't safely hold a file this size), so it was saved as .${container} directly instead.`,
         )
       : null,
-    saveTsBtn,
+    saveDirectBtn,
     remuxBtn,
   );
 
   if (underCap) {
     attemptRemux();
   } else {
-    saveTs(file, sourceUrl);
+    saveConcatenated(file, sourceUrl, container);
     postProgress('done');
   }
 }
@@ -401,6 +528,9 @@ async function run(
   // (fetch-images'/crawlSite's per-item skip): a missing image degrades a page, a missing segment
   // breaks video continuity — no partial-result posture makes sense here. No resume — retrying
   // just starts over, same "no half-finished feature" simplicity as everything else in this flow.
+  // Per-run, not per-page: a Retry after a header-replay fix should report again rather than stay
+  // silent because the first attempt already used up the one-shot.
+  authDiagnosticLogged = false;
   const runId = crypto.randomUUID();
   currentRunId = runId;
   const opfsRun = await createOpfsRun(runId);
@@ -449,8 +579,28 @@ async function run(
         await replayHeadersFor(segment.url);
         const res = await fetch(segment.url);
         if (res.status === 401 || res.status === 403) {
+          // Before the §7.4 expired-link recovery, not after: a 401/403 is ALSO what a failed header
+          // replay looks like, and that cause is invisible once the refresh path takes over and
+          // reports "link expired" for it.
+          await logSegmentAuthDiagnostics(segment.url, res.status);
           if (await ensureRefreshed(index)) continue; // retry now, doesn't consume a backoff wait
-          throw new Error(`Segment ${index + 1} failed: HTTP ${res.status} (link expired, manifest refresh unavailable)`);
+          throw new Error(
+            `Segment ${index + 1} failed: HTTP ${res.status} — the link expired and no manifest refresh was available, ` +
+              "or this CDN's hotlink protection rejected the request. See this tab's console for which of those it was.",
+          );
+        }
+        // docs/ROADMAP.md #7.4 — 404/410 is the OTHER shape an expired segment takes. Where a
+        // signature-checking CDN answers 403 for a stale token, a sliding-window one simply stops
+        // serving the object once it falls out of the window. Same recovery, same VOD-only guard
+        // inside ensureRefreshed; previously this fell through to the generic `!res.ok` throw and
+        // never even attempted a refresh.
+        if (res.status === 404 || res.status === 410) {
+          if (await ensureRefreshed(index)) continue;
+          throw new Error(
+            manifest.isLive
+              ? `Segment ${index + 1} is already gone (HTTP ${res.status}). This playlist carries no #EXT-X-ENDLIST, so it is a live/sliding-window stream: segments expire out of the window as it advances, and there is no fixed set of them to save. This is not a download Synapse can complete.`
+              : `Segment ${index + 1} failed: HTTP ${res.status} — that segment URL is no longer served, and refreshing the manifest did not yield a working one.`,
+          );
         }
         if (!res.ok) throw new Error(`Segment ${index + 1} failed: HTTP ${res.status}`);
         const bytes = await res.arrayBuffer();
@@ -509,7 +659,31 @@ async function run(
     }
   }
 
+  /**
+   * The `#EXT-X-MAP` init segment, written as the FIRST bytes of the output file. Fetched inline
+   * here rather than through the pool because ordering is not negotiable: on an fMP4/CMAF stream
+   * these bytes carry the `ftyp`+`moov` boxes that every following `moof`+`mdat` fragment refers
+   * back to, so anything written before them makes the whole file undemuxable. Safe to write
+   * directly (bypassing `writeChain`) only because no worker has started at this point.
+   */
+  async function fetchInitSegment(init: ManifestSegment): Promise<ArrayBuffer> {
+    await replayHeadersFor(init.url);
+    const range = init.byteRange ? byteRangeToHeader(init.byteRange) : undefined;
+    const res = await fetch(init.url, range ? { headers: { Range: range } } : {});
+    if (res.status === 401 || res.status === 403) await logSegmentAuthDiagnostics(init.url, res.status);
+    if (!res.ok) throw new Error(`Initialization segment failed: HTTP ${res.status} (${init.url})`);
+    const bytes = await res.arrayBuffer();
+    // Spec-wise an init segment is covered by whatever key is in scope; in practice it precedes any
+    // #EXT-X-KEY, so this branch is rarely taken and is untested against a real encrypted-fMP4 stream.
+    return init.key ? await decryptSegment(bytes, init.key, manifest.mediaSequence) : bytes;
+  }
+
   try {
+    if (manifest.initSegment) {
+      status.textContent = 'Downloading initialization segment (fragmented MP4)...';
+      await opfsRun.write(new Uint8Array(await fetchInitSegment(manifest.initSegment)));
+    }
+
     status.textContent = `Downloading ${total} segment(s) (up to ${SEGMENT_POOL_SIZE} at a time)...`;
     const workerCount = Math.min(SEGMENT_POOL_SIZE, total);
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
@@ -517,7 +691,9 @@ async function run(
 
     const file = await opfsRun.finish();
     status.textContent = `${total} segment(s) downloaded (${formatBytes(file.size)}).`;
-    renderOutputOptions(file, sourceUrl, status, actions);
+    // An init segment is what distinguishes fMP4 from MPEG-TS, so it also decides the container the
+    // concatenated bytes actually are — see saveConcatenated.
+    renderOutputOptions(file, sourceUrl, status, actions, manifest.initSegment ? 'mp4' : 'ts');
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     status.textContent = `Failed: ${message}`;

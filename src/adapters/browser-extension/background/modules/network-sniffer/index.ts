@@ -5,7 +5,7 @@ import { sniffMediaMagicBytes } from '../../../../../shared/media-magic-bytes';
 import { isAdNetworkDomain, looksLikeAdHostnamePrefix } from '../../../../../shared/ad-domain-denylist';
 import { looksLikeAdOrTrackerPath, looksLikeAdMacroTemplate } from '../../../../../shared/junk-url-patterns';
 import { looksLikeSignedUrl } from '../../../../../shared/signed-url-detector';
-import { ensureNetworkObserver, teardownNetworkObserver, type ObservedRequest } from '../../../utils/webrequest-media-observer';
+import { ensureNetworkObserver, type ObservedRequest } from '../../../utils/webrequest-media-observer';
 import { syncHeaderReplayRule } from '../../../utils/header-replay-rules';
 import {
   isMainWorldScriptRegistered,
@@ -82,6 +82,63 @@ function isJunkRequest(url: string, pageUrl: string | undefined): boolean {
  * of resourceType, since these networks routinely serve real `video/*` Content-Types for what's
  * still an ad, which the `resourceType === 'media'` branch would otherwise trust unconditionally.
  */
+/**
+ * docs/ROADMAP.md #4 — the segment-spam exclusion `classifyMediaUrl` implements by extension (`.ts`/
+ * `.m4s` are never listed) has a blind spot it cannot close on its own: a FRAGMENTED-MP4 (CMAF/
+ * LL-HLS) stream names every one of its segments `.mp4`, which is indistinguishable from a real
+ * standalone video by extension alone. Observed on a live LL-HLS stream that produced ~30 rows for
+ * ONE video — an `_init_` segment, every 2-second segment, and every 0.5-second `#EXT-X-PART` part.
+ *
+ * The signal that does separate them is CONTEXT: a segment sits in the same directory as the
+ * playlist that lists it, and its filename extends that playlist's own basename. Both facts are
+ * already observable — the `.m3u8` is detected before its segments, since the player must read it
+ * first. Deliberately requires the stem PREFIX to match rather than just the directory: a site
+ * serving `/videos/trailer.mp4` alongside `/videos/playlist.m3u8` is offering a genuinely
+ * downloadable file, and directory alone would suppress it.
+ *
+ * In-memory and therefore lost on a service-worker restart, which is why it is also seeded from the
+ * store at startup (see the bottom of this file).
+ */
+const MAX_STREAM_DIRECTORIES = 100;
+const streamStemsByDirectory = new Map<string, Set<string>>();
+
+function urlDirAndStem(url: string): { dir: string; stem: string } | undefined {
+  try {
+    const { origin, pathname } = new URL(url);
+    const slash = pathname.lastIndexOf('/');
+    const file = pathname.slice(slash + 1);
+    const dot = file.lastIndexOf('.');
+    return { dir: `${origin}${pathname.slice(0, slash + 1)}`, stem: dot === -1 ? file : file.slice(0, dot) };
+  } catch {
+    return undefined;
+  }
+}
+
+function rememberStreamManifest(url: string): void {
+  const parts = urlDirAndStem(url);
+  if (!parts || parts.stem.length < 3) return; // too short a stem would prefix-match unrelated files
+  let stems = streamStemsByDirectory.get(parts.dir);
+  if (!stems) {
+    if (streamStemsByDirectory.size >= MAX_STREAM_DIRECTORIES) {
+      // Oldest-first eviction (Map preserves insertion order), same bounded-memory posture as
+      // header-replay-rules.ts's MAX_HOSTS.
+      streamStemsByDirectory.delete(streamStemsByDirectory.keys().next().value as string);
+    }
+    stems = new Set();
+    streamStemsByDirectory.set(parts.dir, stems);
+  }
+  stems.add(parts.stem);
+}
+
+function isSegmentOfKnownStream(url: string): boolean {
+  const parts = urlDirAndStem(url);
+  if (!parts) return false;
+  const stems = streamStemsByDirectory.get(parts.dir);
+  if (!stems) return false;
+  // `>` not `>=`: a stem equal to the manifest's own is the manifest, not a segment of it.
+  return [...stems].some((stem) => parts.stem.length > stem.length && parts.stem.startsWith(stem));
+}
+
 function classifyDetection(req: ObservedRequest): MediaKind | undefined {
   if (isJunkRequest(req.url, req.initiator)) return undefined;
   const urlKind = classifyMediaUrl(req.url);
@@ -91,11 +148,77 @@ function classifyDetection(req: ObservedRequest): MediaKind | undefined {
   // `resourceType: 'media'` AND which `classifyMediaMimeType` reads as plain 'audio' — silently
   // downgrading an HLS manifest to a non-stream kind) that the URL extension alone should always
   // win for `.m3u8`/`.mpd`, regardless of what resourceType Chrome guessed.
-  if (urlKind === 'stream') return 'stream';
+  if (urlKind === 'stream') {
+    rememberStreamManifest(req.url);
+    return 'stream';
+  }
+  // Checked after the `stream` branch so a playlist is never mistaken for a segment of itself, and
+  // before the Content-Type split below because a CMAF segment's Content-Type is a perfectly honest
+  // `video/mp4` — no amount of server-confirmed typing distinguishes it from a standalone file.
+  if (isSegmentOfKnownStream(req.url)) return undefined;
   const mimeKind = req.contentType ? classifyMediaMimeType(req.contentType) : undefined;
   if (req.resourceType === 'media') return mimeKind ?? urlKind;
   return mimeKind;
 }
+
+/**
+ * Why a request the user COULD see in DevTools' Network tab never showed up in Synapse's list.
+ *
+ * Every rejection above is silent by construction — `classifyDetection` returns `undefined` for four
+ * quite different reasons and the caller can't tell them apart. That gap has already cost real
+ * debugging time: a plain `https://video.<cdn>/video/<hash>.mp4` went missing and the leading theory
+ * was "the ad filter ate it", which this function can immediately confirm or refute instead of
+ * leaving it a guess. Recomputes the checks rather than threading a reason out of `classifyDetection`
+ * — it runs only on the reject path, and keeping the hot path's shape unchanged is worth the few
+ * duplicated string comparisons.
+ */
+function explainDetectionRejection(req: ObservedRequest): string {
+  if (isJunkUrl(req.url)) {
+    const which = isAdNetworkDomain(req.url)
+      ? 'known ad-network domain'
+      : looksLikeAdHostnamePrefix(req.url)
+        ? 'ad-shaped hostname label (creative./ads./track./...)'
+        : looksLikeAdMacroTemplate(req.url)
+          ? 'un-substituted {macro} query value'
+          : 'ad/tracker-shaped path segment or query key';
+    return `junk: the URL itself matched — ${which}`;
+  }
+  if (req.initiator !== undefined && isJunkUrl(req.initiator)) {
+    return `junk: the URL is clean but its INITIATOR (${req.initiator}) matched the ad filters — i.e. an ad frame requested it`;
+  }
+  if (isSegmentOfKnownStream(req.url)) {
+    return 'stream segment: this sits in the same directory as an already-detected .m3u8 and its filename extends that playlist\'s basename, so it is one of its segments/parts (a CMAF/fMP4 segment is named .mp4 and is otherwise indistinguishable from a standalone video)';
+  }
+  const urlKind = classifyMediaUrl(req.url);
+  if (urlKind && req.resourceType !== 'media') {
+    return `Content-Type not confirmed: URL extension says '${urlKind}', but Chrome classified the request as '${req.resourceType}' (not 'media'), so a matching Content-Type was required and the server sent ${req.contentType ? `'${req.contentType}'` : 'none'}`;
+  }
+  if (!urlKind) {
+    return `unrecognized: no media file extension, Content-Type was ${req.contentType ? `'${req.contentType}'` : 'absent'}, and the magic-bytes probe ${shouldProbeMagicBytes(req) ? 'found nothing' : 'was not eligible'}`;
+  }
+  return `no kind resolved (resourceType '${req.resourceType}', Content-Type ${req.contentType ?? 'absent'})`;
+}
+
+/** Last N rejections, newest last — a ring buffer because the reason is needed AFTER the fact ("why
+ * isn't this video in the list?"), by which time the console line has usually scrolled away or the
+ * service worker has restarted. Read it from the background console via
+ * `globalThis.__synapseRejectedMedia` (see the assignment below). */
+const MAX_RECORDED_REJECTIONS = 100;
+const recentRejections: { url: string; reason: string; at: string }[] = [];
+
+function recordRejection(req: ObservedRequest, reasonOverride?: string): void {
+  const reason = reasonOverride ?? explainDetectionRejection(req);
+  recentRejections.push({ url: req.url, reason, at: new Date().toISOString() });
+  if (recentRejections.length > MAX_RECORDED_REJECTIONS) recentRejections.shift();
+  // console.debug, not warn/log: this fires for every non-media request in the observed resource
+  // types, so it must stay off by default — Chrome DevTools hides Verbose unless asked for it.
+  console.debug(`Synapse: not listed as media — ${reason}\n  ${req.url}`);
+}
+
+// Debug-only handle on the background service worker's own global — the ring buffer is useless
+// without a way to read it, and a real UI for it isn't worth building until this proves it's needed
+// more than occasionally. Namespaced, read-only data, never read back by any code path.
+(globalThis as unknown as Record<string, unknown>).__synapseRejectedMedia = recentRejections;
 
 /**
  * docs/ROADMAP.md #7.2 — a request only qualifies for the magic-bytes rescue probe when
@@ -372,49 +495,18 @@ export const NetworkSnifferModule: Module<
     })) as unknown as Record<string, unknown>[],
   async run(command, ctx) {
     if (!(await isModuleActive('network-sniffer'))) {
-      teardownNetworkObserver();
+      // Deliberately does NOT call teardownNetworkObserver() — the chrome.webRequest listener is
+      // installed once at service-worker startup and stays installed (see installNetworkSniffing at
+      // the bottom of this file); deactivating the Module only makes its callback inert. Removing
+      // and re-adding the listener from here is precisely the pattern that made detection unreliable.
+      setSniffingActive(false);
       if (await isMainWorldScriptRegistered(MAIN_WORLD_SCRIPT_ID)) {
         await unregisterMainWorldScript(MAIN_WORLD_SCRIPT_ID);
       }
       return;
     }
 
-    // Idempotent — safe to call on every bus event (startup 'sync', or a Delete command), only
-    // actually installs the chrome.webRequest listener the first time.
-    ensureNetworkObserver((req) => {
-      const syncKind = classifyDetection(req);
-      if (!syncKind && !shouldProbeMagicBytes(req)) return;
-      void (async () => {
-        // docs/ROADMAP.md #7.2 — only reached when classifyDetection couldn't tell from
-        // URL/Content-Type alone; the probe fetch is what turns a genuinely blind request into a
-        // classified one (or leaves it undetected, same as before this rescue path existed).
-        const kind = syncKind ?? (await probeMagicBytesKind(req.url));
-        if (!kind) return;
-        // Only computable when the observer gave us an initiator — the only source with a
-        // tabId+initiator in hand (docs/ROADMAP.md #4.1's third-party signal).
-        const thirdParty = req.initiator ? await isThirdPartyInitiator(req.tabId, req.initiator) : undefined;
-        // exactOptionalPropertyTypes: only include a field when actually available, never `undefined`.
-        const media: DetectedMedia = {
-          id: crypto.randomUUID(),
-          url: req.url,
-          kind,
-          detectedAt: new Date().toISOString(),
-          ...(req.initiator ? { pageUrl: req.initiator } : {}),
-          ...(thirdParty !== undefined ? { thirdParty } : {}),
-          ...(looksLikeSignedUrl(req.url) ? { expiring: true } : {}),
-          // docs/ROADMAP.md #7.1 — only the webRequest source ever has the original request's own
-          // headers in hand (report-dom-media/report-main-world-media never see them).
-          ...(req.requestHeaders && Object.keys(req.requestHeaders).length > 0 ? { requestHeaders: req.requestHeaders } : {}),
-        };
-        // docs/ROADMAP.md #4.2 — only push the floating-icon notice on a genuine new detection (not
-        // a repeat request for an already-known URL), same "don't spam a chatty page" philosophy as
-        // the store's own dedupe/cap.
-        if (await addDetectedMedia(media, ctx.services.cache)) {
-          notifyTabMediaFound(req.tabId);
-          if (kind === 'stream') void inspectStreamEntry(media, ctx.services.cache);
-        }
-      })();
-    });
+    setSniffingActive(true);
 
     // Always (re-)register while active, not just when nothing is registered yet — same
     // stale-jsPath-avoidance reasoning as http-error-mocker's syncRegistration (Vite content-hashes
@@ -473,3 +565,119 @@ export const NetworkSnifferModule: Module<
     }
   },
 };
+
+/**
+ * docs/ROADMAP.md #4 — the detection callback, hoisted out of `run()` so the chrome.webRequest
+ * listener can be installed at service-worker STARTUP rather than on a bus event.
+ *
+ * Why that matters: an MV3 service worker is killed after ~30s idle, and `chrome.webRequest`
+ * listeners do not survive it — they must be re-added every time the worker starts. Registering
+ * them from inside `run()` meant the listener only came back after a chain of asynchronous steps
+ * (`kernel.run()` resolving → a `chromeRuntimeBus` emit round trip → an `await isModuleActive()`
+ * storage read). A page load is exactly what wakes the worker, so its media requests raced that
+ * chain and routinely lost — and a request that arrives before the listener exists produces NO
+ * record anywhere, not even in `recentRejections`, which is precisely the "the URL is in DevTools
+ * but nowhere in Synapse, and the rejection log doesn't mention it either" symptom this fixes.
+ *
+ * Uses `chromeStorageCache` directly rather than `ctx.services.cache`: there is no `ctx` at startup,
+ * and that singleton is what the ServiceInjector resolves 'cache' to anyway (kernel/module.ts), so
+ * this is the same store the Module's own paths write to, not a second one.
+ */
+function handleObservedRequest(req: ObservedRequest): void {
+  const syncKind = classifyDetection(req);
+  if (!syncKind && !shouldProbeMagicBytes(req)) {
+    recordRejection(req);
+    return;
+  }
+  void (async () => {
+    // docs/ROADMAP.md #7.2 — only reached when classifyDetection couldn't tell from URL/Content-Type
+    // alone; the probe fetch is what turns a genuinely blind request into a classified one (or
+    // leaves it undetected, same as before this rescue path existed).
+    const kind = syncKind ?? (await probeMagicBytesKind(req.url));
+    if (!kind) {
+      recordRejection(req, 'magic-bytes probe ran but did not recognize the first bytes as media');
+      return;
+    }
+    // Only computable when the observer gave us an initiator — the only source with a tabId+initiator
+    // in hand (docs/ROADMAP.md #4.1's third-party signal).
+    const thirdParty = req.initiator ? await isThirdPartyInitiator(req.tabId, req.initiator) : undefined;
+    // exactOptionalPropertyTypes: only include a field when actually available, never `undefined`.
+    const media: DetectedMedia = {
+      id: crypto.randomUUID(),
+      url: req.url,
+      kind,
+      detectedAt: new Date().toISOString(),
+      ...(req.initiator ? { pageUrl: req.initiator } : {}),
+      ...(thirdParty !== undefined ? { thirdParty } : {}),
+      ...(looksLikeSignedUrl(req.url) ? { expiring: true } : {}),
+      // docs/ROADMAP.md #7.1 — only the webRequest source ever has the original request's own headers
+      // in hand (report-dom-media/report-main-world-media never see them).
+      ...(req.requestHeaders && Object.keys(req.requestHeaders).length > 0 ? { requestHeaders: req.requestHeaders } : {}),
+    };
+    // docs/ROADMAP.md #4.2 — only push the floating-icon notice on a genuine new detection (not a
+    // repeat request for an already-known URL), same "don't spam a chatty page" philosophy as the
+    // store's own dedupe/cap.
+    if (await addDetectedMedia(media, chromeStorageCache)) {
+      notifyTabMediaFound(req.tabId);
+      if (kind === 'stream') void inspectStreamEntry(media, chromeStorageCache);
+    }
+  })();
+}
+
+/**
+ * `undefined` = not yet known, which is a THIRD state and not the same as inactive: at startup the
+ * listener is live before the activation flag has been read back, and requests arriving in that
+ * window are the ones that were being lost. They're held here and replayed once the answer arrives,
+ * so the fix isn't merely "register earlier" (which would still race) but "never drop a request just
+ * because the answer hasn't landed yet". Bounded — a page that fires more than this while the flag
+ * resolves is already past the point where the tail matters.
+ */
+let sniffingActive: boolean | undefined;
+const pendingObserved: ObservedRequest[] = [];
+const MAX_PENDING_OBSERVED = 50;
+
+function setSniffingActive(active: boolean): void {
+  sniffingActive = active;
+  const buffered = pendingObserved.splice(0, pendingObserved.length);
+  if (active) for (const req of buffered) handleObservedRequest(req);
+}
+
+/**
+ * Installed unconditionally at module-evaluation time. `background-modules.ts` pulls every
+ * `background/modules/*\/index.ts` in via an EAGER `import.meta.glob`, so this runs synchronously
+ * during service-worker startup — the only point at which an MV3 `chrome.webRequest` listener is
+ * guaranteed to catch the requests that woke the worker.
+ *
+ * Kept installed even while the Module is deactivated (the callback just returns): the cost is one
+ * no-op call per observed request, against the alternative of re-entering the remove/re-add cycle
+ * that caused the lost detections in the first place.
+ */
+ensureNetworkObserver((req) => {
+  if (sniffingActive === false) return;
+  if (sniffingActive === undefined) {
+    if (pendingObserved.length < MAX_PENDING_OBSERVED) pendingObserved.push(req);
+    return;
+  }
+  handleObservedRequest(req);
+});
+
+// Resolves the activation flag directly instead of waiting for the bus 'sync' that background/
+// index.ts emits after kernel.run() — one storage read, started at startup, rather than a multi-step
+// async chain. The bus sync still arrives later and is still what handles activation CHANGES; this
+// only shortens the startup window during which requests have to be buffered above.
+void isModuleActive('network-sniffer')
+  .then(setSniffingActive)
+  .catch(() => setSniffingActive(false));
+
+// Rebuilds `streamStemsByDirectory` from streams already known, so a service-worker restart mid-
+// playback doesn't start listing the current stream's segments as standalone videos. A master's
+// `variants` matter as much as the entries themselves — the segments live next to the VARIANT
+// playlist, which is often on a different host from the master that lists it.
+void listDetectedMedia()
+  .then((items) => {
+    for (const item of items) {
+      if (item.kind === 'stream') rememberStreamManifest(item.url);
+      for (const variant of item.variants ?? []) rememberStreamManifest(variant.url);
+    }
+  })
+  .catch(() => {});

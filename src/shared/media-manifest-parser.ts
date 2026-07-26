@@ -45,6 +45,10 @@ export interface ManifestSegment {
   url: string;
   /** `undefined` = unencrypted (no `#EXT-X-KEY` in scope, or the most recent one was `METHOD=NONE`). */
   key?: SegmentKey;
+  /** Raw `BYTERANGE` attribute text (`<length>[@<offset>]`) when this is a slice of a larger file
+   * rather than a whole one — only ever set for an `#EXT-X-MAP` init segment here (the standalone
+   * `#EXT-X-BYTERANGE` tag that can precede a media segment is still unhandled). */
+  byteRange?: string;
 }
 
 export type ParsedManifest =
@@ -52,6 +56,20 @@ export type ParsedManifest =
   | {
       kind: 'media';
       segments: ManifestSegment[];
+      /**
+       * From `#EXT-X-MAP:URI="..."` — the initialization segment of a FRAGMENTED-MP4 (CMAF) stream,
+       * and the single most important thing to get right about this manifest shape. Where MPEG-TS
+       * segments are self-describing (every `.ts` segment carries its own PAT/PMT, which is why
+       * concatenating them alone yields a playable file), fMP4 media segments are bare
+       * `moof`+`mdat` fragments: ALL the codec/track metadata lives in the `ftyp`+`moov` boxes of
+       * this one init segment. Concatenating the media segments without prepending it produces a
+       * file with no `moov` box at all — not a degraded file, an undemuxable one, which ffmpeg
+       * rejects outright (exit code 1) rather than diagnosing.
+       *
+       * `undefined` for the MPEG-TS case (no `#EXT-X-MAP` tag), which is also the correct signal
+       * that concatenated output should be named `.ts` rather than `.mp4`.
+       */
+      initSegment?: ManifestSegment;
       encrypted: boolean;
       isLive: boolean;
       /** From `#EXT-X-MEDIA-SEQUENCE:N` (0 when absent, the HLS-spec default) — `segments[i]`'s own
@@ -110,6 +128,7 @@ export function parseM3u8(text: string, baseUrl: string): ParsedManifest {
   let playlistType: string | undefined;
   let mediaSequence = 0;
   let currentKey: SegmentKey | undefined;
+  let initSegment: ManifestSegment | undefined;
   let pendingVariantResolution: string | undefined;
   let awaitingVariantUri = false;
   let awaitingSegmentUri = false;
@@ -174,6 +193,29 @@ export function parseM3u8(text: string, baseUrl: string): ParsedManifest {
       continue;
     }
 
+    if (line.startsWith('#EXT-X-MAP')) {
+      // Only ever appears in a media playlist, so it's a positive `isMedia` signal in its own right
+      // (a playlist whose #EXTINF lines this parser somehow missed still classifies correctly).
+      isMedia = true;
+      const attrs = parseAttributeList(line.slice(line.indexOf(':') + 1));
+      if (attrs.URI) {
+        try {
+          initSegment = {
+            url: new URL(attrs.URI, baseUrl).toString(),
+            // Per the HLS spec an init segment is covered by whatever #EXT-X-KEY is in scope at the
+            // point the tag appears — in practice it precedes any key change, so this is almost
+            // always `undefined` even on an encrypted stream.
+            ...(currentKey ? { key: currentKey } : {}),
+            ...(attrs.BYTERANGE !== undefined ? { byteRange: attrs.BYTERANGE } : {}),
+          };
+        } catch {
+          // Malformed URI — leave initSegment unset; the download path reports the resulting
+          // missing-init failure far more usefully than a whole-manifest parse failure would.
+        }
+      }
+      continue;
+    }
+
     if (line.startsWith('#EXT-X-ENDLIST')) {
       hasEndList = true;
       continue;
@@ -196,6 +238,7 @@ export function parseM3u8(text: string, baseUrl: string): ParsedManifest {
     return {
       kind: 'media',
       segments,
+      ...(initSegment ? { initSegment } : {}),
       encrypted: segments.some((s) => s.key !== undefined),
       isLive: !hasEndList || playlistType === 'EVENT',
       mediaSequence,

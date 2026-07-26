@@ -21,7 +21,7 @@
  * still only ever observes.
  */
 
-import { REPLAYABLE_HEADER_NAMES } from './header-replay-rules';
+import { capCapturedHeaders, isReplayableHeader } from './header-replay-rules';
 
 export interface ObservedRequest {
   url: string;
@@ -36,10 +36,11 @@ export interface ObservedRequest {
   /** The response's `Content-Type` header, when present — absent for requests that errored out
    * before headers arrived, or that genuinely omitted the header. */
   contentType?: string;
-  /** docs/ROADMAP.md #7.1 — the subset of this request's OWN headers (`Referer`/`Origin`/
-   * `User-Agent`/`Range`, see header-replay-rules.ts's REPLAYABLE_HEADER_NAMES) worth replaying
-   * when Synapse later re-fetches this URL itself (a lot of CDN media hotlink-protects on exactly
-   * these). Absent when the request had none of them, or `onSendHeaders` never fired for it. */
+  /** docs/ROADMAP.md #7.1 — this request's OWN headers, minus the ones that are unsafe or
+   * meaningless to replay (credentials, conditional/ranged, transport — see header-replay-rules.ts's
+   * `isReplayableHeader`), worth replaying when Synapse later re-fetches this URL itself (a lot of
+   * CDN media hotlink-protects on exactly these). Absent when the request had none of them, or
+   * `onSendHeaders` never fired for it. */
   requestHeaders?: Record<string, string>;
 }
 
@@ -61,9 +62,9 @@ function extractReplayableHeaders(headers: chrome.webRequest.HttpHeader[] | unde
   const result: Record<string, string> = {};
   for (const h of headers ?? []) {
     const name = h.name.toLowerCase();
-    if (h.value && (REPLAYABLE_HEADER_NAMES as readonly string[]).includes(name)) result[name] = h.value;
+    if (h.value && isReplayableHeader(name)) result[name] = h.value;
   }
-  return result;
+  return capCapturedHeaders(result);
 }
 
 function onSendHeaders(details: chrome.webRequest.WebRequestHeadersDetails): void {
@@ -74,8 +75,16 @@ function onSendHeaders(details: chrome.webRequest.WebRequestHeadersDetails): voi
   setTimeout(() => pendingRequestHeaders.delete(details.requestId), PENDING_HEADERS_TTL_MS);
 }
 
+/** This extension's own origin. A request Synapse itself issued must never be reported as a new
+ * detection: the Merge page downloads segments from a real tab (positive tabId, so the `tabId < 0`
+ * guard below does NOT catch it), and every one of those fetches was coming back in as its own
+ * `video` entry — an HLS download of N segments polluted the list with N bogus rows naming the
+ * stream Synapse was in the middle of saving. Same for `inspectStreamEntry`'s manifest fetch. */
+const EXTENSION_ORIGIN = `chrome-extension://${chrome.runtime.id}`;
+
 function onHeadersReceived(details: chrome.webRequest.WebResponseHeadersDetails): void {
   if (details.tabId < 0) return; // negative tabId = not associated with a tab (e.g. extension's own requests)
+  if (details.initiator === EXTENSION_ORIGIN) return; // see EXTENSION_ORIGIN — Synapse's own fetches, not detections
   // exactOptionalPropertyTypes: only include `initiator`/`contentType` when actually provided,
   // rather than assigning `undefined` to an optional field explicitly.
   const req: ObservedRequest = { url: details.url, tabId: details.tabId, resourceType: details.type };

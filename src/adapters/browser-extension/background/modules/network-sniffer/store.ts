@@ -101,12 +101,64 @@ export async function removeDetectedMedia(id: string, cache: CacheService = chro
  * hasn't populated `variants` yet at read time — the variant shows up standalone for one render,
  * then collapses in on the next storage-change re-render once inspection finishes.
  */
+/**
+ * Variant shadowing is matched on origin+pathname, NOT the full URL string, because the two sides
+ * systematically disagree about the query string: `variants` holds the URI exactly as the master
+ * playlist WROTE it (usually bare), while the entry recorded for the page player's own request holds
+ * the URL as it was actually SENT — and a player that appends a per-session token to each variant it
+ * opens (real example: a master carrying `#EXT-X-MOUFLON:PSCH:v2:<key>` tags, whose player then
+ * requests `..._480p.m3u8?psch=v2&pkey=<key>`) makes those two strings differ for what is one
+ * playlist. Exact matching silently collapsed nothing on such a stream — i.e. it failed precisely
+ * when the list is most cluttered. The tradeoff (two genuinely distinct streams differing ONLY in
+ * query string would now collapse into one) isn't a shape HLS renditions take: the path names the
+ * rendition.
+ */
+function variantIdentity(url: string): string {
+  try {
+    const { origin, pathname } = new URL(url);
+    return `${origin}${pathname}`;
+  } catch {
+    return url; // unparsable — fall back to exact matching rather than dropping the entry entirely
+  }
+}
+
 export function collapseVariantShadowedEntries(items: DetectedMedia[]): DetectedMedia[] {
+  // The URL each variant path was ACTUALLY requested with, harvested from the standalone entries
+  // this function is about to hide. A master playlist writes its variant URIs bare, but some players
+  // append a per-session token before opening one — real example, an `#EXT-X-MOUFLON:PSCH:v2:<key>`
+  // master whose player requests `..._480p.m3u8?psch=v2&pkey=<key>`, where the bare URI alone is
+  // rejected by the CDN. Synapse already observed the working URL (that IS the standalone entry);
+  // without this it threw that away and kept only the master's unusable copy. Newest wins — a
+  // rotating token's freshest sighting is the one most likely to still be valid.
+  //
+  // Deliberately general: nothing here knows what a token looks like, only that an observed request
+  // beats a manifest's transcription of the same path. Note the token rides on the VARIANT URL only;
+  // segment URIs inside that playlist resolve against it via `new URL()`, which drops the query per
+  // URL semantics — correct for a stream whose segments carry their own signatures (this one does),
+  // but not a general solution for a CDN that needs the same token on every segment.
+  const observedByIdentity = new Map<string, string>();
+  for (const item of items) {
+    if (item.variants?.length) continue; // a master's own URL is not a sighting of one of its variants
+    observedByIdentity.set(variantIdentity(item.url), item.url);
+  }
+
   const knownVariantUrls = new Set<string>();
   for (const item of items) {
-    for (const v of item.variants ?? []) knownVariantUrls.add(v.url);
+    for (const v of item.variants ?? []) knownVariantUrls.add(variantIdentity(v.url));
   }
-  return items.filter((item) => !knownVariantUrls.has(item.url));
+
+  return items
+    // An entry that lists variants is a master — never hide it, even if its own URL normalizes to
+    // one of its variants'. Defensive: that would erase the only entry carrying the resolution picker.
+    .filter((item) => (item.variants?.length ? true : !knownVariantUrls.has(variantIdentity(item.url))))
+    .map((item) => {
+      if (!item.variants?.length) return item;
+      const variants = item.variants.map((v) => {
+        const observed = observedByIdentity.get(variantIdentity(v.url));
+        return observed !== undefined && observed !== v.url ? { ...v, url: observed } : v;
+      });
+      return variants.some((v, i) => v !== item.variants![i]) ? { ...item, variants } : item;
+    });
 }
 
 /** docs/ROADMAP.md #5.1 — patches an existing entry in place (e.g. Inspect writing back
