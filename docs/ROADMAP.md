@@ -431,3 +431,26 @@ Cả ba hướng đã làm, hướng thứ hai là quan trọng nhất:
 ### 9.3. Các bề mặt đã khớp nguyên tắc, không cần đổi
 
 Popup cho Module Registry list/toggle + action ngắn; Dashboard cho Management View/Steps view/Review-ZIP (network-sniffer's Management View vẫn giữ nguyên hoạt động song song Side Panel, mục 6.3's "chưa làm"); Shadow DOM badge+toast/icon nổi (`network-sniffer`, mục 4.2/6.1, đã tự áp dụng zero-intrusion + CSSOM-not-`<style>`) — toast góc dưới-phải đổi thành icon nổi góc trên-phải, click giờ mở Side Panel thay vì Dashboard thẳng (mục 6.1/6.3). Action-button paradigm (toolbar icon) đã được cân nhắc rồi bỏ hẳn cho ca dùng này — xem lịch sử quyết định ở đầu mục 6.
+
+## 10. Video stream trực tiếp / liên tục — chưa implement
+
+Phát sinh từ đợt xử lý họ URL `growcdnssedge` (mục 8.x's Merge page gặp thật). Ghi lại ở đây vì cả hai mục dưới đều **vượt phạm vi** "tải một playlist cố định thành một file", tức là kiến trúc hiện tại của trang Merge không cover được.
+
+### 10.1. Bắt + tải liên tục cho stream trực tiếp, kèm pause/resume/stop — nên là phase RIÊNG
+
+**Bối cảnh thực tế:** playlist LL-HLS (`#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES`, `#EXT-X-PART-INF`, blocking reload qua `_HLS_msn`/`_HLS_part`) chỉ giữ vài giây nội dung tại mỗi thời điểm — `#EXT-X-MEDIA-SEQUENCE` tăng dần, segment cũ rơi khỏi cửa sổ và trả 404. **Không tồn tại một tập segment cố định để tải**, nên toàn bộ giả định của trang Merge (parse một lần → biết `total` → pool tải → nối → remux) sai từ gốc. Cần vòng lặp: refetch manifest theo chu kỳ, phát hiện segment mới theo media-sequence, append, tới khi người dùng dừng.
+
+**Vì sao tách phase riêng, không gộp vào 10.1:** pause/resume/stop **cần cho MỌI loại video**, không riêng stream trực tiếp — một VOD 2GB đang tải dở cũng cần dừng được. Nhét nó vào cùng lúc với vòng lặp live sẽ trộn hai vấn đề độc lập.
+
+**Điểm quyết định — hai đường tải có chi phí RẤT khác nhau cho tính năng này:**
+- **`chrome.downloads`** (đường Dashboard's smart-download dùng cho file trực tiếp): pause/resume/cancel là API **có sẵn của trình duyệt** (`chrome.downloads.pause/resume/cancel`), gần như không tốn gì để hỗ trợ.
+- **Trang Merge (pool segment + OPFS + ffmpeg)**: **phải tự implement toàn bộ** — cờ hủy cho `run()`'s worker pool (hiện chỉ có `cancelled` nội bộ khi lỗi, không có đường ngoài vào), giữ `opfsRun` sống qua lần pause thay vì `abort()`, khôi phục offset ghi, và một kênh điều khiển từ Side Panel vào Tab (hiện `postProgress` chỉ chảy MỘT chiều Tab → Side Panel). Đây là phần lớn công sức của phase này.
+
+**Chưa quyết:** stream trực tiếp thì "xong" nghĩa là gì (người dùng bấm stop? tới `#EXT-X-ENDLIST`? giới hạn thời lượng?), và output ghi dần vào OPFS thì remux ở thời điểm nào.
+
+### 10.2. Lọc quảng cáo cho đúng hình dạng URL này — làm SAU khi 10.1 xong
+
+Các stream gặp trong đợt này (`growcdnssedge`, `sacdnssedge`) phần lớn là quảng cáo, nhưng **cố ý chưa lọc** — cần chúng làm ca thử để hoàn thiện logic bắt link trước đã. Sau khi họ URL này chạy đúng, quay lại siết lọc, với hai điểm đã biết:
+
+- **Ba nguồn phát hiện bất đồng.** Đường `webRequest` kiểm `initiator` (mục 5.2's `isJunkRequest(url, initiator)`), nên một stream do iframe quảng cáo phát (quan sát thật: `origin: https://creative.mavrtracktor.com`, khớp `AD_HOSTNAME_PREFIXES`'s `creative.`) bị chặn đúng. Nhưng đường MAIN-world/DOM truyền `pageUrl` là URL trang chủ, không phải iframe — nên **cùng một stream lọt hay bị chặn tùy nguồn nào bắt được trước**. Không nhất quán là bug, bất kể lọc chặt hay lỏng.
+- **Không thêm domain vào `AD_NETWORK_DOMAINS` cho ca này.** `video.sacdnssedge.com` vượt qua cả bốn bộ lọc hiện có và đó là hành vi ĐÚNG — tên miền/đường dẫn của nó sạch. Cần tín hiệu khác (initiator frame, hoặc quan hệ với thẻ VAST/VPAID đã thấy trên trang), không phải nối dài danh sách tên miền.
