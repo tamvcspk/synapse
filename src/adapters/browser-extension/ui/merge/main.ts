@@ -95,6 +95,20 @@ async function findReplayHeaders(url: string): Promise<Record<string, string> | 
   return all.find((m) => m.url === url || m.variants?.some((v) => v.url === url))?.requestHeaders;
 }
 
+/** This Tab's own id, needed to scope the header-replay rule to the fetches THIS page makes —
+ * `TAB_ID_NONE` only covers the background service worker's own requests, never an extension page
+ * rendered in a tab (see syncHeaderReplayRule's doc comment; this was why every segment download
+ * went out without the captured Referer/Origin and 403'd on hotlink-protected CDNs). Resolved once,
+ * lazily — `chrome.tabs.getCurrent()` needs no `tabs` permission. */
+let selfTabIdPromise: Promise<number[]> | undefined;
+function selfTabIds(): Promise<number[]> {
+  selfTabIdPromise ??= chrome.tabs
+    .getCurrent()
+    .then((tab) => (tab?.id !== undefined ? [tab.id] : []))
+    .catch(() => []);
+  return selfTabIdPromise;
+}
+
 /** No-ops when there are no captured headers for this download, or this URL's host already has a
  * rule synced this run (segments overwhelmingly share one host with the manifest — this avoids
  * hundreds of redundant chrome.declarativeNetRequest calls for a long segment list). */
@@ -108,7 +122,7 @@ async function replayHeadersFor(url: string): Promise<void> {
   }
   if (replayHeaderHostsSynced.has(host)) return;
   replayHeaderHostsSynced.add(host);
-  await syncHeaderReplayRule(host, replayHeaders);
+  await syncHeaderReplayRule(host, replayHeaders, await selfTabIds());
 }
 
 /**

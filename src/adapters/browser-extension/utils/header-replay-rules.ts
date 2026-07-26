@@ -47,14 +47,26 @@ function ruleIdFor(host: string): number {
 }
 
 /**
- * Syncs (adds/replaces) a session rule so the extension's OWN subsequent requests to `host`
- * (`tabIds: [TAB_ID_NONE]` — a real page's requests for the same host are untouched) get `headers`
- * set. Idempotent per host — safe to call before every fetch to that host; only actually talks to
- * chrome.declarativeNetRequest when the header set for that host changed. Callable from any
- * extension context with the `declarativeNetRequest` permission (background or an extension page
- * like ui/merge — this isn't background-only, unlike webrequest-media-observer.ts).
+ * Syncs (adds/replaces) a session rule so the extension's OWN subsequent requests to `host` get
+ * `headers` set — a real page's requests for the same host stay untouched. Idempotent per host —
+ * safe to call before every fetch to that host; only actually talks to chrome.declarativeNetRequest
+ * when the header set for that host changed. Callable from any extension context with the
+ * `declarativeNetRequest` permission (background or an extension page like ui/merge — this isn't
+ * background-only, unlike webrequest-media-observer.ts).
+ *
+ * `TAB_ID_NONE` (-1) alone is NOT enough scoping, and getting this wrong fails silently as a 403:
+ * it only matches requests that originate from no tab at all (the background service worker's own
+ * `fetch()`, e.g. network-sniffer's `inspectStreamEntry`). An EXTENSION PAGE rendered in a tab —
+ * ui/merge, which is where every segment download actually happens — issues its `fetch()` calls
+ * with that tab's own positive tabId, so the rule never matched them and the hotlink-protected CDN
+ * saw `Origin: chrome-extension://<id>` with no `Referer`. Callers running in a tab must pass their
+ * own `chrome.tabs.getCurrent()` id via `extraTabIds` (no `tabs` permission needed for that call).
  */
-export async function syncHeaderReplayRule(host: string, headers: Record<string, string>): Promise<void> {
+export async function syncHeaderReplayRule(
+  host: string,
+  headers: Record<string, string>,
+  extraTabIds: number[] = [],
+): Promise<void> {
   if (Object.keys(headers).length === 0) return;
   const id = ruleIdFor(host);
   const requestHeaders: chrome.declarativeNetRequest.ModifyHeaderInfo[] = Object.entries(headers).map(
@@ -68,7 +80,7 @@ export async function syncHeaderReplayRule(host: string, headers: Record<string,
         {
           id,
           priority: 1,
-          condition: { requestDomains: [host], tabIds: [chrome.tabs.TAB_ID_NONE] },
+          condition: { requestDomains: [host], tabIds: [chrome.tabs.TAB_ID_NONE, ...extraTabIds] },
           action: { type: chrome.declarativeNetRequest.RuleActionType.MODIFY_HEADERS, requestHeaders },
         },
       ],
