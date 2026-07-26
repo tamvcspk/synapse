@@ -16,6 +16,15 @@ export interface DetectedMedia {
    * anything. `undefined` means unknown (only ever computed for the `webRequest`-sourced path,
    * which is the only source with a tabId+initiator in hand), not "known first-party". */
   thirdParty?: boolean;
+  /** The TOP-LEVEL url of the tab this request was seen in — distinct from `pageUrl`, which is the
+   * initiating frame's origin. For media loaded by a cross-origin iframe the two disagree, and only
+   * this one answers "which tab is this on": a `<video>` inside an ad/embed iframe reports
+   * `pageUrl: https://<iframe-origin>` while the user is looking at a completely different host.
+   * The Side Panel's per-tab scoping (docs/ROADMAP.md §6.3) compared `pageUrl`'s origin against the
+   * active tab's and therefore hid every one of those entries — detected, stored, and invisible.
+   * Absent when the tab's url couldn't be read (chrome:// page, tab closed between detection and
+   * lookup) or for detection sources with no tabId in hand. */
+  tabUrl?: string;
   /** docs/ROADMAP.md #7.4 — best-effort signal that this URL's query string carries a signed/expiry
    * key (S3-style presigned URL, CDN token-auth, etc.) — see shared/signed-url-detector.ts. A LABEL,
    * not a filter (same reasoning as `thirdParty` above): a legitimate video being served behind a

@@ -454,3 +454,23 @@ Các stream gặp trong đợt này (`growcdnssedge`, `sacdnssedge`) phần lớ
 
 - **Ba nguồn phát hiện bất đồng.** Đường `webRequest` kiểm `initiator` (mục 5.2's `isJunkRequest(url, initiator)`), nên một stream do iframe quảng cáo phát (quan sát thật: `origin: https://creative.mavrtracktor.com`, khớp `AD_HOSTNAME_PREFIXES`'s `creative.`) bị chặn đúng. Nhưng đường MAIN-world/DOM truyền `pageUrl` là URL trang chủ, không phải iframe — nên **cùng một stream lọt hay bị chặn tùy nguồn nào bắt được trước**. Không nhất quán là bug, bất kể lọc chặt hay lỏng.
 - **Không thêm domain vào `AD_NETWORK_DOMAINS` cho ca này.** `video.sacdnssedge.com` vượt qua cả bốn bộ lọc hiện có và đó là hành vi ĐÚNG — tên miền/đường dẫn của nó sạch. Cần tín hiệu khác (initiator frame, hoặc quan hệ với thẻ VAST/VPAID đã thấy trên trang), không phải nối dài danh sách tên miền.
+
+### 10.3. Media MSE không lộ manifest — lớp URL CHƯA TỪNG bắt được
+
+Phân biệt với 10.1/10.2: đó là stream đã bắt được rồi, còn đây là lớp mà **không cơ chế nào hiện có nhìn thấy**. Ca thật: một `<video src="blob:...">` trong iframe, cùng trang với một `<video>` `.mp4` trần (họ `sacdnssedge`) — cái `.mp4` bắt được bình thường (`observed`/`handled` xác nhận), cái `blob:` thì không có URL nào tương ứng xuất hiện ở đâu cả.
+
+**`blob:` tự nó không phải thứ cần bắt và cũng không phải obfuscation** — `URL.createObjectURL(mediaSource)` là handle CỤC BỘ tới object trong bộ nhớ trang, sau nó không có tài nguyên mạng nào. Điều này đã ghi ở 7.3 và không đổi. Vấn đề là URL mạng NUÔI MediaSource đó không được nhận diện, vì ba lý do độc lập:
+
+- **Manifest có thể không phải `.m3u8`/`.mpd`.** Player MSE tự viết hoàn toàn có thể lấy danh sách chunk từ một endpoint JSON thường (`/api/playinfo?id=...`). `classifyMediaUrl` (chỉ nhìn đuôi) lẫn `classifyMediaMimeType` (`application/json`) đều đúng khi trả `undefined` — không có gì sai để sửa ở đó, chỉ là hai cơ chế này không phủ được ca này.
+- **Magic-bytes không nhận ra chunk MSE.** [media-magic-bytes.ts](../src/shared/media-magic-bytes.ts) nhận `ftyp` (init segment fMP4) và MPEG-TS, nhưng một media segment fMP4 bắt đầu bằng `moof`/`styp` thì **rơi vào `undefined`** — không phải bị loại có chủ đích như `'segment'` (MPEG-TS), mà là không nhận ra. Chunk MSE phần lớn có hình dạng này.
+- **Probe chỉ chạy MỘT LẦN cho mỗi origin, vĩnh viễn.** `probedMagicByteOrigins` ([network-sniffer/index.ts](../src/adapters/browser-extension/background/modules/network-sniffer/index.ts)) đánh dấu origin ngay khi probe, **bất kể kết quả**. Nếu request mù đầu tiên tới origin đó là một lệnh API bình thường, origin bị "đốt" và mọi chunk media sau đó không bao giờ được probe nữa trong vòng đời service worker. Đây là lỗi thiết kế rõ ràng, và một mình nó đủ giải thích "chưa từng bắt được".
+
+**Sửa được ngay, chưa làm:** (i) chỉ đánh dấu `probedMagicByteOrigins` khi probe thật sự KHÔNG tìm thấy gì có ích, hoặc đổi sang cap theo số lần probe/origin thay vì cấm tuyệt đối; (ii) thêm `styp`/`moof` vào magic-bytes như một kind mới (không phải `'video'` — chúng không tự phát được, cần init segment).
+
+**Đường tổng quát thật sự là 7.3(b) — hook `SourceBuffer.appendBuffer`.** Mục 7.3 xếp nó là "đường chót cho trang không lộ manifest nào" và ghi "Chưa gặp ca thật nào bắt buộc phải dùng" — **mệnh đề đó nay đã sai**, đây chính là ca đó. Mọi cân nhắc chi phí ở 7.3(b) (chỉ lấy được phần đã phát, không nhanh hơn tốc độ xem, tốn kênh structured-clone, phải remux nếu nhiều SourceBuffer) vẫn nguyên giá trị — nên nó vẫn là lựa chọn cuối, nhưng lý do hoãn "chưa có ca thật" thì không còn.
+
+### 10.4. Scope theo tab mới sửa được một nửa
+
+`DetectedMedia.tabUrl` (url top-level của tab, phân biệt với `pageUrl` = origin của frame phát request) đã thêm và Side Panel đã scope theo nó — nhưng **chỉ đường webRequest có `tabId` để tra ra**. Hai nguồn còn lại (`report-dom-media`, `report-main-world-media`) gửi `pageUrl = location.href` của chính frame, không có `tabUrl`, nên vẫn rơi vào fallback cũ và **vẫn bị ẩn khi ở trong iframe khác origin**. Đúng là đường mà media MSE/`blob:` đi qua (mục 4.1), tức 10.3 và mục này chồng lên nhau trên cùng một ca.
+
+Hướng: background's `chrome.runtime.onMessage` listener có sẵn `sender.tab.url` (top-level, kể cả khi message đến từ iframe con) — cần đưa được giá trị đó vào entry, mà `run()` của Module thì không nhận `sender`. Chưa chọn cách nối.

@@ -172,6 +172,20 @@ function classifyDetection(req: ObservedRequest): MediaKind | undefined {
  * — it runs only on the reject path, and keeping the hot path's shape unchanged is worth the few
  * duplicated string comparisons.
  */
+/**
+ * Whether a rejected request is worth RECORDING a reason for. The observer no longer filters by
+ * resource type at the browser level (see webrequest-media-observer.ts), so every stylesheet, script
+ * and tracking pixel now reaches the reject path — logging all of them would push the one URL being
+ * investigated out of the 100-entry ring buffer within a second of page load, i.e. break the
+ * diagnostic in exactly the case it exists for. Records only what a reasonable person would expect
+ * to see listed: something whose URL or Content-Type says media.
+ */
+function isWorthExplaining(req: ObservedRequest): boolean {
+  if (classifyMediaUrl(req.url)) return true;
+  const mime = req.contentType?.split(';')[0]?.trim().toLowerCase();
+  return mime !== undefined && (mime.startsWith('video/') || mime.startsWith('audio/') || mime.includes('mpegurl') || mime.includes('dash+xml'));
+}
+
 function explainDetectionRejection(req: ObservedRequest): string {
   if (isJunkUrl(req.url)) {
     const which = isAdNetworkDomain(req.url)
@@ -204,15 +218,16 @@ function explainDetectionRejection(req: ObservedRequest): string {
  * service worker has restarted. Read it from the background console via
  * `globalThis.__synapseRejectedMedia` (see the assignment below). */
 const MAX_RECORDED_REJECTIONS = 100;
-const recentRejections: { url: string; reason: string; at: string }[] = [];
+const recentRejections: { url: string; reason: string; resourceType: string; at: string }[] = [];
 
 function recordRejection(req: ObservedRequest, reasonOverride?: string): void {
+  if (reasonOverride === undefined && !isWorthExplaining(req)) return;
   const reason = reasonOverride ?? explainDetectionRejection(req);
-  recentRejections.push({ url: req.url, reason, at: new Date().toISOString() });
+  recentRejections.push({ url: req.url, reason, resourceType: req.resourceType, at: new Date().toISOString() });
   if (recentRejections.length > MAX_RECORDED_REJECTIONS) recentRejections.shift();
-  // console.debug, not warn/log: this fires for every non-media request in the observed resource
-  // types, so it must stay off by default — Chrome DevTools hides Verbose unless asked for it.
-  console.debug(`Synapse: not listed as media — ${reason}\n  ${req.url}`);
+  // console.debug, not warn/log: still one line per media-shaped request that didn't make the list,
+  // which is common on an ad-heavy page — Chrome DevTools hides Verbose unless asked for it.
+  console.debug(`Synapse: not listed as media (${req.resourceType}) — ${reason}\n  ${req.url}`);
 }
 
 // Debug-only handle on the background service worker's own global — the ring buffer is useless
@@ -230,7 +245,14 @@ function recordRejection(req: ObservedRequest, reasonOverride?: string): void {
  * extension is no help either — is the one real gap: a hls.js/dash.js-style manifest or a media file
  * served with no useful Content-Type at all.
  */
+// The resource types this probe is willing to spend a fetch on. Pinned here now that the observer
+// reports EVERY type (see webrequest-media-observer.ts): without it, "no Content-Type and no
+// extension" would newly match fonts, beacons and pings, turning one page load into a burst of
+// speculative range requests. This list is the same set the browser-level filter used to enforce.
+const PROBEABLE_RESOURCE_TYPES: readonly string[] = ['media', 'xmlhttprequest', 'object', 'other'];
+
 function shouldProbeMagicBytes(req: ObservedRequest): boolean {
+  if (!PROBEABLE_RESOURCE_TYPES.includes(req.resourceType)) return false;
   if (isJunkRequest(req.url, req.initiator)) return false;
   if (classifyMediaUrl(req.url)) return false;
   const mime = req.contentType?.split(';')[0]?.trim().toLowerCase();
@@ -299,13 +321,13 @@ interface ReportMainWorldMediaCommand {
  * DetectedMedia.thirdParty's doc comment for why hard-filtering on this would be wrong). Returns
  * `undefined` (unknown, not a claim either way) when the tab's URL can't be read (e.g. a chrome://
  * page, or the tab closed between detection and this lookup) rather than guessing. */
-async function isThirdPartyInitiator(tabId: number, initiator: string): Promise<boolean | undefined> {
+async function describeTabContext(tabId: number, initiator: string): Promise<{ tabUrl?: string; thirdParty?: boolean }> {
   try {
     const tab = await chrome.tabs.get(tabId);
-    if (!tab.url) return undefined;
-    return new URL(initiator).hostname !== new URL(tab.url).hostname;
+    if (!tab.url) return {};
+    return { tabUrl: tab.url, thirdParty: new URL(initiator).hostname !== new URL(tab.url).hostname };
   } catch {
-    return undefined;
+    return {};
   }
 }
 
@@ -600,7 +622,7 @@ function handleObservedRequest(req: ObservedRequest): void {
     }
     // Only computable when the observer gave us an initiator — the only source with a tabId+initiator
     // in hand (docs/ROADMAP.md #4.1's third-party signal).
-    const thirdParty = req.initiator ? await isThirdPartyInitiator(req.tabId, req.initiator) : undefined;
+    const { tabUrl, thirdParty } = req.initiator ? await describeTabContext(req.tabId, req.initiator) : {};
     // exactOptionalPropertyTypes: only include a field when actually available, never `undefined`.
     const media: DetectedMedia = {
       id: crypto.randomUUID(),
@@ -608,6 +630,7 @@ function handleObservedRequest(req: ObservedRequest): void {
       kind,
       detectedAt: new Date().toISOString(),
       ...(req.initiator ? { pageUrl: req.initiator } : {}),
+      ...(tabUrl !== undefined ? { tabUrl } : {}),
       ...(thirdParty !== undefined ? { thirdParty } : {}),
       ...(looksLikeSignedUrl(req.url) ? { expiring: true } : {}),
       // docs/ROADMAP.md #7.1 — only the webRequest source ever has the original request's own headers
@@ -652,13 +675,51 @@ function setSniffingActive(active: boolean): void {
  * no-op call per observed request, against the alternative of re-entering the remove/re-add cycle
  * that caused the lost detections in the first place.
  */
+/**
+ * Raw, UNFILTERED record of what chrome.webRequest actually handed this module, written before any
+ * gating or classification.
+ *
+ * `recentRejections` cannot answer the question that keeps coming up — "the URL is in DevTools but
+ * nowhere in Synapse" — because it only records requests that reached the reject path AND looked
+ * media-shaped. An empty result there is ambiguous between three very different states: the listener
+ * never fired, the module is inactive, or the request was seen and dropped. This distinguishes them,
+ * and is deliberately unconditional: a diagnostic that shares the filters of the thing it is
+ * diagnosing cannot falsify it.
+ */
+const MAX_OBSERVED_URLS = 300;
+const observedUrls: { url: string; resourceType: string; tabId: number }[] = [];
+const snifferStats = { observed: 0, buffered: 0, droppedInactive: 0, handled: 0 };
+
 ensureNetworkObserver((req) => {
-  if (sniffingActive === false) return;
+  snifferStats.observed++;
+  observedUrls.push({ url: req.url, resourceType: req.resourceType, tabId: req.tabId });
+  if (observedUrls.length > MAX_OBSERVED_URLS) observedUrls.shift();
+
+  if (sniffingActive === false) {
+    snifferStats.droppedInactive++;
+    return;
+  }
   if (sniffingActive === undefined) {
+    snifferStats.buffered++;
     if (pendingObserved.length < MAX_PENDING_OBSERVED) pendingObserved.push(req);
     return;
   }
+  snifferStats.handled++;
   handleObservedRequest(req);
+});
+
+// Debug-only handle, same posture as __synapseRejectedMedia. `active` is a getter so it reports the
+// flag's value at read time rather than at install time (it is still `undefined` when this runs).
+Object.defineProperty(globalThis, '__synapseSniffer', {
+  value: {
+    stats: snifferStats,
+    observedUrls,
+    rejected: recentRejections,
+    get active() {
+      return sniffingActive;
+    },
+  },
+  configurable: true,
 });
 
 // Resolves the activation flag directly instead of waiting for the bus 'sync' that background/

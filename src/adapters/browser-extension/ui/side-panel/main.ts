@@ -56,15 +56,20 @@ async function activeTabOrigin(): Promise<string | undefined> {
 async function load(): Promise<void> {
   const origin = await activeTabOrigin();
   const all = await listDetectedMedia();
-  // `pageUrl` is an origin already (webRequest's `initiator`), not a full URL with path — compare
-  // by origin, not exact string, and drop entries with no `pageUrl` at all (nothing to scope them
-  // to — see store.ts's doc comment on this being a rare case).
+  // Scoping prefers `tabUrl` (the TAB's own top-level url) over `pageUrl` (the INITIATING FRAME's
+  // origin). They differ exactly when a cross-origin iframe loads the media — an embedded player, or
+  // an ad frame — and comparing `pageUrl` there asks "was this served by the site you're looking
+  // at?", which is not the question. The answer was `false` for every such entry, so the Side Panel
+  // hid media that had been detected and stored correctly all along. `pageUrl` stays as the fallback
+  // for entries recorded before `tabUrl` existed and for the DOM/MAIN-world sources, which have no
+  // tabId to resolve one from.
   items = origin
     ? collapseVariantShadowedEntries(
         all.filter((m) => {
-          if (!m.pageUrl) return false;
+          const scopeUrl = m.tabUrl ?? m.pageUrl;
+          if (!scopeUrl) return false;
           try {
-            return new URL(m.pageUrl).origin === origin;
+            return new URL(scopeUrl).origin === origin;
           } catch {
             return false;
           }

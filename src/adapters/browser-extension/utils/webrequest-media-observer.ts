@@ -68,7 +68,7 @@ function extractReplayableHeaders(headers: chrome.webRequest.HttpHeader[] | unde
 }
 
 function onSendHeaders(details: chrome.webRequest.WebRequestHeadersDetails): void {
-  if (details.tabId < 0) return; // mirrors onHeadersReceived's own guard — not a detection candidate either way
+  if (details.initiator === EXTENSION_ORIGIN) return; // mirrors onHeadersReceived's own guard
   const headers = extractReplayableHeaders(details.requestHeaders);
   if (Object.keys(headers).length === 0) return;
   pendingRequestHeaders.set(details.requestId, headers);
@@ -83,7 +83,11 @@ function onSendHeaders(details: chrome.webRequest.WebRequestHeadersDetails): voi
 const EXTENSION_ORIGIN = `chrome-extension://${chrome.runtime.id}`;
 
 function onHeadersReceived(details: chrome.webRequest.WebResponseHeadersDetails): void {
-  if (details.tabId < 0) return; // negative tabId = not associated with a tab (e.g. extension's own requests)
+  // No `tabId < 0` guard: that used to stand in for "the extension's own requests", a job
+  // EXTENSION_ORIGIN now does precisely. What it ALSO discarded, silently, was every request a page's
+  // own Service Worker issued — Chrome attributes those to no tab — which for an SW-proxied player is
+  // the entire media stream. Reporting them costs nothing: `notifyTabMediaFound(-1)` and
+  // `isThirdPartyInitiator(-1, ...)` both already fail soft.
   if (details.initiator === EXTENSION_ORIGIN) return; // see EXTENSION_ORIGIN — Synapse's own fetches, not detections
   // exactOptionalPropertyTypes: only include `initiator`/`contentType` when actually provided,
   // rather than assigning `undefined` to an optional field explicitly.
@@ -106,18 +110,18 @@ export function ensureNetworkObserver(onDetected: (req: ObservedRequest) => void
   if (installed) return;
   installed = true;
 
-  chrome.webRequest.onHeadersReceived.addListener(
-    onHeadersReceived,
-    { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'object', 'other'] },
-    ['responseHeaders'],
-  );
+  // No `types` filter. The old one (`media`/`xmlhttprequest`/`object`/`other`) traded away the one
+  // thing this mechanism cannot recover from: a resource type it excludes is dropped by the BROWSER,
+  // so the callback never runs and nothing — not even the caller's rejection log — records that the
+  // request existed. That turns any misclassification into an unfalsifiable "it just isn't detected",
+  // which is exactly the state a `<video>` inside a cross-origin ad iframe left us in. Chrome's own
+  // classification is not something to bet correctness on; filtering now happens in the policy layer
+  // where a rejection is at least VISIBLE. The cost is a few hundred extra callback invocations per
+  // page load, each a handful of string comparisons.
+  chrome.webRequest.onHeadersReceived.addListener(onHeadersReceived, { urls: ['<all_urls>'] }, ['responseHeaders']);
   // 'extraHeaders' is required on Chrome to see Referer/Origin/User-Agent at all here — without it
   // these are silently withheld from onSendHeaders even though 'requestHeaders' is requested.
-  chrome.webRequest.onSendHeaders.addListener(
-    onSendHeaders,
-    { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'object', 'other'] },
-    ['requestHeaders', 'extraHeaders'],
-  );
+  chrome.webRequest.onSendHeaders.addListener(onSendHeaders, { urls: ['<all_urls>'] }, ['requestHeaders', 'extraHeaders']);
 }
 
 /** Removes the listener — call once the Module is no longer active. */
