@@ -114,9 +114,10 @@ function parseAttributeList(tagBody: string): Record<string, string> {
  * docs/ROADMAP.md #7.4 — `isLive` (media playlists only) is `true` unless `#EXT-X-ENDLIST` is
  * present, OR `#EXT-X-PLAYLIST-TYPE:EVENT` is present (an EVENT playlist only ever appends segments
  * until its own ENDLIST shows up — treated as still-live here too, conservatively). This is the
- * safety gate the Merge page's segment-URL-expired recovery (ui/merge/main.ts) checks before ever
- * remapping segments by index after a manifest refetch: a live playlist's window slides, so an index
- * from an old fetch no longer names the same segment in a new one.
+ * safety gate the download engine's segment-URL-expired recovery (utils/download-engine.ts, moved
+ * off `ui/merge/main.ts` by docs/ROADMAP.md §8.1) checks before ever remapping segments by index
+ * after a manifest refetch: a live playlist's window slides, so an index from an old fetch no longer
+ * names the same segment in a new one.
  */
 export function parseM3u8(text: string, baseUrl: string): ParsedManifest {
   const lines = text.split(/\r?\n/);

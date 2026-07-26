@@ -68,7 +68,11 @@ export default defineManifest({
   // 'downloads' backs the Management View's generic per-row `rowActions` 'download' kind
   // (kernel/ui-schema.ts), first used by network-sniffer's "Download" action on a detected media URL.
   // 'sidePanel' backs network-sniffer's Side Panel (docs/ROADMAP.md #6.2).
-  permissions: ['storage', 'userScripts', 'scripting', 'debugger', 'declarativeNetRequest', 'webRequest', 'downloads', 'sidePanel'],
+  // 'offscreen' backs the HLS download engine's singleton Offscreen Document (docs/ROADMAP.md §8.1,
+  // utils/offscreen-manager.ts) — gives the background service worker a DOM/Worker/WebAssembly
+  // context outside any visible Tab, so ffmpeg.wasm and Cancel/Pause/Resume survive a user
+  // accidentally closing whatever Tab they're looking at.
+  permissions: ['storage', 'userScripts', 'scripting', 'debugger', 'declarativeNetRequest', 'webRequest', 'downloads', 'sidePanel', 'offscreen'],
   // chrome.scripting.registerContentScripts (used for the MAIN-world interceptor) needs its own
   // host permission grant — a static content_scripts.matches entry doesn't satisfy it, even though
   // both show the same install-time warning. Without this, registerContentScripts resolves with no

@@ -100,13 +100,15 @@ export interface UICollectionSchema {
    * `chrome.runtime.getURL`) with `item[urlField]` appended as a `?url=` query param (first use:
    * network-sniffer's "Download (merged)" action opening the Merge page, docs/ROADMAP.md #5.3).
    * `'smart-download'` merges the `'download'`/`'open-tab'` duality into a single button: picks
-   * `chrome.downloads.download` vs `chrome.tabs.create`'ing `path` at runtime, based on whether
-   * `item[kindField]`'s value is one of `openTabKinds` (first use: network-sniffer's single
-   * "Download" button replacing separate "Download"/"Download (merged)" buttons, docs/ROADMAP.md
-   * §6.8 — the Dashboard table reaching the same "one action" UX the Side Panel already has). No
-   * visibility condition on any kind — every kind here is expected to no-op/error gracefully on
-   * rows it doesn't apply to (e.g. Inspect or Merge on a non-manifest URL), rather than needing
-   * per-row show/hide wiring for a single button. */
+   * `chrome.downloads.download` vs sending a `synapse:download-engine-command` START message at
+   * runtime, based on whether `item[kindField]`'s value is one of `engineKinds` (first use:
+   * network-sniffer's single "Download" button replacing separate "Download"/"Download (merged)"
+   * buttons, docs/ROADMAP.md §6.8 — the Dashboard table reaching the same "one action" UX the Side
+   * Panel already has). Renamed from `openTabKinds`/dropped its `path` field when docs/ROADMAP.md
+   * §8.1 moved the HLS download engine off a Tab (`ui/merge/`) into a singleton Offscreen Document —
+   * there's no page left to `chrome.tabs.create` for these kinds. No visibility condition on any
+   * kind — every kind here is expected to no-op/error gracefully on rows it doesn't apply to (e.g. a
+   * non-manifest URL), rather than needing per-row show/hide wiring for a single button. */
   rowActions?: UIRowAction[];
   /** Names an item field holding `{url: string; label: string}[]` — when present, rendered as its
    * own extra column: every entry shows as its own small clickable link instead of going through
@@ -125,7 +127,7 @@ export type UIRowAction =
   | { kind: 'download'; label: string; urlField: string }
   | { kind: 'trigger'; label: string; op: string }
   | { kind: 'open-tab'; label: string; urlField: string; path: string }
-  | { kind: 'smart-download'; label: string; urlField: string; kindField: string; openTabKinds: string[]; path: string };
+  | { kind: 'smart-download'; label: string; urlField: string; kindField: string; engineKinds: string[] };
 
 export interface UIActionDef {
   /** Passed as `{ action: id }` in `run()`'s input (docs/ROADMAP.md #1's Crawl & Convert Site) —

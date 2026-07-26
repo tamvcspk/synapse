@@ -123,13 +123,17 @@ export async function describeHeaderReplay(host: string): Promise<{
  * A rule's identity is (tab scope, host) — NOT host alone.
  *
  * This mechanism is called from several extension contexts at once (the background service worker's
- * `inspectStreamEntry`, and every open ui/merge tab), each of which needs a rule for the SAME host
- * but scoped to a DIFFERENT tab. The previous per-context `nextRuleId` counter starting at 1 meant
- * they all minted id 1 for their first host and then overwrote each other's rule in the single,
- * extension-wide session ruleset — last writer wins. Observed exactly that: a Merge tab wrote
- * `tabIds: [-1, <its tab>]`, background's auto-inspect then rewrote id 1 as `tabIds: [-1]`, and
- * every segment fetch from that tab silently stopped getting its Referer/Origin. The failure is
- * timing-dependent, which is why the same stream "worked yesterday" and 403'd today.
+ * `inspectStreamEntry`, and — historically, before docs/ROADMAP.md §8.1 moved the download engine
+ * off a Tab into a singleton Offscreen Document — every open ui/merge tab), each of which needs a
+ * rule for the SAME host but scoped to a DIFFERENT tab. The previous per-context `nextRuleId`
+ * counter starting at 1 meant they all minted id 1 for their first host and then overwrote each
+ * other's rule in the single, extension-wide session ruleset — last writer wins. Observed exactly
+ * that: the old Merge tab wrote `tabIds: [-1, <its tab>]`, background's auto-inspect then rewrote id
+ * 1 as `tabIds: [-1]`, and every segment fetch from that tab silently stopped getting its
+ * Referer/Origin. The failure is timing-dependent, which is why the same stream "worked yesterday"
+ * and 403'd today. The mechanism (per-scope rule ids below) stays generically useful for any future
+ * caller that isn't `TAB_ID_NONE`-scoped, even though the download engine itself no longer is one
+ * (see the `tabIds` doc comment on `syncHeaderReplayRule` below).
  */
 function scopeKeyFor(host: string, tabIds: number[]): string {
   return `${[...tabIds].sort((a, b) => a - b).join(',')}|${host}`;
@@ -167,16 +171,19 @@ function ruleIdFor(host: string, tabIds: number[]): number {
  * `headers` set — a real page's requests for the same host stay untouched. Idempotent per host —
  * safe to call before every fetch to that host; only actually talks to chrome.declarativeNetRequest
  * when the header set for that host changed. Callable from any extension context with the
- * `declarativeNetRequest` permission (background or an extension page like ui/merge — this isn't
- * background-only, unlike webrequest-media-observer.ts).
+ * `declarativeNetRequest` permission — not background-only, unlike webrequest-media-observer.ts.
  *
  * `tabIds` defaults to `[TAB_ID_NONE]` (-1), which matches only requests originating from no tab at
  * all — correct for the background service worker's own `fetch()` (network-sniffer's
- * `inspectStreamEntry`) and WRONG for anything else, silently, as a 403. An EXTENSION PAGE rendered
- * in a tab — ui/merge, where every segment download actually happens — issues its `fetch()` calls
- * with that tab's own positive tabId, so the default never matched them and the hotlink-protected
- * CDN saw `Origin: chrome-extension://<id>` with no `Referer`. Such a caller must pass its own
- * `chrome.tabs.getCurrent()` id (that call needs no `tabs` permission).
+ * `inspectStreamEntry`) and, since docs/ROADMAP.md §8.1, ALSO correct for the download engine
+ * (utils/download-engine.ts): it now runs in a singleton Offscreen Document rather than a Tab, and
+ * an offscreen document's own fetches carry no tabId either, so it uses this same default. This
+ * default was WRONG, silently as a 403, for the download engine's PREVIOUS home: an extension page
+ * actually rendered in a Tab (the old `ui/merge`) issues its `fetch()` calls with that tab's own
+ * positive tabId, so the default never matched them and the hotlink-protected CDN saw
+ * `Origin: chrome-extension://<id>` with no `Referer`. Any FUTURE caller that's a real Tab-rendered
+ * page must still pass its own `chrome.tabs.getCurrent()` id explicitly (needs no `tabs`
+ * permission) — this default only ever covers the "no tab" case.
  *
  * Callers pass the COMPLETE list they want matched rather than extra ids appended to -1: a tab's
  * rule has no business also claiming the background's requests, and keeping the scopes disjoint is

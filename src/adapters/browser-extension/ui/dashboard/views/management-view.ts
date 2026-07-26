@@ -64,21 +64,28 @@ export function renderManagementView(
     return haystack.includes(query);
   }
 
-  // `'smart-download'` (docs/ROADMAP.md §6.8) picks direct-download vs. open-tab at click time,
-  // based on the item's own `kindField` value — same decision the Side Panel's single "Download"
-  // button already makes (docs/ROADMAP.md §6). `urlOverride` lets a variants-column link (below)
-  // reuse this exact branching for a specific variant's url instead of the row's own `urlField`.
+  // `'smart-download'` (docs/ROADMAP.md §6.8) picks direct-download vs. engine-command at click
+  // time, based on the item's own `kindField` value — same decision the Side Panel's single
+  // "Download" button already makes (docs/ROADMAP.md §6). `urlOverride` lets a variants-column link
+  // (below) reuse this exact branching for a specific variant's url instead of the row's own
+  // `urlField`. docs/ROADMAP.md §8.1 — `engineKinds` used to `chrome.tabs.create` a Merge Tab; the
+  // HLS engine now runs headless in a singleton Offscreen Document, so this just sends it a START
+  // command instead. `jobId` is the row's own id (`schema.idField`, same convention the Side Panel
+  // uses for its `entryId`) — Dashboard doesn't show progress for this (docs/ROADMAP.md §7.6's
+  // existing "no progress UI here" scope), it only ever fires-and-forgets the start.
   function runSmartDownload(
     action: Extract<UIRowAction, { kind: 'smart-download' }>,
     item: Record<string, unknown>,
     urlOverride?: string,
   ): void {
     const url = urlOverride ?? String(item[action.urlField]);
-    if (action.openTabKinds.includes(String(item[action.kindField]))) {
-      const tabUrl = `${chrome.runtime.getURL(action.path)}?url=${encodeURIComponent(url)}`;
-      // docs/ROADMAP.md #7.6 — background Tab, doesn't steal focus from the Dashboard the user is
-      // looking at (same reasoning as the Side Panel's own smart-download branch).
-      void chrome.tabs.create({ url: tabUrl, active: false });
+    if (action.engineKinds.includes(String(item[action.kindField]))) {
+      void chrome.runtime.sendMessage({
+        type: 'synapse:download-engine-command',
+        op: 'START',
+        jobId: String(item[idField]),
+        url,
+      });
     } else {
       void chrome.downloads.download({ url });
     }

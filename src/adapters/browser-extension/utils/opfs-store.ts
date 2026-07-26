@@ -1,12 +1,14 @@
 /**
- * OPFS-backed sequential file staging for the Merge page's segment download (docs/ROADMAP.md #8.5)
- * — replaces per-segment IndexedDB records (blob-store.ts) with ONE file per run, written via
- * `FileSystemWritableFileStream`. `ffmpeg.writeFile`/MEMFS is still a real wasm-heap ceiling on its
- * own (that part isn't fixable from the staging side), but staging here removes the other half:
- * no N-record IndexedDB roundtrip, and the finished `File` is file-backed —
- * `URL.createObjectURL`/`ffmpeg.mount('WORKERFS', ...)` on it load nothing into RAM up front. That's
- * what makes the "concatenated TS is already a playable file" fast path in ui/merge/main.ts viable
- * for multi-GB streams.
+ * OPFS-backed sequential file staging for the download engine's segment download (docs/ROADMAP.md
+ * #8.5, ported into utils/download-engine.ts by §8.1) — replaces per-segment IndexedDB records
+ * (blob-store.ts) with ONE file per run, written via `FileSystemWritableFileStream`.
+ * `ffmpeg.writeFile`/MEMFS is still a real wasm-heap ceiling on its own (that part isn't fixable
+ * from the staging side), but staging here removes the other half: no N-record IndexedDB roundtrip,
+ * and the finished `File` is file-backed — `URL.createObjectURL`/`ffmpeg.mount('WORKERFS', ...)` on
+ * it load nothing into RAM up front. That's what makes the "concatenated TS is already a playable
+ * file" fast path in download-engine.ts viable for multi-GB streams. `navigator.storage.
+ * getDirectory()` works identically whether the caller is a Tab (the old `ui/merge`) or an Offscreen
+ * Document (§8.1's replacement) — this module needed no changes when the engine moved.
  *
  * `blob-store.ts` (IndexedDB) is untouched — it stays the right tool for http-error-mocker's small
  * one-shot upload blobs; this module exists for a different shape of problem (hundreds of

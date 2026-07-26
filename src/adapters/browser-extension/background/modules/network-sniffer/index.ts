@@ -357,7 +357,7 @@ async function inspectStreamEntry(entry: DetectedMedia, cache: CacheService = ch
     // docs/ROADMAP.md #7.1 — replay the original page request's Referer/Origin/User-Agent before
     // this background fetch, for hosts that hotlink-protect on them. No-op when this entry has no
     // captured headers (the common case). Scoped to entry.url's own host — the manifest and its
-    // segments (fetched later by the Merge page, not here) are typically same-CDN-host.
+    // segments (fetched later by the download engine, not here) are typically same-CDN-host.
     if (entry.requestHeaders) {
       await syncHeaderReplayRule(new URL(entry.url).hostname, entry.requestHeaders);
     }
@@ -365,9 +365,9 @@ async function inspectStreamEntry(entry: DetectedMedia, cache: CacheService = ch
     if (manifest.kind === 'master') {
       await updateDetectedMedia(entry.id, { variants: manifest.variants }, cache);
     } else if (manifest.kind === 'media') {
-      // Segment URLs themselves are re-fetched+parsed by the Merge page (docs/ROADMAP.md #5.3) when
-      // the user actually clicks Download, not stashed here (hundreds of URLs per stream, and stale
-      // the moment the manifest rotates, unlike the count).
+      // Segment URLs themselves are re-fetched+parsed by the download engine (docs/ROADMAP.md
+      // #5.3/§8.1) when the user actually clicks Download, not stashed here (hundreds of URLs per
+      // stream, and stale the moment the manifest rotates, unlike the count).
       await updateDetectedMedia(entry.id, { segmentCount: manifest.segments.length, encrypted: manifest.encrypted }, cache);
     }
     // {kind:'unknown'} — silent no-op, same as a fetch failure below.
@@ -439,23 +439,24 @@ export const NetworkSnifferModule: Module<
     defaultHideField: 'thirdParty',
     // docs/ROADMAP.md §6.8 — single "Download" button, same one-action UX the Side Panel already
     // has (docs/ROADMAP.md §6): `kind:'video'|'audio'` downloads straight via `chrome.downloads`,
-    // `kind:'stream'` opens the Merge tab instead (`openTabKinds`) — no-op/errors gracefully on a
-    // URL that isn't an HLS media playlist (the Merge page's own error state). Manifest inspection
-    // itself is no longer a user-facing rowAction (docs/ROADMAP.md §6.3 — auto-inspect runs
-    // automatically on every `stream`-kind detection now, see inspectStreamEntry above). Reads
-    // `downloadUrl` (below), not `url` — a master-playlist entry's OWN `url` is just the manifest
-    // listing other resolutions, not downloadable/mergeable on its own since §6.3 folded its
-    // variants into `variants` instead of separate rows; `downloadUrl` resolves to the first
-    // variant automatically (same default the Side Panel's own `<select>` starts on) — the
-    // `variantsField` column below lets a row pick a different resolution instead of that default.
+    // `kind:'stream'` sends a `synapse:download-engine-command` START instead (`engineKinds`,
+    // docs/ROADMAP.md §8.1 — the HLS engine runs headless in a singleton Offscreen Document, no Tab
+    // opens anymore) — no-op/errors gracefully on a URL that isn't an HLS media playlist (the
+    // engine's own error event). Manifest inspection itself is no longer a user-facing rowAction
+    // (docs/ROADMAP.md §6.3 — auto-inspect runs automatically on every `stream`-kind detection now,
+    // see inspectStreamEntry above). Reads `downloadUrl` (below), not `url` — a master-playlist
+    // entry's OWN `url` is just the manifest listing other resolutions, not downloadable/mergeable
+    // on its own since §6.3 folded its variants into `variants` instead of separate rows;
+    // `downloadUrl` resolves to the first variant automatically (same default the Side Panel's own
+    // `<select>` starts on) — the `variantsField` column below lets a row pick a different
+    // resolution instead of that default.
     rowActions: [
       {
         kind: 'smart-download',
         label: 'Download',
         urlField: 'downloadUrl',
         kindField: 'kind',
-        openTabKinds: ['stream'],
-        path: 'src/adapters/browser-extension/ui/merge/index.html',
+        engineKinds: ['stream'],
       },
     ],
     // docs/ROADMAP.md §6.8 — one row per video even when its manifest has N resolutions (§6.3

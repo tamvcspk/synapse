@@ -19,9 +19,11 @@ export default defineConfig({
         // Review page (docs/ROADMAP.md #3) — same "extra Vite HTML entry" treatment as `dashboard`
         // above, opened the same way (chrome.tabs.create from the popup), no manifest field fits it.
         review: 'src/adapters/browser-extension/ui/review/index.html',
-        // Merge page (docs/ROADMAP.md #5.3) — same treatment, opened via a `rowActions` 'open-tab'
-        // action (kernel/ui-schema.ts) from the Dashboard's Management View instead of the popup.
-        merge: 'src/adapters/browser-extension/ui/merge/index.html',
+        // Offscreen Document (docs/ROADMAP.md §8.1) — hosts the HLS download engine
+        // (utils/download-engine.ts). Same "extra Vite HTML entry" treatment as the others: an
+        // offscreen document has no manifest field of its own either (unlike `side_panel`), it's
+        // created purely at runtime via chrome.offscreen.createDocument (utils/offscreen-manager.ts).
+        offscreen: 'src/adapters/browser-extension/ui/offscreen/index.html',
       },
     },
   },

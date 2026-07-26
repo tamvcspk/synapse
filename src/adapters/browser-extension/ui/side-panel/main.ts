@@ -3,6 +3,7 @@ import './side-panel.css';
 import van from 'vanjs-core';
 import { collapseVariantShadowedEntries, listDetectedMedia, type DetectedMedia } from '../../background/modules/network-sniffer/store';
 import { DASHBOARD_PATH } from '../dashboard/dashboard-path';
+import type { DownloadEngineCommand, DownloadEngineEvent, DownloadEnginePhase } from '../../../../shared/download-engine-protocol';
 import downloadIconUrl from '../../../../assets/icon/download.svg';
 
 /**
@@ -16,10 +17,6 @@ import downloadIconUrl from '../../../../assets/icon/download.svg';
 
 const { div, h1, p, span, select, option, button, img, progress: progressTag } = van.tags;
 
-// Same literal path network-sniffer/index.ts's 'open-tab' rowAction already uses — no shared
-// constant exists for it (that rowAction is declared inline in the module's uiSchema).
-const MERGE_PATH = 'src/adapters/browser-extension/ui/merge/index.html';
-
 const root = document.getElementById('root')!;
 
 let items: DetectedMedia[] = [];
@@ -27,21 +24,28 @@ let items: DetectedMedia[] = [];
 // UI-only state, never persisted.
 const selectedVariantUrl = new Map<string, string>();
 
-// docs/ROADMAP.md §7.6 — one in-flight background download per detected-media entry id, fed by
-// `synapse:merge-progress` messages from the Merge Tab this panel itself opened (handleDownload
-// below). UI-only, never persisted: reloading the Side Panel just loses the progress display, the
-// background Tab keeps running regardless (same "no persistence" posture as the download itself).
+// docs/ROADMAP.md §7.6/§8.1 — one in-flight download per detected-media entry id (`jobId`), fed by
+// `synapse:download-engine-event` broadcasts from the singleton Offscreen Document's engine
+// (handleDownload below sends the START command that kicks it off). UI-only, never persisted:
+// reloading the Side Panel just loses the progress display, the engine keeps running regardless
+// (same "no persistence" posture §7.6 already accepted, now also covering Pause/Cancel state).
 interface DownloadProgress {
-  phase: 'segments' | 'remux' | 'done' | 'error';
+  phase: DownloadEnginePhase;
   done?: number | undefined;
   total?: number | undefined;
   message?: string | undefined;
-  tabId?: number | undefined;
+  bytesPerSec?: number | undefined;
+  etaMs?: number | undefined;
 }
 const activeDownloads = new Map<string, DownloadProgress>();
-// Gives the 'done'/'error' state a moment on screen before the Tab (and this row's progress UI)
-// disappears — long enough to read "Done"/"Failed: ...", short enough not to feel stuck.
+// Gives the 'done'/'error'/'cancelled' state a moment on screen before this row's progress UI
+// disappears — long enough to read "Done"/"Failed: ..."/"Cancelled", short enough not to feel stuck.
 const DOWNLOAD_SETTLE_DELAY_MS = 1500;
+
+function sendEngineCommand(op: DownloadEngineCommand['op'], jobId: string, url?: string): void {
+  const command: DownloadEngineCommand = { type: 'synapse:download-engine-command', op, jobId, url };
+  void chrome.runtime.sendMessage(command).catch(() => {});
+}
 
 async function activeTabOrigin(): Promise<string | undefined> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -86,54 +90,44 @@ function resolveDownloadUrl(item: DetectedMedia): string {
 function handleDownload(item: DetectedMedia): void {
   if (item.kind === 'stream') {
     if (activeDownloads.has(item.id)) return; // already downloading this entry
-    // DRM guard (`encrypted`) is enforced by the Merge page itself once it re-fetches+parses the
+    // DRM guard (`encrypted`) is enforced by the engine itself once it re-fetches+parses the
     // manifest — not duplicated here (docs/ROADMAP.md §6.3).
     const url = resolveDownloadUrl(item);
-    const tabUrl = `${chrome.runtime.getURL(MERGE_PATH)}?url=${encodeURIComponent(url)}&entryId=${encodeURIComponent(item.id)}`;
-    // docs/ROADMAP.md §7.6 — background Tab (doesn't steal focus), auto-runs on its own once
-    // loaded; this panel just tracks its progress via the message listener below and shows an
-    // inline <progress> bar in place of the Download button until it settles.
+    // docs/ROADMAP.md §8.1 — no Tab opens anymore: this just starts a job in the singleton
+    // Offscreen Document (background/index.ts ensures it exists before forwarding the command).
+    // `jobId` is this entry's own id, same convention the old `entryId` used.
     activeDownloads.set(item.id, { phase: 'segments' });
     render();
-    void chrome.tabs
-      .create({ url: tabUrl, active: false })
-      .then((tab) => {
-        const state = activeDownloads.get(item.id);
-        if (state) state.tabId = tab.id;
-      })
-      .catch(() => {
-        activeDownloads.delete(item.id);
-        render();
-      });
+    sendEngineCommand('START', item.id, url);
     return;
   }
   void chrome.downloads.download({ url: item.url });
 }
 
-/** docs/ROADMAP.md §7.6 — settles the row back to normal after a 'done'/'error' phase: closes the
- * background Tab (best-effort — it may have already closed itself or been closed by the user) and
- * clears the progress state so the Download button comes back. */
+/** docs/ROADMAP.md §7.6/§8.1 — settles the row back to normal after a 'done'/'error'/'cancelled'
+ * phase: clears the progress state so the Download button comes back. No Tab to close anymore — the
+ * engine's own job entry is already gone by the time it emits one of these terminal phases. */
 function settleDownload(entryId: string): void {
   setTimeout(() => {
-    const state = activeDownloads.get(entryId);
-    if (state?.tabId !== undefined) void chrome.tabs.remove(state.tabId).catch(() => {});
     activeDownloads.delete(entryId);
     render();
   }, DOWNLOAD_SETTLE_DELAY_MS);
 }
 
-chrome.runtime.onMessage.addListener((message: Partial<DownloadProgress> & { type?: string; entryId?: string } | undefined) => {
-  if (message?.type !== 'synapse:merge-progress' || !message.entryId || !message.phase) return;
-  const existing = activeDownloads.get(message.entryId);
-  activeDownloads.set(message.entryId, {
+chrome.runtime.onMessage.addListener((message: Partial<DownloadEngineEvent> & { type?: string } | undefined) => {
+  if (message?.type !== 'synapse:download-engine-event' || !message.jobId || !message.phase) return;
+  const existing = activeDownloads.get(message.jobId);
+  activeDownloads.set(message.jobId, {
     ...existing,
     phase: message.phase,
-    done: message.done,
-    total: message.total,
+    done: message.segmentsDone,
+    total: message.segmentsTotal,
     message: message.message,
+    bytesPerSec: message.bytesPerSec,
+    etaMs: message.etaMs,
   });
   render();
-  if (message.phase === 'done' || message.phase === 'error') settleDownload(message.entryId);
+  if (message.phase === 'done' || message.phase === 'error' || message.phase === 'cancelled') settleDownload(message.jobId);
 });
 
 function openDashboard(): void {
@@ -167,13 +161,25 @@ function resolutionSummary(item: DetectedMedia): string | undefined {
   return undefined;
 }
 
-/** docs/ROADMAP.md §7.6 — replaces the Download button while a `kind:'stream'` entry's Merge Tab is
- * running in the background, so the row shows what's happening instead of looking clickable-but-
- * inert. `'segments'`'s `total` is only known once the Merge Tab has fetched+parsed the manifest
- * itself, so it renders a bare "Starting…" line until the first per-segment message arrives. */
+/** "~2m left" / "~45s left" — always prefixed with "~" (docs/ROADMAP.md §8.1: `etaMs` is an
+ * estimate from this job's own observed throughput, never a precise countdown). */
+function formatEta(etaMs: number): string {
+  const totalSeconds = Math.round(etaMs / 1000);
+  if (totalSeconds < 60) return `~${totalSeconds}s left`;
+  const minutes = Math.round(totalSeconds / 60);
+  return `~${minutes}m left`;
+}
+
+/** docs/ROADMAP.md §7.6/§8.1 — replaces the Download button while a `kind:'stream'` entry's engine
+ * job is running, so the row shows what's happening instead of looking clickable-but-inert.
+ * `'segments'`'s `total` is only known once the engine has fetched+parsed the manifest itself, so it
+ * renders a bare "Starting…" line until the first per-segment event arrives. */
 function renderDownloadProgress(state: DownloadProgress) {
   if (state.phase === 'error') {
     return span({ class: 'download-progress-text download-progress-error' }, `Failed: ${state.message ?? 'unknown error'}`);
+  }
+  if (state.phase === 'cancelled') {
+    return span({ class: 'download-progress-text' }, 'Cancelled');
   }
   if (state.phase === 'done') {
     return span({ class: 'download-progress-text' }, 'Done');
@@ -182,10 +188,12 @@ function renderDownloadProgress(state: DownloadProgress) {
     return span({ class: 'download-progress-text' }, 'Remuxing...');
   }
   const total = state.total;
+  const segmentText = total ? `Segment ${state.done ?? 0}/${total}` : 'Starting...';
+  const etaText = state.etaMs !== undefined ? ` (${formatEta(state.etaMs)})` : '';
   return div(
     { class: 'download-progress' },
     total ? progressTag({ value: state.done ?? 0, max: total }) : progressTag(),
-    span({ class: 'download-progress-text' }, total ? `Segment ${state.done ?? 0}/${total}` : 'Starting...'),
+    span({ class: 'download-progress-text' }, state.phase === 'paused' ? `Paused — ${segmentText}` : `${segmentText}${etaText}`),
   );
 }
 
@@ -228,7 +236,34 @@ function renderItem(item: DetectedMedia) {
     // Own full-width row, not sharing .media-item-actions with the resolution <select> — a
     // <progress> bar/status line squeezed into that row's remaining space (next to the select) was
     // cramped and easy to miss.
-    downloadProgress ? div({ class: 'media-item-progress' }, renderDownloadProgress(downloadProgress)) : null,
+    downloadProgress
+      ? div(
+          { class: 'media-item-progress' },
+          renderDownloadProgress(downloadProgress),
+          // docs/ROADMAP.md §8.1 — Pause/Resume/Cancel only make sense while the segment pool is
+          // actually running (or paused mid-run); the engine has no cancellation checkpoint during
+          // 'remux' (ffmpeg has already started), and the terminal phases are about to settle away
+          // on their own.
+          downloadProgress.phase === 'segments' || downloadProgress.phase === 'paused'
+            ? div(
+                { class: 'download-controls' },
+                button(
+                  {
+                    class: 'secondary',
+                    title: downloadProgress.phase === 'paused' ? 'Resume' : 'Pause',
+                    'aria-label': downloadProgress.phase === 'paused' ? 'Resume' : 'Pause',
+                    onclick: () => sendEngineCommand(downloadProgress.phase === 'paused' ? 'RESUME' : 'PAUSE', item.id),
+                  },
+                  downloadProgress.phase === 'paused' ? '▶' : '⏸',
+                ),
+                button(
+                  { class: 'secondary', title: 'Cancel', 'aria-label': 'Cancel', onclick: () => sendEngineCommand('CANCEL', item.id) },
+                  '✕',
+                ),
+              )
+            : null,
+        )
+      : null,
   );
 }
 

@@ -8,6 +8,8 @@ import { BACKGROUND_MODULES } from '../module-registry/background-modules';
 import { setUserScriptsPermissionGranted } from '../module-registry/storage';
 import { DASHBOARD_PATH } from '../ui/dashboard/dashboard-path';
 import { SIDE_PANEL_PATH } from '../ui/side-panel/side-panel-path';
+import { ensureOffscreenDocument } from '../utils/offscreen-manager';
+import type { DownloadEngineCommand } from '../../../shared/download-engine-protocol';
 import { chromeRuntimeBus } from './services/bus';
 import { chromeStorageCache } from './services/cache';
 // import a concrete ai factory once a Module actually declares it — see kernel-bootstrap skill
@@ -49,6 +51,18 @@ void kernel
 chrome.runtime.onMessage.addListener((message: { type?: string; moduleId?: string } | undefined) => {
   if (message?.type !== 'synapse:open-dashboard' || !message.moduleId) return;
   void chrome.tabs.create({ url: `${chrome.runtime.getURL(DASHBOARD_PATH)}?moduleId=${encodeURIComponent(message.moduleId)}` });
+});
+
+// docs/ROADMAP.md §8.1 — Side Panel/Dashboard send this to START/PAUSE/RESUME/CANCEL an HLS
+// download; only background can own chrome.offscreen.createDocument (utils/offscreen-manager.ts),
+// so this relay ensures the singleton Offscreen Document exists BEFORE forwarding the same message
+// on — the offscreen page's own listener (ui/offscreen/main.ts) picks it up from there. Forwarding
+// via a plain chrome.runtime.sendMessage (not a return value) mirrors every other relay in this
+// file; the sender never receives a reply, only the async `synapse:download-engine-event` broadcasts
+// utils/download-engine.ts emits as the job progresses.
+chrome.runtime.onMessage.addListener((message: DownloadEngineCommand | undefined) => {
+  if (message?.type !== 'synapse:download-engine-command') return;
+  void ensureOffscreenDocument().then(() => chrome.runtime.sendMessage(message).catch(() => {}));
 });
 
 // docs/ROADMAP.md §6.2 — network-sniffer's floating icon (utils/floating-widget.ts's

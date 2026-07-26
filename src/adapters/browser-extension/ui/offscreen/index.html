@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Synapse — Download Engine (offscreen)</title>
+  </head>
+  <body>
+    <!-- Never shown to the user (docs/ROADMAP.md §8.1) — chrome.offscreen documents have no visible
+         surface, this page exists purely to give utils/download-engine.ts a DOM/Worker/WebAssembly
+         context outside the service worker. -->
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

@@ -104,12 +104,33 @@
    row alongside the resolution <select>) while a stream's Merge Tab runs in the background. */
 .media-item-progress {
   margin-top: 0.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+/* docs/ROADMAP.md §8.1 — Pause/Resume + Cancel, shown next to the progress bar/text while a
+   `kind:'stream'` job is actually running (not during 'remux'/terminal phases — see main.ts's
+   renderItem). Small and compact, same reasoning as .media-item-actions' button sizing below. */
+.download-controls {
+  display: flex;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+.download-controls button {
+  width: auto;
+  margin: 0;
+  padding: 0.2rem 0.5rem;
 }
 
 .download-progress {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  flex: 1;
+  min-width: 0;
 }
 
 .download-progress progress {
