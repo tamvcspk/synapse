@@ -164,3 +164,11 @@ Four new infra files + a background Module + a manifest permission is real compl
 for it when a Module genuinely needs to act inside the page's own JS context (network interception,
 reading page JS state). A Module that only needs to *read* rendered DOM content is a plain `dom`
 Module (`module-scaffold`) with no MAIN-world involvement at all.
+
+## See also
+
+`docs/LESSONS.md` has the full gotcha list this skill's own sections draw from (`?script&module` vs
+`?script&iife`, `host_permissions` for dynamic MAIN-world registration, separate DevTools consoles
+per world) plus adjacent runtime gotchas outside this skill's scope — `chrome.sidePanel`, Offscreen
+Document's `chrome.runtime`-only restriction, DNR `tabIds`/`TAB_ID_NONE` scoping. Check it before
+assuming a new silent-failure symptom is unprecedented.

@@ -201,3 +201,11 @@ style for its own add/edit form.)
   `docs/types/synapse-userscript.d.ts` (outside `src/`, excluded from the build by
   `tsconfig.json`'s `"include": ["src"]"`) — update both if the `synapse.*`/`__synapseModule`
   surface changes.
+
+## See also
+
+`docs/LESSONS.md` catalogs runtime gotchas found outside this layer's own scope but relevant to
+anything built on top of it — VanJS's non-diffing `render()` needing `requestAnimationFrame`
+coalescing under high-frequency updates, `chrome.sidePanel`/Offscreen Document/DNR quirks, extra
+HTML entries needing manual `vite.config.ts` Rollup input. Check it when a UI built with this
+layer's popup/Dashboard conventions "silently doesn't work" or flickers/drops clicks.
