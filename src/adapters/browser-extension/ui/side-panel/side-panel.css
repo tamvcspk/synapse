@@ -116,6 +116,15 @@
   padding: 0.4rem 0.6rem;
 }
 
+/* docs/ROADMAP.md §8.12 — shown instead of .download-btn when a checkpoint exists for this entry.
+   `secondary` (not Pico's default filled-primary look) so it doesn't visually compete with a plain
+   Download button elsewhere in the list — this is a recovery action, not the common case. */
+.resume-btn {
+  width: auto;
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+}
+
 /* docs/ROADMAP.md §7.6 — its own full-width row below .media-item-actions (not squeezed into that
    row alongside the resolution <select>) while a stream's Merge Tab runs in the background. */
 .media-item-progress {

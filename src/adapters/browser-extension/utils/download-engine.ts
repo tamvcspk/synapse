@@ -5,8 +5,8 @@ import ffmpegCoreUrl from '@ffmpeg/core?url';
 import ffmpegWasmUrl from '@ffmpeg/core/wasm?url';
 import { parseM3u8, type ManifestSegment, type ParsedManifest, type SegmentKey } from '../../../shared/media-manifest-parser';
 import { slugify } from '../../../shared/slugify';
-import type { DownloadEngineEvent, DownloadEngineRelayedCommand, DownloadEnginePhase } from '../../../shared/download-engine-protocol';
-import { createOpfsRun, removeOpfsRun } from './opfs-store';
+import type { DownloadEngineEvent, DownloadEngineRelayedCommand, DownloadEnginePhase, DownloadJobCheckpoint } from '../../../shared/download-engine-protocol';
+import { createOpfsRun, removeOpfsRun, tryResumeOpfsRun, type OpfsRun } from './opfs-store';
 import type { DescribeHeaderReplayResult } from './header-replay-rules';
 
 /**
@@ -89,7 +89,7 @@ export function handleEngineCommand(cmd: DownloadEngineRelayedCommand): void {
   debugLog(cmd.jobId, `received command '${cmd.op}'`, { url: cmd.url });
   switch (cmd.op) {
     case 'START':
-      if (cmd.url) void startJob(cmd.jobId, cmd.url);
+      if (cmd.url) void startJob(cmd.jobId, cmd.url, cmd.resolutionLabel);
       break;
     case 'START_TURBO':
       if (cmd.url) void startTurboJob(cmd.jobId, cmd.url);
@@ -102,6 +102,9 @@ export function handleEngineCommand(cmd: DownloadEngineRelayedCommand): void {
       break;
     case 'CANCEL':
       cancelJob(cmd.jobId);
+      break;
+    case 'RESUME_CHECKPOINT':
+      if (cmd.checkpoint) void resumeJobFromCheckpoint(cmd.checkpoint);
       break;
   }
 }
@@ -260,6 +263,27 @@ async function requestFromBackground<T>(message: Record<string, unknown>): Promi
   return chrome.runtime.sendMessage(message) as Promise<T>;
 }
 
+/** docs/ROADMAP.md §8.12 — same relay pattern as `findReplayHeaders` above: this document has no
+ * `chrome.storage` of its own, so persisting/clearing a checkpoint round-trips through background
+ * (utils/download-job-checkpoints.ts). Both are fire-and-forget from the CALLER's point of view — a
+ * dropped checkpoint write just means resume falls back a little further than it could have; it
+ * never corrupts anything, since a resume always re-validates against the OPFS file's real size
+ * before trusting one (see opfs-store.ts's `tryResumeOpfsRun`). Bugfix-in-waiting (§8.8's lesson
+ * applied preemptively): a bare `.catch(() => {})` here would silently swallow a broken relay
+ * exactly the way §8.11 found header replay had been broken for weeks — logged instead, even though
+ * a failure here is non-fatal to THIS download. */
+async function persistCheckpoint(checkpoint: DownloadJobCheckpoint): Promise<void> {
+  await requestFromBackground<{ ok?: boolean }>({ type: 'synapse:save-download-checkpoint', checkpoint }).catch((err: unknown) => {
+    debugLog(checkpoint.jobId, 'checkpoint save failed to reach background (resume will fall back further than it could have)', { error: err instanceof Error ? err.message : String(err) });
+  });
+}
+
+async function clearCheckpoint(jobId: string): Promise<void> {
+  await requestFromBackground<{ ok?: boolean }>({ type: 'synapse:remove-download-checkpoint', jobId }).catch((err: unknown) => {
+    debugLog(jobId, 'checkpoint clear failed to reach background (a stale checkpoint may linger until the next Offscreen Document sweep)', { error: err instanceof Error ? err.message : String(err) });
+  });
+}
+
 /** docs/ROADMAP.md #7.1 — the entry that had this URL (as its own `url`, or as one of its
  * `variants`) is the one whose captured headers apply here. Looked up in background (see this
  * file's `requestFromBackground` doc comment) since it needs `chrome.storage`. */
@@ -315,7 +339,7 @@ async function tryRefreshSegmentsFromIndex(
   }
 }
 
-async function startJob(jobId: string, manifestUrl: string): Promise<void> {
+async function startJob(jobId: string, manifestUrl: string, resolutionLabel?: string): Promise<void> {
   if (jobs.has(jobId)) return; // already running — Side Panel already guards this, enforced again
   // here since Dashboard's smart-download can trigger the same id independently.
   const control: JobControl = {
@@ -375,7 +399,7 @@ async function startJob(jobId: string, manifestUrl: string): Promise<void> {
       return;
     }
 
-    await runJob(jobId, control, manifest, manifestUrl, replayHeadersFor);
+    await runJob(jobId, control, manifest, manifestUrl, replayHeadersFor, { resolutionLabel });
   } catch (err) {
     // Bugfix: nothing in this file used to `console.error` a genuine job failure — only the 401/403
     // diagnostic (`logSegmentAuthDiagnostics`) and a remux fallback ever logged anything, so a plain
@@ -389,18 +413,130 @@ async function startJob(jobId: string, manifestUrl: string): Promise<void> {
   }
 }
 
+/**
+ * docs/ROADMAP.md §8.12 — continues an HLS job that got no chance to reach any terminal state
+ * before this Offscreen Document (and everything it was doing) died — a real browser crash/close,
+ * or a manual extension reload while a download was in flight. Every early-return path here clears
+ * the checkpoint AND reports an error explaining why resume wasn't possible, so the user isn't left
+ * staring at a "Resume" row that will never work again; a fresh Download from scratch is always the
+ * fallback the message points at.
+ *
+ * Deliberately re-derives almost everything from scratch rather than trusting the checkpoint's own
+ * numbers: the manifest is refetched+reparsed (docs/ROADMAP.md §7.4's existing machinery, since a
+ * signed segment URL list can rot between sessions exactly like a mid-run refresh), and the OPFS
+ * file's real `size` is what decides whether `lastConfirmedByteOffset` can be trusted at all
+ * (opfs-store.ts's `tryResumeOpfsRun`) — the checkpoint is a HINT for where to resume, never a fact
+ * taken on faith.
+ */
+async function resumeJobFromCheckpoint(checkpoint: DownloadJobCheckpoint): Promise<void> {
+  const { jobId } = checkpoint;
+  if (jobs.has(jobId)) return; // already running (e.g. a duplicate click) — same guard as startJob
+  const control: JobControl = {
+    cancelled: false,
+    pausedPromise: null,
+    resolvePause: null,
+    segmentsDone: 0,
+    segmentsTotal: 0,
+    bytesDownloaded: 0,
+    startedAt: Date.now(),
+    abortControllers: new Set(),
+    inFlight: 0,
+    kind: 'segments',
+  };
+  jobs.set(jobId, control);
+  debugLog(jobId, `RESUME_CHECKPOINT — opfsRunId=${checkpoint.opfsRunId}, resuming from segment index ${checkpoint.lastConfirmedSegmentIndex + 1}/${checkpoint.total}`);
+  try {
+    const replayHeadersFor = await createReplayHeaderApplier(checkpoint.manifestUrl);
+
+    let manifest: ParsedManifest;
+    try {
+      await replayHeadersFor(checkpoint.manifestUrl);
+      const text = await (await fetch(checkpoint.manifestUrl)).text();
+      manifest = parseM3u8(text, checkpoint.manifestUrl);
+    } catch (err) {
+      console.error(`Synapse download engine: job ${jobId} failed to refetch the manifest to resume`, err);
+      emit(jobId, 'error', { message: `Could not refetch the manifest to resume: ${err instanceof Error ? err.message : String(err)}. Start a fresh download instead.` });
+      return;
+    }
+
+    // docs/ROADMAP.md §8.12's mandatory safety checks — any of these means the manifest moved on
+    // too much (or too little) since the checkpoint was saved to trust a byte-for-byte continuation.
+    if (manifest.kind !== 'media') {
+      emit(jobId, 'error', { message: 'This URL no longer looks like a resumable media playlist (it changed since the last attempt) — start a fresh download instead.' });
+      return;
+    }
+    if (manifest.isLive) {
+      emit(jobId, 'error', { message: 'This is now a live/sliding-window stream — there is no fixed segment set to safely resume. Start a fresh download instead.' });
+      return;
+    }
+    if (manifest.segments.length <= checkpoint.lastConfirmedSegmentIndex) {
+      emit(jobId, 'error', { message: 'The manifest now has fewer segments than were already downloaded — it changed too much to resume safely. Start a fresh download instead.' });
+      return;
+    }
+    const drmSegment = manifest.segments.find((s) => s.key && isRealDrm(s.key));
+    if (drmSegment?.key) {
+      const key = drmSegment.key;
+      emit(jobId, 'error', {
+        message: `This stream is DRM-protected (METHOD=${key.method}${key.keyFormat ? `, KEYFORMAT=${key.keyFormat}` : ''}). Synapse cannot and will not attempt to download or remux DRM-protected content.`,
+      });
+      return;
+    }
+
+    const opfsRun = await tryResumeOpfsRun(checkpoint.opfsRunId, checkpoint.lastConfirmedByteOffset);
+    if (!opfsRun) {
+      emit(jobId, 'error', { message: "The partially-downloaded file is missing (or smaller than expected) — can't resume safely. Start a fresh download instead." });
+      return;
+    }
+
+    await runJob(jobId, control, manifest, checkpoint.manifestUrl, replayHeadersFor, {
+      resolutionLabel: checkpoint.resolutionLabel,
+      resume: { runId: checkpoint.opfsRunId, opfsRun, startIndex: checkpoint.lastConfirmedSegmentIndex + 1 },
+    });
+  } catch (err) {
+    console.error(`Synapse download engine: job ${jobId} failed to resume`, err);
+    emit(jobId, 'error', { message: err instanceof Error ? err.message : String(err) });
+  } finally {
+    jobs.delete(jobId);
+    // Every early-return above (and runJob's own `finally`, on the success path) needs the
+    // checkpoint gone either way — cheap to also clear it here so no early-return branch above can
+    // forget it individually. Idempotent no-op if runJob already cleared it.
+    void clearCheckpoint(jobId);
+  }
+}
+
+/** docs/ROADMAP.md §8.12 — present only when `runJob` is continuing a previously-interrupted job
+ * (resumeJobFromCheckpoint above) rather than starting a fresh one. */
+interface RunJobResumeState {
+  runId: string;
+  opfsRun: OpfsRun;
+  /** 0-based index to start fetching/writing from — everything before it is already durably on
+   * disk in `opfsRun`'s file (verified against its real size before this is ever constructed). */
+  startIndex: number;
+}
+
+interface RunJobOptions {
+  resolutionLabel?: string | undefined;
+  resume?: RunJobResumeState | undefined;
+}
+
 async function runJob(
   jobId: string,
   control: JobControl,
   manifest: Extract<ParsedManifest, { kind: 'media' }>,
   sourceUrl: string,
   replayHeadersFor: (url: string) => Promise<void>,
+  options: RunJobOptions = {},
 ): Promise<void> {
-  const runId = crypto.randomUUID();
-  const opfsRun = await createOpfsRun(runId);
+  const runId = options.resume?.runId ?? crypto.randomUUID();
+  const opfsRun = options.resume?.opfsRun ?? (await createOpfsRun(runId));
   const total = manifest.segments.length;
+  const startIndex = options.resume?.startIndex ?? 0;
   control.segmentsTotal = total;
-  debugLog(jobId, `runJob starting — runId=${runId}, ${total} segment(s), pool=${Math.min(SEGMENT_POOL_SIZE, total)}`);
+  control.segmentsDone = startIndex; // §8.12 resume: everything before this index is already on disk
+  debugLog(
+    jobId,
+    `runJob ${options.resume ? 'RESUMING' : 'starting'} — runId=${runId}, ${total} segment(s) total${options.resume ? `, starting at index ${startIndex}` : ''}, pool=${Math.min(SEGMENT_POOL_SIZE, total - startIndex)}`,
+  );
 
   // docs/ROADMAP.md #7.4 — replaced WHOLESALE (not spliced by index) once a rotating-signature CDN
   // reissues the manifest; safe under the concurrent pool because only not-yet-fetched indices ever
@@ -510,9 +646,59 @@ async function runJob(
   // ORIGINAL order regardless of which fetch finishes first (`pendingWrites` buffers out-of-order
   // arrivals, `writeChain` serializes the actual OPFS writes one at a time).
   const pendingWrites = new Map<number, ArrayBuffer>();
-  let nextToWrite = 0;
-  let nextToFetch = 0;
+  let nextToWrite = startIndex;
+  let nextToFetch = startIndex;
   let writeChain: Promise<void> = Promise.resolve();
+
+  // docs/ROADMAP.md §8.12 — periodic, not per-segment: a stream can have hundreds/thousands of
+  // segments, and every round costs a `chrome.storage` round-trip PLUS (see `opfsRun.commit()`'s
+  // doc comment) an O(current-file-size) swap-file re-copy inside OPFS itself — closing and
+  // reopening the writable is the only way to make bytes actually durable/readable before the run
+  // finishes, but it is genuinely not free for a large file. Spaced out much further than the
+  // Side Panel's `scheduleRender` (§8.9) coalescing for exactly that reason: this isn't "don't
+  // rebuild the DOM 60x/sec," it's "don't re-copy a 500MB file every few seconds."
+  const CHECKPOINT_INTERVAL_MS = 20_000;
+  let lastCheckpointAt = 0;
+  // Tracks the most recently FIRED checkpoint save so the job's `finally` block (below) can await
+  // it before clearing the checkpoint on completion — without this, the very last save (fired
+  // fire-and-forget from `enqueueWrite`'s callback right as the final segment lands) could still be
+  // in flight to background when the completion `clearCheckpoint` message goes out, and arrive
+  // AFTER it: a checkpoint for an already-fully-downloaded job would be left behind, resurrecting a
+  // stale "Resume available" row for something that doesn't need resuming.
+  let pendingCheckpointSave: Promise<void> = Promise.resolve();
+
+  /**
+   * docs/ROADMAP.md §8.12 — bugfix found via a REAL crash-and-resume test that failed every time:
+   * this used to read `opfsRun.bytesWritten()` and persist it as `lastConfirmedByteOffset` WITHOUT
+   * ever calling `opfsRun.commit()` first — `FileSystemWritableFileStream.write()` only buffers into
+   * a swap file, so none of those bytes were actually visible/durable yet, and `tryResumeOpfsRun`'s
+   * "is the file at least this big?" check failed 100% of the time (see opfs-store.ts's `commit()`
+   * doc comment for the full explanation). `commit()` must complete BEFORE the checkpoint is
+   * persisted — a failed commit (thrown, caught here) means this round genuinely didn't happen, so
+   * it must not save a checkpoint claiming otherwise; it just tries again at the next interval.
+   */
+  async function maybeSaveCheckpoint(): Promise<void> {
+    const now = Date.now();
+    if (now - lastCheckpointAt < CHECKPOINT_INTERVAL_MS) return;
+    lastCheckpointAt = now;
+    try {
+      await opfsRun.commit();
+    } catch (err) {
+      debugLog(jobId, 'checkpoint commit() failed — skipping this checkpoint round, will retry next interval', { error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    const checkpoint: DownloadJobCheckpoint = {
+      jobId,
+      manifestUrl: sourceUrl,
+      opfsRunId: runId,
+      lastConfirmedSegmentIndex: control.segmentsDone - 1,
+      lastConfirmedByteOffset: opfsRun.bytesWritten(),
+      total,
+      resolutionLabel: options.resolutionLabel,
+    };
+    debugLog(jobId, `saving checkpoint — lastConfirmedSegmentIndex=${checkpoint.lastConfirmedSegmentIndex}, byteOffset=${checkpoint.lastConfirmedByteOffset}`);
+    pendingCheckpointSave = persistCheckpoint(checkpoint);
+  }
 
   /**
    * Bugfix: `inFlight` used to be tracked per FETCH ATTEMPT, decremented the instant `fetchSegment`
@@ -541,6 +727,10 @@ async function runJob(
       const etaMs = control.segmentsDone > 0 ? Math.round(((total - control.segmentsDone) * elapsedMs) / control.segmentsDone) : undefined;
       emit(jobId, 'segments', { segmentsDone: control.segmentsDone, segmentsTotal: total, bytesPerSec, etaMs });
       noteFetchSettled(jobId, control);
+      // Awaited (not fire-and-forget) — `maybeSaveCheckpoint`'s `opfsRun.commit()` closes and
+      // reopens the writable, and the NEXT queued write on this same `writeChain` must not run
+      // until that reopen has actually completed.
+      await maybeSaveCheckpoint();
     });
   }
 
@@ -607,13 +797,15 @@ async function runJob(
   }
 
   try {
-    if (manifest.initSegment) {
+    // §8.12 resume: the init segment (if any) is always the very first bytes written, before any
+    // worker starts — by the time a checkpoint exists to resume FROM, it must already be on disk.
+    if (manifest.initSegment && !options.resume) {
       debugLog(jobId, 'fetching init segment (#EXT-X-MAP)');
       await opfsRun.write(new Uint8Array(await fetchInitSegment(manifest.initSegment)));
       debugLog(jobId, 'init segment written');
     }
 
-    const workerCount = Math.min(SEGMENT_POOL_SIZE, total);
+    const workerCount = Math.min(SEGMENT_POOL_SIZE, Math.max(total - startIndex, 0));
     debugLog(jobId, `spinning up ${workerCount} worker(s)`);
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
     debugLog(jobId, `all workers returned — cancelled=${control.cancelled}`);
@@ -640,6 +832,14 @@ async function runJob(
     await opfsRun.abort();
     emit(jobId, 'error', { message });
   } finally {
+    // docs/ROADMAP.md §8.12 — cleared on EVERY terminal outcome (done/error/cancelled), not just
+    // success: a checkpoint only exists to survive an INTERRUPTION (crash/reload) the job never got
+    // a chance to react to. A real in-session error still means "start over" (same philosophy as
+    // fetchSegment's own exhausted-retries path) — it does not leave a resumable checkpoint behind.
+    // Awaiting the last in-flight save first (see `pendingCheckpointSave`'s doc comment) guarantees
+    // this clear is the LAST checkpoint-related message background sees for this jobId.
+    await pendingCheckpointSave.catch(() => {});
+    void clearCheckpoint(jobId);
     void removeOpfsRun(runId).catch(() => {});
   }
 }

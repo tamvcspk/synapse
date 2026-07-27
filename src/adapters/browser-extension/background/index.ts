@@ -11,7 +11,8 @@ import { SIDE_PANEL_PATH } from '../ui/side-panel/side-panel-path';
 import { ensureOffscreenDocument } from '../utils/offscreen-manager';
 import { describeHeaderReplay, syncHeaderReplayRule } from '../utils/header-replay-rules';
 import { listDetectedMedia } from './modules/network-sniffer/store';
-import type { DownloadEngineCommand, DownloadEngineRelayedCommand } from '../../../shared/download-engine-protocol';
+import { listDownloadJobCheckpoints, saveDownloadJobCheckpoint, removeDownloadJobCheckpoint } from '../utils/download-job-checkpoints';
+import type { DownloadEngineCommand, DownloadEngineRelayedCommand, DownloadJobCheckpoint } from '../../../shared/download-engine-protocol';
 import { chromeRuntimeBus } from './services/bus';
 import { chromeStorageCache } from './services/cache';
 // import a concrete ai factory once a Module actually declares it — see kernel-bootstrap skill
@@ -121,6 +122,34 @@ chrome.runtime.onMessage.addListener((message: { type?: string; host?: string } 
 chrome.runtime.onMessage.addListener((message: { type?: string; url?: string; filename?: string } | undefined) => {
   if (message?.type !== 'synapse:trigger-download' || !message.url) return;
   void chrome.downloads.download({ url: message.url, filename: message.filename });
+});
+
+/**
+ * docs/ROADMAP.md §8.12 — the Offscreen Document (utils/download-engine.ts) can't touch
+ * `chrome.storage` directly (§8.11), so its periodic checkpoint writes/deletes relay through here,
+ * same shape as §7.1/§8.11's other request/response relays. The READ side (`listDownloadJobCheckpoints`)
+ * is deliberately NOT relayed here for the Side Panel's own use — Side Panel is a privileged
+ * extension page with direct `chrome.storage` access and calls it straight, same as its existing
+ * `listDetectedMedia()`/turbo-toggle reads. This listener's own `list` relay exists only for
+ * ui/offscreen/main.ts, which needs the current checkpoint list BEFORE sweeping stale OPFS runs
+ * (§8.9) so it doesn't delete a file a checkpoint still needs for resuming.
+ */
+chrome.runtime.onMessage.addListener((message: { type?: string; checkpoint?: DownloadJobCheckpoint } | undefined, _sender, sendResponse) => {
+  if (message?.type !== 'synapse:save-download-checkpoint' || !message.checkpoint) return;
+  void saveDownloadJobCheckpoint(message.checkpoint).then(() => sendResponse({ ok: true }));
+  return true;
+});
+
+chrome.runtime.onMessage.addListener((message: { type?: string; jobId?: string } | undefined, _sender, sendResponse) => {
+  if (message?.type !== 'synapse:remove-download-checkpoint' || !message.jobId) return;
+  void removeDownloadJobCheckpoint(message.jobId).then(() => sendResponse({ ok: true }));
+  return true;
+});
+
+chrome.runtime.onMessage.addListener((message: { type?: string } | undefined, _sender, sendResponse) => {
+  if (message?.type !== 'synapse:list-download-checkpoints-for-sweep') return;
+  void listDownloadJobCheckpoints().then((checkpoints) => sendResponse({ checkpoints }));
+  return true;
 });
 
 // docs/ROADMAP.md §6.2 — network-sniffer's floating icon (utils/floating-widget.ts's

@@ -1,4 +1,4 @@
-import type { DownloadEngineRelayedCommand } from '../../../../shared/download-engine-protocol';
+import type { DownloadEngineRelayedCommand, DownloadJobCheckpoint } from '../../../../shared/download-engine-protocol';
 import { handleEngineCommand } from '../../utils/download-engine';
 import { sweepStaleOpfsRuns } from '../../utils/opfs-store';
 
@@ -9,8 +9,19 @@ import { sweepStaleOpfsRuns } from '../../utils/opfs-store';
  * this fixes). NOT awaited here — the listener below awaits this same promise before handling the
  * FIRST command instead, so the message listener itself can still register synchronously and never
  * risk losing a command that arrives before the sweep finishes.
+ *
+ * docs/ROADMAP.md §8.12 — this document has no `chrome.storage` access of its own (§8.11), so the
+ * checkpoint list that decides which run(s) to SPARE from the sweep is fetched from background
+ * first. A failure here (background not ready yet, message rejected) falls back to an empty
+ * keep-set — i.e. the old unconditional-sweep behavior — rather than skipping the sweep entirely,
+ * since a stale-lock OPFS failure (the bug §8.9 exists to prevent) is a worse outcome than losing a
+ * resume opportunity.
  */
-const readySweep = sweepStaleOpfsRuns();
+const readySweep = chrome.runtime
+  .sendMessage({ type: 'synapse:list-download-checkpoints-for-sweep' })
+  .then((response: { checkpoints?: DownloadJobCheckpoint[] } | undefined) => new Set((response?.checkpoints ?? []).map((c) => c.opfsRunId)))
+  .catch(() => new Set<string>())
+  .then((keepRunIds) => sweepStaleOpfsRuns(keepRunIds));
 
 /**
  * docs/ROADMAP.md §8.1 — thin wiring only, mirrors ui/dashboard/main.ts's "view wiring, logic lives

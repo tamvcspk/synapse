@@ -24,14 +24,57 @@ export type DownloadEnginePhase = 'segments' | 'chunks' | 'remux' | 'pausing' | 
 export interface DownloadEngineCommand {
   type: 'synapse:download-engine-command';
   /** `START` = HLS manifest job (§8.1). `START_TURBO` = §8.2's opt-in multi-connection Range
-   * downloader for a plain static file. PAUSE/RESUME/CANCEL are generic — they act on whichever
-   * `JobControl` is registered for `jobId` regardless of which START variant created it. */
-  op: 'START' | 'START_TURBO' | 'PAUSE' | 'RESUME' | 'CANCEL';
+   * downloader for a plain static file. `RESUME_CHECKPOINT` (§8.12) starts a NEW in-memory job that
+   * continues a previously-interrupted HLS job from a persisted `DownloadJobCheckpoint` — distinct
+   * from `RESUME`, which only un-pauses a job that's still alive in `jobs`. PAUSE/RESUME/CANCEL are
+   * generic — they act on whichever `JobControl` is registered for `jobId` regardless of which
+   * START variant created it. */
+  op: 'START' | 'START_TURBO' | 'PAUSE' | 'RESUME' | 'CANCEL' | 'RESUME_CHECKPOINT';
   jobId: string;
   /** Only meaningful for START/START_TURBO — the manifest or file URL to download. Explicit
    * `| undefined` (not just `?`) — tsconfig's `exactOptionalPropertyTypes` requires it since callers
    * build this object with a possibly-undefined value rather than omitting the key outright. */
   url?: string | undefined;
+  /** Only meaningful for START — cosmetic label (e.g. "1080p") carried through to a persisted
+   * `DownloadJobCheckpoint` so a later "Resume available" row can show which resolution it belongs
+   * to, without the engine needing to know anything about resolutions itself. */
+  resolutionLabel?: string | undefined;
+  /** Only meaningful for RESUME_CHECKPOINT — the checkpoint to resume from. The caller (Side Panel)
+   * already had to load the checkpoint list from storage to decide whether to show a "Resume"
+   * affordance at all, so it's cheapest to just hand the whole object back rather than round-trip
+   * through background again to look it up by `jobId`. */
+  checkpoint?: DownloadJobCheckpoint | undefined;
+}
+
+/**
+ * docs/ROADMAP.md §8.12 — enough state to safely CONTINUE an interrupted HLS job, persisted
+ * periodically (coalesced, not per-segment) to `chrome.storage.local` via
+ * utils/download-job-checkpoints.ts. Deliberately does NOT carry the segment URL list itself — a
+ * resume always refetches+reparses the manifest fresh (docs/ROADMAP.md §7.4's existing
+ * refresh-on-401/403 logic, reused) since a signed-URL segment list can rot between sessions.
+ * HLS-only: §8.2's turbo (multi-connection Range) jobs have no natural small checkpoint (a handful
+ * of huge chunks, no per-chunk "already durably written" boundary worth persisting) and are not
+ * checkpointed at all — see download-engine.ts's `runJob` for where this is written.
+ */
+export interface DownloadJobCheckpoint {
+  jobId: string;
+  manifestUrl: string;
+  /** Which OPFS file (utils/opfs-store.ts's `RUN_DIR`) already holds the confirmed bytes. Resuming
+   * means re-opening THIS SAME file and truncating it back to `lastConfirmedByteOffset` — never
+   * starting a fresh one. */
+  opfsRunId: string;
+  /** 0-based index of the last segment (in the manifest's original order) that was durably written
+   * to the OPFS file — resume starts fetching at `lastConfirmedSegmentIndex + 1`. */
+  lastConfirmedSegmentIndex: number;
+  /** The OPFS file's real byte length at the moment `lastConfirmedSegmentIndex` was confirmed —
+   * resume trusts this ONLY after checking it against the file's actual current `size` on disk
+   * (docs/ROADMAP.md §8.12: never trust the saved number blindly, a crash could have left the
+   * checkpoint saved either earlier or later than what actually landed on disk). */
+  lastConfirmedByteOffset: number;
+  /** Segment count as of when this checkpoint was written — cosmetic only (a fresh manifest refetch
+   * at resume time is the source of truth for the real total, which may differ slightly). */
+  total: number;
+  resolutionLabel?: string | undefined;
 }
 
 /**

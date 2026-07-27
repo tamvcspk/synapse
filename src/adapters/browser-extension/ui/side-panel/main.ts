@@ -3,7 +3,8 @@ import './side-panel.css';
 import van from 'vanjs-core';
 import { collapseVariantShadowedEntries, listDetectedMedia, type DetectedMedia } from '../../background/modules/network-sniffer/store';
 import { DASHBOARD_PATH } from '../dashboard/dashboard-path';
-import type { DownloadEngineCommand, DownloadEngineEvent, DownloadEnginePhase } from '../../../../shared/download-engine-protocol';
+import type { DownloadEngineCommand, DownloadEngineEvent, DownloadEnginePhase, DownloadJobCheckpoint } from '../../../../shared/download-engine-protocol';
+import { listDownloadJobCheckpoints } from '../../utils/download-job-checkpoints';
 import { describeResolution } from '../../../../shared/resolution-label';
 import downloadIconUrl from '../../../../assets/icon/download.svg';
 
@@ -24,6 +25,14 @@ let items: DetectedMedia[] = [];
 // Which variant URL is currently selected per master-playlist entry (entry.id -> variant url) —
 // UI-only state, never persisted.
 const selectedVariantUrl = new Map<string, string>();
+
+// docs/ROADMAP.md §8.12 — checkpoints for HLS jobs that got no chance to finish before the
+// Offscreen Document (and everything it was doing) died — reloaded every `load()`, same cadence as
+// `items`, so a checkpoint disappears from here (and the "Resume" row reverts to a normal Download
+// button) as soon as the engine clears it — on a successful resume, a failed one, or a fresh
+// Download started instead (see `renderItem`: a checkpoint only ever shows up when nothing is
+// currently `activeDownloads`-tracked for that entry).
+let checkpoints: DownloadJobCheckpoint[] = [];
 
 // docs/ROADMAP.md §7.6/§8.1 — one in-flight download per detected-media entry id (`jobId`), fed by
 // `synapse:download-engine-event` broadcasts from the singleton Offscreen Document's engine
@@ -48,8 +57,13 @@ const activeDownloads = new Map<string, DownloadProgress>();
 // disappears — long enough to read "Done"/"Failed: ..."/"Cancelled", short enough not to feel stuck.
 const DOWNLOAD_SETTLE_DELAY_MS = 1500;
 
-function sendEngineCommand(op: DownloadEngineCommand['op'], jobId: string, url?: string): void {
-  const command: DownloadEngineCommand = { type: 'synapse:download-engine-command', op, jobId, url };
+function sendEngineCommand(
+  op: DownloadEngineCommand['op'],
+  jobId: string,
+  url?: string,
+  extra?: { resolutionLabel?: string | undefined; checkpoint?: DownloadJobCheckpoint | undefined },
+): void {
+  const command: DownloadEngineCommand = { type: 'synapse:download-engine-command', op, jobId, url, ...extra };
   void chrome.runtime.sendMessage(command).catch(() => {});
 }
 
@@ -102,6 +116,7 @@ async function activeTabOrigin(): Promise<string | undefined> {
 async function load(): Promise<void> {
   const origin = await activeTabOrigin();
   const all = await listDetectedMedia();
+  checkpoints = await listDownloadJobCheckpoints();
   // Scoping prefers `tabUrl` (the TAB's own top-level url) over `pageUrl` (the INITIATING FRAME's
   // origin). They differ exactly when a cross-origin iframe loads the media — an embedded player, or
   // an ad frame — and comparing `pageUrl` there asks "was this served by the site you're looking
@@ -153,7 +168,7 @@ function handleDownload(item: DetectedMedia): void {
     // `jobId` is this entry's own id, same convention the old `entryId` used.
     activeDownloads.set(item.id, { phase: 'segments', resolutionLabel: variantLabelForUrl(item, url) });
     scheduleRender();
-    sendEngineCommand('START', item.id, url);
+    sendEngineCommand('START', item.id, url, { resolutionLabel: variantLabelForUrl(item, url) });
     return;
   }
   // docs/ROADMAP.md §8.2 — Turbo toggle only affects this branch (`kind:'video'|'audio'`); `'stream'`
@@ -168,6 +183,25 @@ function handleDownload(item: DetectedMedia): void {
     return;
   }
   void chrome.downloads.download({ url: item.url });
+}
+
+/** docs/ROADMAP.md §8.12 — continues an HLS job that never reached a terminal state before this
+ * extension's Offscreen Document died (browser crash/close, manual reload mid-download) — never
+ * triggered automatically, only by the user clicking the "Resume" row `renderItem` shows in place
+ * of the normal Download button whenever a checkpoint exists for this entry. The engine itself
+ * re-validates the checkpoint against the real state of the manifest and the partial file on disk
+ * before trusting it (utils/download-engine.ts's `resumeJobFromCheckpoint`) — a failed resume just
+ * reports an error and clears the checkpoint, same terminal-phase handling as any other job. */
+function handleResume(item: DetectedMedia, checkpoint: DownloadJobCheckpoint): void {
+  if (activeDownloads.has(item.id)) return;
+  activeDownloads.set(item.id, {
+    phase: 'segments',
+    resolutionLabel: checkpoint.resolutionLabel,
+    done: checkpoint.lastConfirmedSegmentIndex + 1,
+    total: checkpoint.total,
+  });
+  scheduleRender();
+  sendEngineCommand('RESUME_CHECKPOINT', item.id, undefined, { checkpoint });
 }
 
 /** docs/ROADMAP.md §7.6/§8.1 — settles the row back to normal after a 'done'/'error'/'cancelled'
@@ -291,6 +325,9 @@ function renderItem(item: DetectedMedia) {
       : null;
   const summary = resolutionSummary(item);
   const downloadProgress = activeDownloads.get(item.id);
+  // docs/ROADMAP.md §8.12 — only ever relevant for a stream with no download already running for
+  // it; `downloadProgress` (checked first below) always wins once a Resume/Download click has fired.
+  const checkpoint = !downloadProgress && item.kind === 'stream' ? checkpoints.find((c) => c.jobId === item.id) : undefined;
 
   return div(
     { class: 'media-item' },
@@ -310,15 +347,23 @@ function renderItem(item: DetectedMedia) {
       variantSelect,
       downloadProgress
         ? null
-        : button(
-            { class: 'download-btn', title: 'Download', 'aria-label': 'Download', onclick: () => handleDownload(item) },
-            img({ src: downloadIconUrl, alt: '' }),
-          ),
+        : checkpoint
+          ? button({ class: 'resume-btn secondary', title: 'Resume download', onclick: () => handleResume(item, checkpoint) }, 'Resume')
+          : button(
+              { class: 'download-btn', title: 'Download', 'aria-label': 'Download', onclick: () => handleDownload(item) },
+              img({ src: downloadIconUrl, alt: '' }),
+            ),
     ),
     // Which resolution is actually downloading — shown once a job is running so a video with
     // several resolutions doesn't leave the user guessing (reuses .media-item-summary's styling,
     // same "small muted line" treatment as the segment-count/resolution summary above).
     downloadProgress?.resolutionLabel ? p({ class: 'media-item-summary' }, `Downloading: ${downloadProgress.resolutionLabel}`) : null,
+    // docs/ROADMAP.md §8.12 — surfaces WHY a "Resume" button showed up instead of the usual
+    // Download one: this entry has a partially-downloaded file sitting in OPFS from an interrupted
+    // session (browser crash/close, extension reload mid-download), not just a plain unstarted item.
+    checkpoint
+      ? p({ class: 'media-item-summary' }, `Interrupted at ${checkpoint.lastConfirmedSegmentIndex + 1}/${checkpoint.total} segments${checkpoint.resolutionLabel ? ` (${checkpoint.resolutionLabel})` : ''} — resume to continue.`)
+      : null,
     // Own full-width row, not sharing .media-item-actions with the resolution <select> — a
     // <progress> bar/status line squeezed into that row's remaining space (next to the select) was
     // cramped and easy to miss.
