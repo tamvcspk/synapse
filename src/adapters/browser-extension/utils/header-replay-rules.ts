@@ -100,11 +100,18 @@ const lastSyncedByHost = new Map<string, { ruleId: number; headerNames: string[]
  * `condition` never matches the request that needed it (the tabIds trap in syncHeaderReplayRule's
  * doc comment). Read-only and best-effort — never throws, so a caller can log it from an error path
  * without risking a second failure on top of the first. */
-export async function describeHeaderReplay(host: string): Promise<{
+/** Exported by name (not just inferred from `describeHeaderReplay`'s return type) so
+ * `utils/download-engine.ts` can type a background-relayed response with this same shape without
+ * importing `describeHeaderReplay` itself — that function calls `chrome.declarativeNetRequest`
+ * directly, which is unavailable inside the Offscreen Document the engine runs in (docs/ROADMAP.md
+ * §8.11); only `background/index.ts` ever calls this function now. */
+export interface DescribeHeaderReplayResult {
   intended?: { ruleId: number; headerNames: string[]; tabIds: number[] };
   liveRule?: chrome.declarativeNetRequest.Rule;
   liveRuleCount?: number;
-}> {
+}
+
+export async function describeHeaderReplay(host: string): Promise<DescribeHeaderReplayResult> {
   const intended = lastSyncedByHost.get(host);
   const result: Awaited<ReturnType<typeof describeHeaderReplay>> = {};
   if (intended) result.intended = intended;

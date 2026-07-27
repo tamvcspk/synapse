@@ -5,10 +5,9 @@ import ffmpegCoreUrl from '@ffmpeg/core?url';
 import ffmpegWasmUrl from '@ffmpeg/core/wasm?url';
 import { parseM3u8, type ManifestSegment, type ParsedManifest, type SegmentKey } from '../../../shared/media-manifest-parser';
 import { slugify } from '../../../shared/slugify';
-import type { DownloadEngineCommand, DownloadEngineEvent, DownloadEnginePhase } from '../../../shared/download-engine-protocol';
+import type { DownloadEngineEvent, DownloadEngineRelayedCommand, DownloadEnginePhase } from '../../../shared/download-engine-protocol';
 import { createOpfsRun, removeOpfsRun } from './opfs-store';
-import { describeHeaderReplay, syncHeaderReplayRule } from './header-replay-rules';
-import { listDetectedMedia } from '../background/modules/network-sniffer/store';
+import type { DescribeHeaderReplayResult } from './header-replay-rules';
 
 /**
  * docs/ROADMAP.md §8.1 — the HLS download/remux engine, ported out of the old `ui/merge/main.ts`
@@ -26,6 +25,16 @@ import { listDetectedMedia } from '../background/modules/network-sniffer/store';
  * fetches use — and an offscreen document's fetches are not tied to any tab either, so the old
  * `selfTabIds`/`sameTabIds` machinery (which existed only because a Tab's own fetches carry a real
  * tabId) is dropped entirely, not ported.
+ *
+ * docs/ROADMAP.md §8.11 — bugfix discovered via a real download: Offscreen Documents can use ONLY
+ * `chrome.runtime`, confirmed against Chrome's own documentation after `chrome.downloads.download()`
+ * threw "Cannot read properties of undefined" from inside this file. `chrome.storage` and
+ * `chrome.declarativeNetRequest` are unavailable here too — silently, no error at import time, only
+ * when the call actually runs — which meant header replay (§7.1) had been quietly broken for every
+ * download since the engine moved into the Offscreen Document (its `chrome.storage` lookup was
+ * wrapped in a `.catch()`, so it degraded to "no headers captured" instead of crashing).
+ * See `requestFromBackground`'s doc comment below — every one of these now round-trips
+ * through `background/index.ts`, the one context with full chrome.* access.
  */
 
 const SEGMENT_POOL_SIZE = 5;
@@ -39,19 +48,51 @@ interface JobControl {
   segmentsTotal: number;
   bytesDownloaded: number;
   startedAt: number;
+  /** Registered by BOTH job kinds now (HLS's `fetchSegment`, turbo's `fetchChunk`) — one entry per
+   * currently-in-flight `fetch()`, aborted outright by `cancelJob` so CANCEL takes effect
+   * immediately instead of waiting for whatever's already downloading to finish naturally. */
+  abortControllers: Set<AbortController>;
+  /** How many segment/chunk fetch ATTEMPTS (the literal `fetch()` call, not the whole retry loop
+   * around it) are happening right now — used only to know when a requested PAUSE has actually taken
+   * effect. See `pauseJob`/`noteFetchSettled`. */
+  inFlight: number;
+  /** Which phase a RESUME should re-emit — the UI renders `'segments'`/`'chunks'` identically, this
+   * just keeps emitted events semantically accurate for whichever job kind this is. */
+  kind: 'segments' | 'chunks';
 }
 
 const jobs = new Map<string, JobControl>();
 
-function emit(jobId: string, phase: DownloadEnginePhase, extra?: Partial<DownloadEngineEvent>): void {
-  const event: DownloadEngineEvent = { type: 'synapse:download-engine-event', jobId, phase, ...extra };
-  chrome.runtime.sendMessage(event).catch(() => {});
+/** Debug-only state tracing, added while chasing a real report of a job hanging on "Starting…" with
+ * nothing in the offscreen document's own console to explain why (chrome://extensions' "Inspect
+ * views" → offscreen.html) — every command received, every event emitted, and every `inFlight`
+ * transition now shows up there with a `[download-engine]` prefix, so a future repro can be read
+ * straight off the console instead of guessed at from code. Deliberately left in (not stripped for
+ * "production") — this extension has no telemetry/analytics of its own, and this is the ONLY place
+ * that would ever surface exactly what the engine did for a given `jobId`. */
+function debugLog(jobId: string, message: string, extra?: Record<string, unknown>): void {
+  console.log(`[download-engine] ${jobId}: ${message}`, extra ?? '');
 }
 
-export function handleEngineCommand(cmd: DownloadEngineCommand): void {
+function emit(jobId: string, phase: DownloadEnginePhase, extra?: Partial<DownloadEngineEvent>): void {
+  const event: DownloadEngineEvent = { type: 'synapse:download-engine-event', jobId, phase, ...extra };
+  debugLog(jobId, `emit '${phase}'`, extra);
+  chrome.runtime.sendMessage(event).catch((err: unknown) => {
+    // Side Panel not open, or closed mid-download — expected and harmless (docs/ROADMAP.md §7.6's
+    // existing "no persistence" posture), but worth a trace line since it explains a UI that looks
+    // stuck: the event was sent, just never delivered anywhere.
+    debugLog(jobId, `emit '${phase}' had no listener (sendMessage rejected)`, { error: String(err) });
+  });
+}
+
+export function handleEngineCommand(cmd: DownloadEngineRelayedCommand): void {
+  debugLog(cmd.jobId, `received command '${cmd.op}'`, { url: cmd.url });
   switch (cmd.op) {
     case 'START':
       if (cmd.url) void startJob(cmd.jobId, cmd.url);
+      break;
+    case 'START_TURBO':
+      if (cmd.url) void startTurboJob(cmd.jobId, cmd.url);
       break;
     case 'PAUSE':
       pauseJob(cmd.jobId);
@@ -65,33 +106,77 @@ export function handleEngineCommand(cmd: DownloadEngineCommand): void {
   }
 }
 
+/**
+ * Bugfix: PAUSE used to emit `'paused'` immediately, but it only stops NEW segment/chunk claims —
+ * up to one fetch per worker/chunk was typically still genuinely in flight and would still complete
+ * (and still get written) a moment later, re-emitting `'segments'`/`'chunks'` events right after.
+ * From the UI, that looked like the Pause button flipping to Resume for an instant and then
+ * flipping right back, while segments kept visibly arriving after "Paused" was already on screen.
+ * `'pausing'` is the honest intermediate state — `noteFetchSettled` promotes it to `'paused'` once
+ * `inFlight` actually reaches zero. If nothing is in flight yet (PAUSE clicked before any fetch
+ * started), it's genuinely paused right away.
+ */
 function pauseJob(jobId: string): void {
   const control = jobs.get(jobId);
-  if (!control || control.pausedPromise) return;
+  if (!control) {
+    debugLog(jobId, 'PAUSE ignored — no such job (already finished/settled?)');
+    return;
+  }
+  if (control.pausedPromise) {
+    debugLog(jobId, 'PAUSE ignored — already paused/pausing');
+    return;
+  }
   control.pausedPromise = new Promise((resolve) => {
     control.resolvePause = resolve;
   });
-  emit(jobId, 'paused', { segmentsDone: control.segmentsDone, segmentsTotal: control.segmentsTotal });
+  debugLog(jobId, `PAUSE requested, inFlight=${control.inFlight}`);
+  emit(jobId, control.inFlight > 0 ? 'pausing' : 'paused', { segmentsDone: control.segmentsDone, segmentsTotal: control.segmentsTotal });
 }
 
 function resumeJob(jobId: string): void {
   const control = jobs.get(jobId);
-  if (!control?.pausedPromise) return;
+  if (!control?.pausedPromise) {
+    debugLog(jobId, 'RESUME ignored — not currently paused/pausing');
+    return;
+  }
   control.resolvePause?.();
   control.pausedPromise = null;
   control.resolvePause = null;
-  emit(jobId, 'segments', { segmentsDone: control.segmentsDone, segmentsTotal: control.segmentsTotal });
+  debugLog(jobId, `RESUME — re-emitting '${control.kind}'`);
+  emit(jobId, control.kind, { segmentsDone: control.segmentsDone, segmentsTotal: control.segmentsTotal });
+}
+
+/** Decrements `inFlight` once a segment/chunk fetch ATTEMPT settles (success or failure) and
+ * promotes a pending PAUSE from `'pausing'` to `'paused'` the moment every such attempt has actually
+ * stopped — called from both HLS's `fetchSegment` and turbo's `fetchChunk`. */
+function noteFetchSettled(jobId: string, control: JobControl): void {
+  control.inFlight = Math.max(0, control.inFlight - 1);
+  debugLog(jobId, `fetch attempt settled, inFlight now ${control.inFlight}`);
+  if (control.pausedPromise && control.inFlight === 0) {
+    debugLog(jobId, "inFlight reached 0 while pausing — promoting to 'paused'");
+    emit(jobId, 'paused', { segmentsDone: control.segmentsDone, segmentsTotal: control.segmentsTotal });
+  }
 }
 
 /** Also wakes a paused worker loop (resolves `pausedPromise`) so it observes `cancelled` on its next
- * check and exits, instead of hanging forever waiting for a RESUME that will never come. */
+ * check and exits, instead of hanging forever waiting for a RESUME that will never come. Aborts every
+ * in-flight fetch (both job kinds now register in `abortControllers`) so CANCEL takes effect
+ * immediately instead of waiting for whatever's already downloading to finish naturally — the old
+ * "let HLS segments finish naturally" behavior was the direct cause of a confusing overlap window
+ * where a fresh Download click right after Cancel would silently no-op against the still-settling
+ * previous job. */
 function cancelJob(jobId: string): void {
   const control = jobs.get(jobId);
-  if (!control) return;
+  if (!control) {
+    debugLog(jobId, 'CANCEL ignored — no such job (already finished/settled?)');
+    return;
+  }
+  debugLog(jobId, `CANCEL requested — aborting ${control.abortControllers.size} in-flight fetch(es)`);
   control.cancelled = true;
   control.resolvePause?.();
   control.pausedPromise = null;
   control.resolvePause = null;
+  for (const controller of control.abortControllers) controller.abort();
 }
 
 /** docs/ROADMAP.md §8.4 — plain HLS segment encryption (`METHOD=AES-128`, key served in the clear
@@ -160,11 +245,49 @@ function fileNameFromUrl(url: string): string {
   }
 }
 
+/**
+ * docs/ROADMAP.md §8.11 — offscreen documents can use ONLY `chrome.runtime` (confirmed against
+ * Chrome's own docs after `chrome.downloads.download()` threw "Cannot read properties of undefined"
+ * from inside this file during a real download) — `chrome.storage`, `chrome.declarativeNetRequest`,
+ * and `chrome.downloads` are all unavailable here despite no error at IMPORT time (the failure only
+ * surfaces the first time the call actually runs). `findReplayHeaders`/`syncHeaderReplayRule`'s
+ * `chrome.storage`/`chrome.declarativeNetRequest` calls used to be made directly from this file —
+ * silently broken (swallowed by `.catch(() => undefined)`) for every download since the engine moved
+ * into the Offscreen Document, never crashing, just quietly never replaying captured headers. Every
+ * one of these now goes through `background/index.ts`, which has full `chrome.*` access.
+ */
+async function requestFromBackground<T>(message: Record<string, unknown>): Promise<T> {
+  return chrome.runtime.sendMessage(message) as Promise<T>;
+}
+
 /** docs/ROADMAP.md #7.1 — the entry that had this URL (as its own `url`, or as one of its
- * `variants`) is the one whose captured headers apply here. */
+ * `variants`) is the one whose captured headers apply here. Looked up in background (see this
+ * file's `requestFromBackground` doc comment) since it needs `chrome.storage`. */
 async function findReplayHeaders(url: string): Promise<Record<string, string> | undefined> {
-  const all = await listDetectedMedia();
-  return all.find((m) => m.url === url || m.variants?.some((v) => v.url === url))?.requestHeaders;
+  const response = await requestFromBackground<{ headers?: Record<string, string> }>({ type: 'synapse:query-replay-headers', url });
+  return response?.headers;
+}
+
+/** docs/ROADMAP.md #7.1/§8.2 — shared by both job kinds (HLS's `startJob`, turbo's `startTurboJob`):
+ * looks up whichever `DetectedMedia` entry captured headers for `referenceUrl`, then returns a
+ * `replayHeadersFor(url)` closure that no-ops when there's nothing captured, and dedupes by host
+ * (a job's URLs overwhelmingly share one host, so this avoids hundreds of redundant relay
+ * round-trips to background for the same `chrome.declarativeNetRequest` rule). */
+async function createReplayHeaderApplier(referenceUrl: string): Promise<(url: string) => Promise<void>> {
+  const replayHeaders = await findReplayHeaders(referenceUrl).catch(() => undefined);
+  const hostsSynced = new Set<string>();
+  return async (url: string) => {
+    if (!replayHeaders) return;
+    let host: string;
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      return;
+    }
+    if (hostsSynced.has(host)) return;
+    hostsSynced.add(host);
+    await requestFromBackground({ type: 'synapse:sync-header-replay-rule', host, headers: replayHeaders }).catch(() => {});
+  };
 }
 
 /**
@@ -203,35 +326,30 @@ async function startJob(jobId: string, manifestUrl: string): Promise<void> {
     segmentsTotal: 0,
     bytesDownloaded: 0,
     startedAt: Date.now(),
+    abortControllers: new Set(),
+    inFlight: 0,
+    kind: 'segments',
   };
   jobs.set(jobId, control);
+  debugLog(jobId, `START — manifestUrl=${manifestUrl}`);
   try {
-    const replayHeaders = await findReplayHeaders(manifestUrl).catch(() => undefined);
-    const replayHeaderHostsSynced = new Set<string>();
-    // No-ops when there are no captured headers, or this URL's host already has a rule synced this
-    // job (segments overwhelmingly share one host with the manifest).
-    async function replayHeadersFor(url: string): Promise<void> {
-      if (!replayHeaders) return;
-      let host: string;
-      try {
-        host = new URL(url).hostname;
-      } catch {
-        return;
-      }
-      if (replayHeaderHostsSynced.has(host)) return;
-      replayHeaderHostsSynced.add(host);
-      await syncHeaderReplayRule(host, replayHeaders);
-    }
+    const replayHeadersFor = await createReplayHeaderApplier(manifestUrl);
 
     let manifest: ParsedManifest;
     try {
       await replayHeadersFor(manifestUrl);
       const text = await (await fetch(manifestUrl)).text();
       manifest = parseM3u8(text, manifestUrl);
-    } catch {
-      emit(jobId, 'error', { message: `Could not fetch this URL: ${manifestUrl}` });
+    } catch (err) {
+      // Bugfix: this used to swallow `err` completely — a real CORS/network failure fetching the
+      // manifest reported a static, unrelated-sounding "Could not fetch" message with NOTHING
+      // logged anywhere to explain what actually went wrong underneath.
+      console.error(`Synapse download engine: job ${jobId} failed to fetch/parse the manifest`, err);
+      emit(jobId, 'error', { message: `Could not fetch this URL: ${manifestUrl} (${err instanceof Error ? err.message : String(err)})` });
       return;
     }
+
+    debugLog(jobId, `manifest fetched — kind='${manifest.kind}'`, manifest.kind === 'media' ? { segments: manifest.segments.length, isLive: manifest.isLive } : undefined);
 
     if (manifest.kind === 'unknown') {
       emit(jobId, 'error', { message: "This URL doesn't look like an HLS manifest (no #EXTINF or #EXT-X-STREAM-INF found in it)." });
@@ -259,6 +377,12 @@ async function startJob(jobId: string, manifestUrl: string): Promise<void> {
 
     await runJob(jobId, control, manifest, manifestUrl, replayHeadersFor);
   } catch (err) {
+    // Bugfix: nothing in this file used to `console.error` a genuine job failure — only the 401/403
+    // diagnostic (`logSegmentAuthDiagnostics`) and a remux fallback ever logged anything, so a plain
+    // network/HTTP failure reached the Side Panel's "Failed: ..." text with NOTHING in the offscreen
+    // document's own console (chrome://extensions' "Inspect views") to explain why. Log the full
+    // error object (not just its message) here so it's actually diagnosable next time.
+    console.error(`Synapse download engine: job ${jobId} failed`, err);
     emit(jobId, 'error', { message: err instanceof Error ? err.message : String(err) });
   } finally {
     jobs.delete(jobId);
@@ -276,6 +400,7 @@ async function runJob(
   const opfsRun = await createOpfsRun(runId);
   const total = manifest.segments.length;
   control.segmentsTotal = total;
+  debugLog(jobId, `runJob starting — runId=${runId}, ${total} segment(s), pool=${Math.min(SEGMENT_POOL_SIZE, total)}`);
 
   // docs/ROADMAP.md #7.4 — replaced WHOLESALE (not spliced by index) once a rotating-signature CDN
   // reissues the manifest; safe under the concurrent pool because only not-yet-fetched indices ever
@@ -304,7 +429,7 @@ async function runJob(
     authDiagnosticLogged = true;
     try {
       const host = new URL(url).hostname;
-      const replay = await describeHeaderReplay(host);
+      const replay = await requestFromBackground<DescribeHeaderReplayResult>({ type: 'synapse:describe-header-replay', host });
       const likelyCause = !replay.intended
         ? `No headers were captured for this manifest, or syncHeaderReplayRule was never called for ${host} — the CDN saw a bare extension request.`
         : !replay.liveRule
@@ -324,15 +449,28 @@ async function runJob(
    * docs/ROADMAP.md #8.3 — retries a segment up to 3 times (exponential backoff) before giving up;
    * still never skip-and-continue past exhausted retries (missing segment = broken video) — the
    * whole job still aborts once a segment fails every attempt.
+   *
+   * Bugfix (§8.1 follow-up): each attempt now gets its own `AbortController`, registered on
+   * `control.abortControllers` — CANCEL used to just let whichever segment was already in flight
+   * finish naturally (documented as an acceptable wait since segments are small), but in practice
+   * that delay was long enough to be confusing: a fresh Download click right after Cancel would
+   * silently no-op because the old job's entry hadn't settled out of `jobs`/`activeDownloads` yet,
+   * reading as "it just resumed the previous session". `inFlight` tracking (`noteFetchSettled`) is
+   * per ATTEMPT, not per segment — a segment sitting in its backoff sleep between attempts isn't
+   * actually using the network, so it shouldn't hold up a PAUSE from settling into `'paused'`.
    */
   async function fetchSegment(index: number): Promise<ArrayBuffer> {
     const MAX_ATTEMPTS = 4; // 1 initial try + 3 retries
     let lastError: unknown;
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const controller = new AbortController();
+      control.abortControllers.add(controller);
       try {
         const segment = segments[index]!;
+        debugLog(jobId, `segment ${index + 1}/${total} attempt ${attempt + 1}/${MAX_ATTEMPTS} — fetching`, { url: segment.url });
         await replayHeadersFor(segment.url);
-        const res = await fetch(segment.url);
+        const res = await fetch(segment.url, { signal: controller.signal });
+        debugLog(jobId, `segment ${index + 1}/${total} attempt ${attempt + 1}/${MAX_ATTEMPTS} — HTTP ${res.status}`);
         if (res.status === 401 || res.status === 403) {
           await logSegmentAuthDiagnostics(segment.url, res.status);
           if (await ensureRefreshed(index)) continue; // retry now, doesn't consume a backoff wait
@@ -355,9 +493,16 @@ async function runJob(
         return segment.key ? await decryptSegment(bytes, segment.key, manifest.mediaSequence + index) : bytes;
       } catch (err) {
         lastError = err;
+        debugLog(jobId, `segment ${index + 1}/${total} attempt ${attempt + 1}/${MAX_ATTEMPTS} — threw`, { error: err instanceof Error ? err.message : String(err) });
+      } finally {
+        control.abortControllers.delete(controller);
       }
+      // A CANCEL-triggered abort lands here as a caught error too — without this check the segment
+      // would burn through its remaining retries against a server that never actually rejected it.
+      if (control.cancelled) throw lastError instanceof Error ? lastError : new Error('Download cancelled.');
       if (attempt < MAX_ATTEMPTS - 1) await new Promise((r) => setTimeout(r, Math.min(500 * 2 ** attempt, 5000)));
     }
+    debugLog(jobId, `segment ${index + 1}/${total} — exhausted all ${MAX_ATTEMPTS} attempts, giving up`);
     throw lastError instanceof Error ? lastError : new Error(`Segment ${index + 1} failed after ${MAX_ATTEMPTS} attempts.`);
   }
 
@@ -369,9 +514,24 @@ async function runJob(
   let nextToFetch = 0;
   let writeChain: Promise<void> = Promise.resolve();
 
+  /**
+   * Bugfix: `inFlight` used to be tracked per FETCH ATTEMPT, decremented the instant `fetchSegment`
+   * settled — but a successful fetch's bytes still have to pass through `pendingWrites`/`flushReady`
+   * and this `writeChain` before its `'segments'` progress event actually goes out. That write is
+   * fully asynchronous and NOT bounded by `inFlight`, so the sequence could be: last in-flight fetch
+   * settles → `inFlight` hits 0 while a PAUSE is pending → engine emits `'paused'` → THEN the queued
+   * write for that same segment finishes and emits `'segments'` right after, silently overwriting
+   * `'paused'` back to an active phase. From the UI this looked exactly like the report: Pause never
+   * actually flips the button to Resume. `inFlight` now spans the WHOLE claimed-segment lifecycle
+   * (fetch — including retries — AND its eventual write), incremented once per `worker()` claim and
+   * decremented exactly once either here (write path) or in `worker()`'s catch (failure path) — never
+   * per attempt — so there is no gap where the counter can read 0 before every side effect of a
+   * claimed segment has actually happened.
+   */
   function enqueueWrite(index: number, bytes: ArrayBuffer): void {
     writeChain = writeChain.then(async () => {
       await opfsRun.write(new Uint8Array(bytes));
+      debugLog(jobId, `segment ${index + 1}/${total} written to OPFS`);
       control.segmentsDone = index + 1;
       const elapsedMs = Date.now() - control.startedAt;
       const bytesPerSec = control.bytesDownloaded / Math.max(elapsedMs / 1000, 1);
@@ -380,6 +540,7 @@ async function runJob(
       // the UI's job to add; this is just the number.
       const etaMs = control.segmentsDone > 0 ? Math.round(((total - control.segmentsDone) * elapsedMs) / control.segmentsDone) : undefined;
       emit(jobId, 'segments', { segmentsDone: control.segmentsDone, segmentsTotal: total, bytesPerSec, etaMs });
+      noteFetchSettled(jobId, control);
     });
   }
 
@@ -401,14 +562,33 @@ async function runJob(
       if (control.cancelled) return;
       const index = nextToFetch++;
       if (index >= total) return;
+      control.inFlight++; // spans fetch (incl. retries) through this segment's eventual write — see enqueueWrite's doc comment
       let bytes: ArrayBuffer;
       try {
         bytes = await fetchSegment(index);
       } catch (err) {
+        noteFetchSettled(jobId, control); // no write will happen for this segment — settle here instead
+        // A CANCEL-triggered abort throws too (fetchSegment's own AbortController), but
+        // `control.cancelled` is already true by the time it does — `cancelJob` sets it
+        // synchronously before calling `.abort()`. That's a true cancellation, not a real failure,
+        // so this worker must RETURN (not throw): `runJob`'s `if (control.cancelled)` check after
+        // `Promise.all` only sees a clean cancel when EVERY worker returns normally — a rethrow here
+        // would route it through the `catch` below instead and misreport it as an error.
+        if (control.cancelled) {
+          debugLog(jobId, `segment ${index + 1}/${total} — worker returning cleanly (cancelled)`);
+          return;
+        }
+        debugLog(jobId, `segment ${index + 1}/${total} — real failure, aborting whole job`, { error: err instanceof Error ? err.message : String(err) });
         control.cancelled = true;
         throw err;
       }
-      if (control.cancelled) return;
+      if (control.cancelled) {
+        // Fetched successfully but CANCEL landed in the meantime (e.g. another worker's segment
+        // failed for real) — this segment is being discarded without ever reaching `enqueueWrite`,
+        // so its `inFlight++` above must still be balanced here, or it leaks forever.
+        noteFetchSettled(jobId, control);
+        return;
+      }
       pendingWrites.set(index, bytes);
       flushReady();
     }
@@ -428,11 +608,15 @@ async function runJob(
 
   try {
     if (manifest.initSegment) {
+      debugLog(jobId, 'fetching init segment (#EXT-X-MAP)');
       await opfsRun.write(new Uint8Array(await fetchInitSegment(manifest.initSegment)));
+      debugLog(jobId, 'init segment written');
     }
 
     const workerCount = Math.min(SEGMENT_POOL_SIZE, total);
+    debugLog(jobId, `spinning up ${workerCount} worker(s)`);
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    debugLog(jobId, `all workers returned — cancelled=${control.cancelled}`);
 
     // Reached only when every worker RETURNED (not threw) — either every segment succeeded, or a
     // CANCEL fired and every worker exited early via the `cancelled` checks above with no error.
@@ -444,17 +628,206 @@ async function runJob(
     }
 
     await writeChain;
+    debugLog(jobId, 'writeChain drained — finishing OPFS run and producing output');
     const file = await opfsRun.finish();
     // An init segment is what distinguishes fMP4 from MPEG-TS, so it also decides the container the
     // concatenated bytes already are.
     await produceOutput(jobId, file, sourceUrl, manifest.initSegment ? 'mp4' : 'ts');
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    console.error(`Synapse download engine: job ${jobId} failed`, err);
     await writeChain.catch(() => {});
     await opfsRun.abort();
     emit(jobId, 'error', { message });
   } finally {
     void removeOpfsRun(runId).catch(() => {});
+  }
+}
+
+/**
+ * docs/ROADMAP.md §8.2 — opt-in "Turbo download": a multi-connection Range downloader for a plain
+ * static `video`/`audio` file, used only when the Side Panel's Turbo toggle is on (default off).
+ * Unlike the HLS job above, there's no manifest, no format conversion, no remux — the output is
+ * exactly the source bytes, so the only job here is fetching N byte-ranges in parallel and landing
+ * each one at its own OPFS offset the instant it arrives.
+ */
+const TURBO_CHUNK_COUNT = 6; // within the roadmap's stated 4–8 pool size
+const MIN_TURBO_SIZE_BYTES = 5 * 1024 * 1024; // below this, N-connection overhead isn't worth it
+
+interface RangeProbeResult {
+  contentLength: number;
+}
+
+/**
+ * docs/ROADMAP.md §8.2 — `HEAD` first (checks both `Content-Length` and `Accept-Ranges: bytes`).
+ * Broadened slightly from the roadmap's literal wording: the `GET Range: bytes=0-0` fallback fires
+ * whenever HEAD didn't CONCLUSIVELY confirm range support (missing/wrong `Accept-Ranges` on an
+ * otherwise-200 response also triggers it), not only on a HEAD 405 — plenty of real servers support
+ * ranges without advertising the header, and the fallback probe is cheap regardless of why HEAD came
+ * up short. Returns `undefined` on any failure to confirm — caller falls back to `chrome.downloads`.
+ */
+async function probeRangeSupport(url: string, replayHeadersFor: (url: string) => Promise<void>): Promise<RangeProbeResult | undefined> {
+  await replayHeadersFor(url);
+  try {
+    const head = await fetch(url, { method: 'HEAD' });
+    if (head.ok) {
+      const length = Number(head.headers.get('Content-Length'));
+      if (head.headers.get('Accept-Ranges') === 'bytes' && Number.isFinite(length) && length > 0) {
+        return { contentLength: length };
+      }
+    }
+  } catch {
+    // Fall through to the ranged-GET probe below.
+  }
+  try {
+    const res = await fetch(url, { headers: { Range: 'bytes=0-0' } });
+    await res.arrayBuffer().catch(() => {}); // drain the tiny 1-byte body
+    if (res.status !== 206) return undefined;
+    const contentRange = res.headers.get('Content-Range'); // "bytes 0-0/12345"
+    const total = contentRange ? Number(contentRange.split('/')[1]) : NaN;
+    return Number.isFinite(total) && total > 0 ? { contentLength: total } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function startTurboJob(jobId: string, url: string): Promise<void> {
+  if (jobs.has(jobId)) return; // already running
+  const control: JobControl = {
+    cancelled: false,
+    pausedPromise: null,
+    resolvePause: null,
+    segmentsDone: 0,
+    segmentsTotal: 0,
+    bytesDownloaded: 0,
+    startedAt: Date.now(),
+    abortControllers: new Set(),
+    inFlight: 0,
+    kind: 'chunks',
+  };
+  jobs.set(jobId, control);
+  debugLog(jobId, `START_TURBO — url=${url}`);
+  try {
+    const replayHeadersFor = await createReplayHeaderApplier(url);
+    const probe = await probeRangeSupport(url, replayHeadersFor);
+    debugLog(jobId, 'range probe result', probe ? { contentLength: probe.contentLength } : { supported: false });
+
+    if (control.cancelled) {
+      emit(jobId, 'cancelled');
+      return;
+    }
+
+    // docs/ROADMAP.md §8.2 — "Không xác nhận được → im lặng dùng chrome.downloads." Same silent
+    // fallback for a file too small for N-connection overhead to be worth it (not in the original
+    // spec text, but the reasoning is identical).
+    if (!probe || probe.contentLength < MIN_TURBO_SIZE_BYTES) {
+      debugLog(jobId, 'falling back to chrome.downloads.download (no/weak range support, or file too small)');
+      chrome.downloads.download({ url });
+      emit(jobId, 'done', { message: 'Downloaded directly — this server or file is not a good fit for Turbo download.' });
+      return;
+    }
+
+    const total = probe.contentLength;
+    const chunkCount = TURBO_CHUNK_COUNT;
+    const chunkSize = Math.ceil(total / chunkCount);
+    control.segmentsTotal = chunkCount;
+    debugLog(jobId, `${chunkCount} chunk(s) of ~${chunkSize} bytes each, total ${total} bytes`);
+
+    const runId = crypto.randomUUID();
+    const opfsRun = await createOpfsRun(runId);
+    let writeChain: Promise<void> = Promise.resolve();
+    let doneCount = 0;
+
+    /**
+     * One large ranged GET per chunk, retried with backoff like HLS's `fetchSegment` — same
+     * per-attempt `AbortController` (registered on `control.abortControllers`) so CANCEL interrupts
+     * immediately even mid-transfer through a chunk that could be hundreds of MB.
+     */
+    async function fetchChunk(index: number): Promise<void> {
+      const start = index * chunkSize;
+      const end = Math.min(start + chunkSize, total) - 1;
+      if (start > end) return; // chunkCount doesn't evenly divide total — nothing left for this index
+      const MAX_ATTEMPTS = 4;
+      let lastError: unknown;
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        if (control.cancelled) return;
+        if (control.pausedPromise) await control.pausedPromise; // boundary-only — see JobControl's doc comment
+        if (control.cancelled) return;
+        const controller = new AbortController();
+        control.abortControllers.add(controller);
+        control.inFlight++;
+        try {
+          debugLog(jobId, `chunk ${index + 1}/${chunkCount} attempt ${attempt + 1}/${MAX_ATTEMPTS} — fetching bytes=${start}-${end}`);
+          await replayHeadersFor(url);
+          const res = await fetch(url, { headers: { Range: `bytes=${start}-${end}` }, signal: controller.signal });
+          debugLog(jobId, `chunk ${index + 1}/${chunkCount} attempt ${attempt + 1}/${MAX_ATTEMPTS} — HTTP ${res.status}`);
+          if (res.status !== 206 && res.status !== 200) throw new Error(`Part ${index + 1} failed: HTTP ${res.status}`);
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          control.bytesDownloaded += bytes.byteLength;
+          writeChain = writeChain.then(() => opfsRun.write(bytes, start));
+          await writeChain;
+          debugLog(jobId, `chunk ${index + 1}/${chunkCount} written to OPFS`);
+          doneCount++;
+          control.segmentsDone = doneCount;
+          const elapsedMs = Date.now() - control.startedAt;
+          const bytesPerSec = control.bytesDownloaded / Math.max(elapsedMs / 1000, 1);
+          const etaMs = doneCount > 0 ? Math.round(((chunkCount - doneCount) * elapsedMs) / doneCount) : undefined;
+          emit(jobId, 'chunks', { segmentsDone: doneCount, segmentsTotal: chunkCount, bytesPerSec, etaMs });
+          return;
+        } catch (err) {
+          lastError = err;
+          debugLog(jobId, `chunk ${index + 1}/${chunkCount} attempt ${attempt + 1}/${MAX_ATTEMPTS} — threw`, { error: err instanceof Error ? err.message : String(err) });
+        } finally {
+          control.abortControllers.delete(controller);
+          // Tracked per ATTEMPT (not per chunk) on purpose: the backoff sleep AND the pause-boundary
+          // wait below both happen between attempts, outside this try/finally, so a chunk that's
+          // between retries or waiting on a RESUME isn't actually using the network right now and
+          // must not hold up a PAUSE from settling into `'paused'` (see `noteFetchSettled`).
+          noteFetchSettled(jobId, control);
+        }
+        if (control.cancelled) return; // CANCEL's abort() lands here as a caught error — don't retry it
+        if (attempt < MAX_ATTEMPTS - 1) await new Promise((r) => setTimeout(r, Math.min(500 * 2 ** attempt, 5000)));
+      }
+      debugLog(jobId, `chunk ${index + 1}/${chunkCount} — exhausted all ${MAX_ATTEMPTS} attempts, giving up`);
+      // Same fail-fast handshake as HLS's `worker()`: mark the job cancelled BEFORE throwing so every
+      // other in-flight chunk's next attempt-loop check sees it and stops claiming further retries,
+      // then let `Promise.all` below propagate this rejection straight to the outer `catch` — never
+      // through the `if (control.cancelled)` branch, which stays reachable only by a true CANCEL
+      // command (every chunk returning normally, none throwing).
+      control.cancelled = true;
+      throw lastError instanceof Error ? lastError : new Error(`Part ${index + 1} failed after ${MAX_ATTEMPTS} attempts.`);
+    }
+
+    try {
+      await Promise.all(Array.from({ length: chunkCount }, (_, i) => fetchChunk(i)));
+      debugLog(jobId, `all chunks returned — cancelled=${control.cancelled}`);
+
+      // Reached only when every chunk RETURNED (not threw) — i.e. a true CANCEL, not a real failure
+      // (a real failure sets `cancelled` too, but THROWS, which `Promise.all` propagates straight to
+      // the `catch` below instead of here — same distinction HLS's `runJob` relies on).
+      if (control.cancelled) {
+        await opfsRun.abort();
+        emit(jobId, 'cancelled');
+        return;
+      }
+
+      const file = await opfsRun.finish();
+      debugLog(jobId, `OPFS run finished, ${file.size} bytes — handing to chrome.downloads`);
+      downloadFile(file, fileNameFromUrl(url) || `download-${jobId}`);
+      emit(jobId, 'done');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`Synapse download engine: turbo job ${jobId} failed`, err);
+      await opfsRun.abort();
+      emit(jobId, 'error', { message });
+    } finally {
+      void removeOpfsRun(runId).catch(() => {});
+    }
+  } catch (err) {
+    console.error(`Synapse download engine: turbo job ${jobId} failed`, err);
+    emit(jobId, 'error', { message: err instanceof Error ? err.message : String(err) });
+  } finally {
+    jobs.delete(jobId);
   }
 }
 
@@ -464,13 +837,23 @@ type OutputContainer = 'ts' | 'mp4';
 
 /** Triggers the download from WITHIN this document — a blob: URL only resolves from the same
  * document that created it, which is exactly what chrome.offscreen.Reason.BLOBS exists for. */
+/**
+ * Bugfix: this used to call `chrome.downloads.download()` directly — throws
+ * "Cannot read properties of undefined (reading 'download')" every time, since `chrome.downloads` is
+ * one of the APIs unavailable to Offscreen Documents (see this file's `requestFromBackground` doc
+ * comment). The blob: URL itself is still created HERE — it only resolves within the document that
+ * created it — but the actual `chrome.downloads.download()` call is relayed to background, which
+ * Chrome's own docs confirm as the supported pattern: create the object URL in the offscreen
+ * document, message the URL string back, trigger the download from a context that has the API.
+ */
 function downloadFile(blob: Blob, fileName: string): void {
   const blobUrl = URL.createObjectURL(blob);
-  chrome.downloads.download({ url: blobUrl, filename: fileName }, () => {
-    // The callback firing only means "accepted, download started" — not "finished reading the
-    // blob". A short synchronous revoke would race the download manager still needing the URL.
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
-  });
+  chrome.runtime.sendMessage({ type: 'synapse:trigger-download', url: blobUrl, filename: fileName }).catch(() => {});
+  // The blob: URL must stay valid until the download manager has actually read it — background's
+  // chrome.downloads.download() only confirms the download was ACCEPTED, not that reading finished,
+  // and that confirmation doesn't even round-trip back here. A flat delay is the best available
+  // signal from this side.
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
 }
 
 /** docs/ROADMAP.md #8.5 — the "no ffmpeg" fast path: concatenated MPEG-TS is playable because TS is

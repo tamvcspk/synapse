@@ -11,6 +11,22 @@
   font-size: 1.1rem;
 }
 
+/* docs/ROADMAP.md §8.2 — opt-in Turbo download toggle, sits between the header and the list. Pico's
+   default checkbox/label spacing is fine as-is; only the row layout needs a small tweak. */
+.turbo-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--pico-muted-color);
+  margin-bottom: 0.75rem;
+  cursor: pointer;
+}
+
+.turbo-toggle input[type='checkbox'] {
+  margin: 0;
+}
+
 .media-list {
   display: flex;
   flex-direction: column;

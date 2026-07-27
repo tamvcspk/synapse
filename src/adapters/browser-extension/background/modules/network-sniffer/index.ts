@@ -5,6 +5,7 @@ import { sniffMediaMagicBytes } from '../../../../../shared/media-magic-bytes';
 import { isAdNetworkDomain, looksLikeAdHostnamePrefix } from '../../../../../shared/ad-domain-denylist';
 import { looksLikeAdOrTrackerPath, looksLikeAdMacroTemplate } from '../../../../../shared/junk-url-patterns';
 import { looksLikeSignedUrl } from '../../../../../shared/signed-url-detector';
+import { describeResolution } from '../../../../../shared/resolution-label';
 import { ensureNetworkObserver, type ObservedRequest } from '../../../utils/webrequest-media-observer';
 import { syncHeaderReplayRule } from '../../../utils/header-replay-rules';
 import {
@@ -514,7 +515,7 @@ export const NetworkSnifferModule: Module<
     collapseVariantShadowedEntries(await listDetectedMedia()).map((m) => ({
       ...m,
       downloadUrl: m.variants?.[0]?.url ?? m.url,
-      variantLinks: m.variants?.map((v, i) => ({ url: v.url, label: v.resolution ?? `Option ${i + 1}` })),
+      variantLinks: m.variants?.map((v, i) => ({ url: v.url, label: describeResolution(v.resolution, `Option ${i + 1}`) })),
     })) as unknown as Record<string, unknown>[],
   async run(command, ctx) {
     if (!(await isModuleActive('network-sniffer'))) {

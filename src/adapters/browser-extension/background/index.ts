@@ -9,7 +9,9 @@ import { setUserScriptsPermissionGranted } from '../module-registry/storage';
 import { DASHBOARD_PATH } from '../ui/dashboard/dashboard-path';
 import { SIDE_PANEL_PATH } from '../ui/side-panel/side-panel-path';
 import { ensureOffscreenDocument } from '../utils/offscreen-manager';
-import type { DownloadEngineCommand } from '../../../shared/download-engine-protocol';
+import { describeHeaderReplay, syncHeaderReplayRule } from '../utils/header-replay-rules';
+import { listDetectedMedia } from './modules/network-sniffer/store';
+import type { DownloadEngineCommand, DownloadEngineRelayedCommand } from '../../../shared/download-engine-protocol';
 import { chromeRuntimeBus } from './services/bus';
 import { chromeStorageCache } from './services/cache';
 // import a concrete ai factory once a Module actually declares it — see kernel-bootstrap skill
@@ -55,14 +57,70 @@ chrome.runtime.onMessage.addListener((message: { type?: string; moduleId?: strin
 
 // docs/ROADMAP.md §8.1 — Side Panel/Dashboard send this to START/PAUSE/RESUME/CANCEL an HLS
 // download; only background can own chrome.offscreen.createDocument (utils/offscreen-manager.ts),
-// so this relay ensures the singleton Offscreen Document exists BEFORE forwarding the same message
-// on — the offscreen page's own listener (ui/offscreen/main.ts) picks it up from there. Forwarding
-// via a plain chrome.runtime.sendMessage (not a return value) mirrors every other relay in this
-// file; the sender never receives a reply, only the async `synapse:download-engine-event` broadcasts
-// utils/download-engine.ts emits as the job progresses.
+// so this relay ensures the singleton Offscreen Document exists BEFORE forwarding it on.
+//
+// Bugfix: this used to re-send the message under the SAME `type` it received — but
+// `chrome.runtime.sendMessage` broadcasts to every listening context, not just the intended
+// recipient. Once the offscreen document already exists (any download after the first one in a
+// session), its own listener received the Side Panel's ORIGINAL broadcast directly, then received
+// THIS relay's re-broadcast a moment later too — the same command landed twice, which was the real
+// trigger behind a job hitting an OPFS `InvalidStateError` (two overlapping `createOpfsRun` calls
+// for what was meant to be a single job). Re-typed to `DownloadEngineRelayedCommand`
+// (`synapse:download-engine-command-relayed`) — a type the offscreen document is the ONLY listener
+// for (ui/offscreen/main.ts no longer listens for the client-facing type at all), so it structurally
+// cannot receive the original broadcast a second time.
 chrome.runtime.onMessage.addListener((message: DownloadEngineCommand | undefined) => {
   if (message?.type !== 'synapse:download-engine-command') return;
-  void ensureOffscreenDocument().then(() => chrome.runtime.sendMessage(message).catch(() => {}));
+  const relayed: DownloadEngineRelayedCommand = { ...message, type: 'synapse:download-engine-command-relayed' };
+  void ensureOffscreenDocument().then(() => chrome.runtime.sendMessage(relayed).catch(() => {}));
+});
+
+/**
+ * docs/ROADMAP.md §8.11 — bugfix: Offscreen Documents can use ONLY `chrome.runtime` (confirmed
+ * against Chrome's own docs after a real download hit `chrome.downloads.download()` throwing
+ * "Cannot read properties of undefined" from inside `utils/download-engine.ts`). `chrome.storage`,
+ * `chrome.declarativeNetRequest`, and `chrome.downloads` are all unavailable there — the first two
+ * failed SILENTLY (swallowed by a `.catch()`), quietly breaking §7.1's header replay for every
+ * download since the engine moved into the Offscreen Document; only `chrome.downloads` crashed
+ * loudly, which is what actually surfaced this. Background is the one context with full `chrome.*`
+ * access, so it now does all three on the engine's behalf via simple request/response relays —
+ * matching the `sendResponse`+`return true` pattern already used by the kernel dispatch listener
+ * above, just gated on each message's own `type` instead of that one's `workflowId`.
+ */
+chrome.runtime.onMessage.addListener((message: { type?: string; url?: string } | undefined, _sender, sendResponse) => {
+  if (message?.type !== 'synapse:query-replay-headers' || !message.url) return;
+  const url = message.url;
+  void listDetectedMedia().then((all) => {
+    const match = all.find((m) => m.url === url || m.variants?.some((v) => v.url === url));
+    sendResponse({ headers: match?.requestHeaders });
+  });
+  return true;
+});
+
+chrome.runtime.onMessage.addListener((message: { type?: string; host?: string; headers?: Record<string, string> } | undefined, _sender, sendResponse) => {
+  if (message?.type !== 'synapse:sync-header-replay-rule' || !message.host || !message.headers) return;
+  void syncHeaderReplayRule(message.host, message.headers).then(
+    () => sendResponse({ ok: true }),
+    () => sendResponse({ ok: false }),
+  );
+  return true;
+});
+
+chrome.runtime.onMessage.addListener((message: { type?: string; host?: string } | undefined, _sender, sendResponse) => {
+  if (message?.type !== 'synapse:describe-header-replay' || !message.host) return;
+  void describeHeaderReplay(message.host).then(sendResponse);
+  return true;
+});
+
+// docs/ROADMAP.md §8.11 — the download engine creates the Blob/blob: URL itself (inside the
+// Offscreen Document — a blob: URL only resolves within the document that created it), but the
+// actual `chrome.downloads.download()` call has to happen here, since that API isn't available in
+// the Offscreen Document. This is Chrome's own documented pattern for downloading a Blob generated
+// outside a context that has `chrome.downloads` — create the object URL there, message the URL
+// string back, trigger the download from a context that has the API.
+chrome.runtime.onMessage.addListener((message: { type?: string; url?: string; filename?: string } | undefined) => {
+  if (message?.type !== 'synapse:trigger-download' || !message.url) return;
+  void chrome.downloads.download({ url: message.url, filename: message.filename });
 });
 
 // docs/ROADMAP.md §6.2 — network-sniffer's floating icon (utils/floating-widget.ts's
@@ -125,7 +183,18 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 });
 chrome.tabs.onRemoved.addListener((tabId) => disabledSidePanelTabs.delete(tabId));
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+// Bugfix: this had NO type guard at all — it called `sendResponse` for literally every message this
+// service worker ever receives, including ones meant for other listeners entirely. `kernel.run([], ...)`
+// with an empty module array resolves almost immediately (no modules to run), so this was racing —
+// and usually WINNING — against any other listener trying to `sendResponse` to the SAME message
+// (Chrome delivers whichever listener's `sendResponse` call lands first; a later one is silently a
+// no-op). Harmless as long as nothing relied on a real response coming back, but became a real bug
+// the moment request/response-style relays were added below (§8.11) — this workflow dispatch is also
+// still unimplemented scaffolding (`workflowId` isn't read anywhere yet, hence the hardcoded `[]`),
+// so gating it on `message?.workflowId` being present costs nothing today and stops it from
+// swallowing every other listener's response.
+chrome.runtime.onMessage.addListener((message: { workflowId?: string; input?: unknown } | undefined, _sender, sendResponse) => {
+  if (!message?.workflowId) return;
   kernel.run(/* resolve modules for message.workflowId */ [], message.input, (failure) => {
     console.error(`Synapse: module "${failure.moduleId}" failed`, failure.error);
   }).then(sendResponse);

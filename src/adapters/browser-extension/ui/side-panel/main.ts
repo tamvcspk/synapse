@@ -4,6 +4,7 @@ import van from 'vanjs-core';
 import { collapseVariantShadowedEntries, listDetectedMedia, type DetectedMedia } from '../../background/modules/network-sniffer/store';
 import { DASHBOARD_PATH } from '../dashboard/dashboard-path';
 import type { DownloadEngineCommand, DownloadEngineEvent, DownloadEnginePhase } from '../../../../shared/download-engine-protocol';
+import { describeResolution } from '../../../../shared/resolution-label';
 import downloadIconUrl from '../../../../assets/icon/download.svg';
 
 /**
@@ -15,7 +16,7 @@ import downloadIconUrl from '../../../../assets/icon/download.svg';
  * shows the entire cross-tab detected-media log unfiltered.
  */
 
-const { div, h1, p, span, select, option, button, img, progress: progressTag } = van.tags;
+const { div, h1, p, span, select, option, button, img, label, input, progress: progressTag } = van.tags;
 
 const root = document.getElementById('root')!;
 
@@ -36,6 +37,11 @@ interface DownloadProgress {
   message?: string | undefined;
   bytesPerSec?: number | undefined;
   etaMs?: number | undefined;
+  /** Which resolution/variant this particular job is downloading — captured once at click time
+   * (`handleDownload`) since `selectedVariantUrl` can change afterward (the picker stays interactive
+   * during a download) without affecting the job already in flight. Shown alongside progress so a
+   * user with several resolutions available isn't left guessing which one is actually downloading. */
+  resolutionLabel?: string | undefined;
 }
 const activeDownloads = new Map<string, DownloadProgress>();
 // Gives the 'done'/'error'/'cancelled' state a moment on screen before this row's progress UI
@@ -46,6 +52,42 @@ function sendEngineCommand(op: DownloadEngineCommand['op'], jobId: string, url?:
   const command: DownloadEngineCommand = { type: 'synapse:download-engine-command', op, jobId, url };
   void chrome.runtime.sendMessage(command).catch(() => {});
 }
+
+/**
+ * Bugfix: every state change used to call `render()` directly, which does a full
+ * `root.replaceChildren()` + rebuild of the ENTIRE list (every item, not just the one that
+ * changed) — VanJS has no fine-grained DOM diffing here, this is a from-scratch teardown/rebuild
+ * every time. That's fine for occasional triggers (a click, a `chrome.storage` change), but the
+ * `synapse:download-engine-event` listener below can fire many times per SECOND while a stream with
+ * hundreds of segments is downloading — rebuilding every button in the whole panel that often is
+ * what actually caused the reported flicker AND missed clicks (a click can land on a node that's
+ * mid-teardown from the NEXT rebuild firing before the browser even finished painting the last one).
+ * `scheduleRender` coalesces any number of render requests within one animation frame into a single
+ * `render()` call — caps the rebuild rate at the display's own repaint rate, which is both
+ * imperceptible for a single click and enough to eliminate the flicker under a rapid event burst.
+ */
+let renderScheduled = false;
+function scheduleRender(): void {
+  if (renderScheduled) return;
+  renderScheduled = true;
+  requestAnimationFrame(() => {
+    renderScheduled = false;
+    render();
+  });
+}
+
+// docs/ROADMAP.md §8.2 — opt-in "Turbo download" (off by default, per the roadmap's own explicit
+// design: a hand-rolled N-connection downloader gives up chrome.downloads' free resume/no-RAM-cost/
+// download-shelf visibility, so it must never be silently forced on). A single header-level toggle,
+// not a per-item button — reads more naturally as a mode than a second button on every row.
+// Persisted per the "each module owns its own storage" convention, namespaced under network-sniffer
+// even though this is a UI preference, not `DetectedMedia` collection data.
+const TURBO_STORAGE_KEY = 'network-sniffer:turboDownloadsEnabled';
+let turboEnabled = false;
+void chrome.storage.local.get(TURBO_STORAGE_KEY).then((result) => {
+  turboEnabled = result[TURBO_STORAGE_KEY] === true;
+  scheduleRender();
+});
 
 async function activeTabOrigin(): Promise<string | undefined> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -80,11 +122,24 @@ async function load(): Promise<void> {
         }),
       )
     : [];
-  render();
+  scheduleRender();
 }
 
 function resolveDownloadUrl(item: DetectedMedia): string {
   return selectedVariantUrl.get(item.id) ?? item.variants?.[0]?.url ?? item.url;
+}
+
+/** Same label shown in the resolution `<select>` (see `renderItem`'s `variantSelect`), resolved for
+ * whichever variant `url` actually is — used to stamp a download's progress row with the resolution
+ * it's actually fetching, since the picker itself stays interactive (and so can change) while a
+ * download for a PREVIOUS selection is still running. */
+function variantLabelForUrl(item: DetectedMedia, url: string): string | undefined {
+  if (item.variants && item.variants.length > 0) {
+    const index = item.variants.findIndex((v) => v.url === url);
+    const variant = index >= 0 ? item.variants[index] : item.variants[0];
+    return describeResolution(variant?.resolution, `Variant ${(index >= 0 ? index : 0) + 1}`);
+  }
+  return item.resolution;
 }
 
 function handleDownload(item: DetectedMedia): void {
@@ -96,9 +151,20 @@ function handleDownload(item: DetectedMedia): void {
     // docs/ROADMAP.md §8.1 — no Tab opens anymore: this just starts a job in the singleton
     // Offscreen Document (background/index.ts ensures it exists before forwarding the command).
     // `jobId` is this entry's own id, same convention the old `entryId` used.
-    activeDownloads.set(item.id, { phase: 'segments' });
-    render();
+    activeDownloads.set(item.id, { phase: 'segments', resolutionLabel: variantLabelForUrl(item, url) });
+    scheduleRender();
     sendEngineCommand('START', item.id, url);
+    return;
+  }
+  // docs/ROADMAP.md §8.2 — Turbo toggle only affects this branch (`kind:'video'|'audio'`); `'stream'`
+  // above already never used chrome.downloads. Same optimistic-progress-row pattern as the stream
+  // branch: the engine itself silently falls back to chrome.downloads (with an explanatory `message`
+  // on its 'done' event) if the server doesn't support ranged requests, so this is never a dead end.
+  if (turboEnabled) {
+    if (activeDownloads.has(item.id)) return;
+    activeDownloads.set(item.id, { phase: 'chunks', resolutionLabel: variantLabelForUrl(item, item.url) });
+    scheduleRender();
+    sendEngineCommand('START_TURBO', item.id, item.url);
     return;
   }
   void chrome.downloads.download({ url: item.url });
@@ -110,7 +176,7 @@ function handleDownload(item: DetectedMedia): void {
 function settleDownload(entryId: string): void {
   setTimeout(() => {
     activeDownloads.delete(entryId);
-    render();
+    scheduleRender();
   }, DOWNLOAD_SETTLE_DELAY_MS);
 }
 
@@ -126,7 +192,7 @@ chrome.runtime.onMessage.addListener((message: Partial<DownloadEngineEvent> & { 
     bytesPerSec: message.bytesPerSec,
     etaMs: message.etaMs,
   });
-  render();
+  scheduleRender();
   if (message.phase === 'done' || message.phase === 'error' || message.phase === 'cancelled') settleDownload(message.jobId);
 });
 
@@ -182,29 +248,45 @@ function renderDownloadProgress(state: DownloadProgress) {
     return span({ class: 'download-progress-text' }, 'Cancelled');
   }
   if (state.phase === 'done') {
-    return span({ class: 'download-progress-text' }, 'Done');
+    // docs/ROADMAP.md §8.2 — turbo's silent-fallback-to-chrome.downloads case rides the same 'done'
+    // phase but carries an explanatory `message` instead of the usual bare "Done".
+    return span({ class: 'download-progress-text' }, state.message ?? 'Done');
   }
   if (state.phase === 'remux') {
     return span({ class: 'download-progress-text' }, 'Remuxing...');
   }
+  // 'segments' (HLS) and 'chunks' (§8.2 turbo) render identically — both are just "N of M pieces
+  // done" with the same done/total/bytesPerSec/etaMs shape (shared/download-engine-protocol.ts).
   const total = state.total;
-  const segmentText = total ? `Segment ${state.done ?? 0}/${total}` : 'Starting...';
+  const partText = total ? `Part ${state.done ?? 0}/${total}` : 'Starting...';
   const etaText = state.etaMs !== undefined ? ` (${formatEta(state.etaMs)})` : '';
+  // 'pausing' — bugfix: PAUSE only stops NEW claims, so whatever was already in flight (up to one
+  // per worker/chunk) is still genuinely finishing. Showing "Paused" at this point was a lie the
+  // engine couldn't back up — those still-arriving pieces kept nudging `total`/`done` forward
+  // underneath it. The engine now only emits the real `'paused'` phase once everything has settled.
+  const statusPrefix = state.phase === 'paused' ? 'Paused — ' : state.phase === 'pausing' ? 'Pausing… ' : '';
   return div(
     { class: 'download-progress' },
     total ? progressTag({ value: state.done ?? 0, max: total }) : progressTag(),
-    span({ class: 'download-progress-text' }, state.phase === 'paused' ? `Paused — ${segmentText}` : `${segmentText}${etaText}`),
+    span({ class: 'download-progress-text' }, statusPrefix ? `${statusPrefix}${partText}` : `${partText}${etaText}`),
   );
 }
 
 function renderItem(item: DetectedMedia) {
+  // Bug fixed: `selected` used to be hardcoded to `i === 0` — every re-render (which happens on
+  // EVERY progress event while a download is running, not just on click) rebuilt this <select> from
+  // scratch and always marked the FIRST option selected in the DOM, even though `selectedVariantUrl`
+  // still remembered the user's real choice underneath. Deriving `selected` from the same
+  // `resolveDownloadUrl(item)` the Download button itself reads keeps the visible selection in sync
+  // with actual state across every re-render, not just the first one.
+  const currentUrl = resolveDownloadUrl(item);
   const variantSelect =
     item.variants && item.variants.length > 0
       ? select(
           {
             onchange: (e: Event) => selectedVariantUrl.set(item.id, (e.target as HTMLSelectElement).value),
           },
-          ...item.variants.map((v, i) => option({ value: v.url, selected: i === 0 }, v.resolution ?? `Variant ${i + 1}`)),
+          ...item.variants.map((v, i) => option({ value: v.url, selected: v.url === currentUrl }, describeResolution(v.resolution, `Variant ${i + 1}`))),
         )
       : null;
   const summary = resolutionSummary(item);
@@ -233,6 +315,10 @@ function renderItem(item: DetectedMedia) {
             img({ src: downloadIconUrl, alt: '' }),
           ),
     ),
+    // Which resolution is actually downloading — shown once a job is running so a video with
+    // several resolutions doesn't leave the user guessing (reuses .media-item-summary's styling,
+    // same "small muted line" treatment as the segment-count/resolution summary above).
+    downloadProgress?.resolutionLabel ? p({ class: 'media-item-summary' }, `Downloading: ${downloadProgress.resolutionLabel}`) : null,
     // Own full-width row, not sharing .media-item-actions with the resolution <select> — a
     // <progress> bar/status line squeezed into that row's remaining space (next to the select) was
     // cramped and easy to miss.
@@ -240,22 +326,31 @@ function renderItem(item: DetectedMedia) {
       ? div(
           { class: 'media-item-progress' },
           renderDownloadProgress(downloadProgress),
-          // docs/ROADMAP.md §8.1 — Pause/Resume/Cancel only make sense while the segment pool is
-          // actually running (or paused mid-run); the engine has no cancellation checkpoint during
-          // 'remux' (ffmpeg has already started), and the terminal phases are about to settle away
-          // on their own.
-          downloadProgress.phase === 'segments' || downloadProgress.phase === 'paused'
+          // docs/ROADMAP.md §8.1/§8.2 — Pause/Resume/Cancel only make sense while the segment/chunk
+          // pool is actually running, pausing, or fully paused; the engine has no cancellation
+          // checkpoint during 'remux' (ffmpeg has already started, HLS-only), and the terminal phases
+          // are about to settle away on their own.
+          downloadProgress.phase === 'segments' ||
+          downloadProgress.phase === 'chunks' ||
+          downloadProgress.phase === 'pausing' ||
+          downloadProgress.phase === 'paused'
             ? div(
                 { class: 'download-controls' },
-                button(
-                  {
-                    class: 'secondary',
-                    title: downloadProgress.phase === 'paused' ? 'Resume' : 'Pause',
-                    'aria-label': downloadProgress.phase === 'paused' ? 'Resume' : 'Pause',
-                    onclick: () => sendEngineCommand(downloadProgress.phase === 'paused' ? 'RESUME' : 'PAUSE', item.id),
-                  },
-                  downloadProgress.phase === 'paused' ? '▶' : '⏸',
-                ),
+                // 'pausing' — the PAUSE command was already sent; showing an active Pause/Resume
+                // toggle here would let a click send ANOTHER command (PAUSE again is a no-op, but
+                // RESUME on a job that hasn't actually stopped yet is confusing) before the engine has
+                // even reported it settled. Disabled and inert until the real 'paused' phase arrives.
+                downloadProgress.phase === 'pausing'
+                  ? button({ class: 'secondary', disabled: true, title: 'Pausing…', 'aria-label': 'Pausing' }, '⏸')
+                  : button(
+                      {
+                        class: 'secondary',
+                        title: downloadProgress.phase === 'paused' ? 'Resume' : 'Pause',
+                        'aria-label': downloadProgress.phase === 'paused' ? 'Resume' : 'Pause',
+                        onclick: () => sendEngineCommand(downloadProgress.phase === 'paused' ? 'RESUME' : 'PAUSE', item.id),
+                      },
+                      downloadProgress.phase === 'paused' ? '▶' : '⏸',
+                    ),
                 button(
                   { class: 'secondary', title: 'Cancel', 'aria-label': 'Cancel', onclick: () => sendEngineCommand('CANCEL', item.id) },
                   '✕',
@@ -267,6 +362,11 @@ function renderItem(item: DetectedMedia) {
   );
 }
 
+function toggleTurbo(e: Event): void {
+  turboEnabled = (e.target as HTMLInputElement).checked;
+  void chrome.storage.local.set({ [TURBO_STORAGE_KEY]: turboEnabled });
+}
+
 function render(): void {
   root.replaceChildren();
   van.add(
@@ -275,6 +375,13 @@ function render(): void {
       { class: 'panel-header' },
       h1('Media Sniffer'),
       button({ class: 'secondary', title: 'Settings', onclick: openDashboard }, '⚙'),
+    ),
+    // docs/ROADMAP.md §8.2 — off by default; only affects the video/audio Download branch (streams
+    // never used chrome.downloads to begin with).
+    label(
+      { class: 'turbo-toggle', title: 'Multi-connection downloader for direct video/audio files — off by default; only helps on servers that throttle per connection.' },
+      input({ type: 'checkbox', checked: turboEnabled, onchange: toggleTurbo }),
+      ' ⚡ Turbo downloads',
     ),
     items.length === 0 ? p('No media detected on this page yet.') : div({ class: 'media-list' }, ...items.map(renderItem)),
   );
