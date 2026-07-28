@@ -3,6 +3,11 @@ import './side-panel.css';
 import van from 'vanjs-core';
 import { collapseVariantShadowedEntries, listDetectedMedia, type DetectedMedia } from '../../background/modules/network-sniffer/store';
 import { DASHBOARD_PATH } from '../dashboard/dashboard-path';
+import { REVIEW_PATH } from '../review-path';
+import { isReviewData, publishReviewSession, storeReviewFiles, type ReviewPayload } from '../review-handoff';
+import { downloadReviewZip } from '../review-zip';
+import { listenForActionProgress } from '../action-progress';
+import { deleteBlob } from '../../utils/blob-store';
 import type { DownloadEngineCommand, DownloadEngineEvent, DownloadEnginePhase, DownloadJobCheckpoint } from '../../../../shared/download-engine-protocol';
 import { listDownloadJobCheckpoints } from '../../utils/download-job-checkpoints';
 import { describeResolution } from '../../../../shared/resolution-label';
@@ -230,6 +235,107 @@ chrome.runtime.onMessage.addListener((message: Partial<DownloadEngineEvent> & { 
   if (message.phase === 'done' || message.phase === 'error' || message.phase === 'cancelled') settleDownload(message.jobId);
 });
 
+// docs/ROADMAP.md §9.1 — Reader Mode Converter's in-page Convert/Crawl icons (content-scripts/
+// index.ts) run in-process and stream their progress/result here rather than to a Popup (which
+// would be destroyed on lost focus mid-crawl) or straight to a new Tab (which would hijack the
+// user's browsing before there's anything to show). UI-only, never persisted — same trade-off
+// `activeDownloads` above already accepts: resets on panel close/reopen, but the content-script
+// job itself is unaffected, only its progress display here.
+type ReaderModeJob =
+  | { status: 'running'; message: string; done?: number; total?: number }
+  | { status: 'done'; reviewId: string; payload: ReviewPayload }
+  | { status: 'error'; message: string };
+let readerModeJob: ReaderModeJob | undefined;
+
+listenForActionProgress((progress) => {
+  readerModeJob = { status: 'running', message: progress.message, done: progress.done, total: progress.total };
+  scheduleRender();
+});
+
+/** Stores the result's images (`storeReviewFiles` — this Side Panel is a full extension page, so
+ * unlike the content script that produced this result, it has IndexedDB access) so "Download ZIP"
+ * and "Open in new tab" both have `blobRef`s ready immediately, without re-fetching anything. */
+async function handleReaderModeResult(data: unknown): Promise<void> {
+  if (!isReviewData(data)) {
+    readerModeJob = { status: 'error', message: "This module's result is not in the expected {title, pages, files} shape." };
+    scheduleRender();
+    return;
+  }
+  // A previous job's blobs are only reachable through readerModeJob itself (no Review tab may
+  // ever have opened for it) — clear them before overwriting so they don't orphan.
+  if (readerModeJob?.status === 'done') {
+    for (const ref of readerModeJob.payload.fileRefs) void deleteBlob(ref.blobRef);
+  }
+  const reviewId = crypto.randomUUID();
+  const fileRefs = await storeReviewFiles(reviewId, data.files);
+  readerModeJob = { status: 'done', reviewId, payload: { title: data.title, pages: data.pages, fileRefs } };
+  scheduleRender();
+}
+
+chrome.runtime.onMessage.addListener((message: { type?: string; data?: unknown; message?: string } | undefined) => {
+  if (message?.type === 'synapse:reader-mode-result') {
+    void handleReaderModeResult(message.data);
+  } else if (message?.type === 'synapse:reader-mode-error') {
+    readerModeJob = { status: 'error', message: message.message ?? 'Unknown error' };
+    scheduleRender();
+  }
+});
+
+function handleReaderModeOpenTab(reviewId: string, payload: ReviewPayload): void {
+  // Reuses the SAME reviewId storeReviewFiles already minted above, so the blobs already stored
+  // for it stay valid — no re-storing needed.
+  void publishReviewSession(reviewId, payload).then(() => {
+    void chrome.tabs.create({ url: `${chrome.runtime.getURL(REVIEW_PATH)}?reviewId=${encodeURIComponent(reviewId)}` });
+  });
+}
+
+/** Shared by both sections so the two features read as clearly distinct parts of one panel
+ * instead of blending into a single list (docs/ROADMAP.md §9.1). */
+function renderSectionHeader(icon: string, title: string) {
+  return div({ class: 'panel-section-header' }, span({ class: 'panel-section-icon' }, icon), span(title));
+}
+
+function renderReaderModeSection() {
+  if (!readerModeJob) return null;
+
+  if (readerModeJob.status === 'running') {
+    // Real fill (not a plain indeterminate spinner) once done/total are known — crawlSite's
+    // pings always carry both; a single-page Convert never pings at all (fast enough this state
+    // is skipped entirely), so `total` stays undefined only in a window that's effectively never
+    // seen on screen.
+    const { done, total } = readerModeJob;
+    return div(
+      { class: 'reader-mode-section' },
+      renderSectionHeader('📄', 'Reader Mode'),
+      div(
+        { class: 'media-item-progress' },
+        total ? progressTag({ value: done ?? 0, max: total }) : progressTag(),
+        span({ class: 'download-progress-text' }, readerModeJob.message),
+      ),
+    );
+  }
+
+  if (readerModeJob.status === 'error') {
+    return div(
+      { class: 'reader-mode-section' },
+      renderSectionHeader('📄', 'Reader Mode'),
+      span({ class: 'download-progress-text download-progress-error' }, `Failed: ${readerModeJob.message}`),
+    );
+  }
+
+  const { payload, reviewId } = readerModeJob;
+  return div(
+    { class: 'reader-mode-section' },
+    renderSectionHeader('📄', 'Reader Mode'),
+    p({ class: 'media-item-summary' }, `${payload.title} — ${payload.pages.length} page${payload.pages.length === 1 ? '' : 's'}`),
+    div(
+      { class: 'reader-mode-actions' },
+      button({ class: 'secondary', onclick: () => void downloadReviewZip(payload, true) }, 'Download ZIP'),
+      button({ onclick: () => handleReaderModeOpenTab(reviewId, payload) }, 'Open in new tab'),
+    ),
+  );
+}
+
 function openDashboard(): void {
   void chrome.tabs.create({ url: `${chrome.runtime.getURL(DASHBOARD_PATH)}?moduleId=network-sniffer` });
 }
@@ -418,9 +524,13 @@ function render(): void {
     root,
     div(
       { class: 'panel-header' },
-      h1('Media Sniffer'),
-      button({ class: 'secondary', title: 'Settings', onclick: openDashboard }, '⚙'),
+      h1('Synapse'),
+      button({ class: 'secondary', title: 'Media Sniffer settings', onclick: openDashboard }, '⚙'),
     ),
+    renderReaderModeSection(),
+    // docs/ROADMAP.md §9.1 — its own labeled section, same as Reader Mode above, now that this
+    // panel hosts more than one module's content — the two shouldn't read as one blended list.
+    renderSectionHeader('🎬', 'Media Sniffer'),
     // docs/ROADMAP.md §8.2 — off by default; only affects the video/audio Download branch (streams
     // never used chrome.downloads to begin with).
     label(

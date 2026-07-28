@@ -4,6 +4,9 @@
  * content-scripts/relay.ts's registerDomModule listener lives) — it doesn't reach background or
  * other tabs, and needs no extra manifest permission (tab id access doesn't require "tabs";
  * only reading url/title would).
+ *
+ * Lives at `ui/` (not `ui/popup/`) since it's generic Action-schema Popup infrastructure, not
+ * specific to any one module.
  */
 export interface TriggerResult {
   ok: boolean;

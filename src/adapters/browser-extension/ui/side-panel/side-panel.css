@@ -173,6 +173,47 @@
   color: var(--pico-del-color, #c00);
 }
 
+/* docs/ROADMAP.md §9.1 — labels which of the panel's two independent features a block of content
+   belongs to (top-level h1 is generic "Synapse" now that this panel hosts more than one module) —
+   shared by the Reader Mode card below and the Media Sniffer list's own header in main.ts's render(). */
+.panel-section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+  margin-bottom: 0.5rem;
+}
+
+.panel-section-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+/* docs/ROADMAP.md §9.1 — Reader Mode Converter's in-page-icon-triggered job status, shown above
+   the media list whenever a Convert/Crawl job has run this panel session. Bordered card (unlike
+   the Media Sniffer section below it, which has no card of its own — it's this panel's default/
+   main content) so it reads as a distinct, self-contained block floating above the regular list. */
+.reader-mode-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.7rem;
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  margin-bottom: 0.75rem;
+}
+
+.reader-mode-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.reader-mode-actions button {
+  width: auto;
+  margin: 0;
+}
+
 .download-btn img {
   width: 16px;
   height: 16px;

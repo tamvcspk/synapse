@@ -152,9 +152,13 @@ chrome.runtime.onMessage.addListener((message: { type?: string } | undefined, _s
   return true;
 });
 
-// docs/ROADMAP.md §6.2 — network-sniffer's floating icon (utils/floating-widget.ts's
+// docs/ROADMAP.md §6.2, generalized §9.1 — a floating icon (utils/floating-widget.ts's
 // showFloatingIcon, wired up in content-scripts/index.ts) can't call chrome.sidePanel itself
 // (content scripts don't have that API), so it messages background to open it for its own tab.
+// One shared listener/message for every module with a floating-icon trigger (network-sniffer's
+// media icon, reader-mode-converter's Convert/Crawl icons) — the panel itself is a single page
+// (SIDE_PANEL_PATH below) whose *content* branches client-side on which module has an active job,
+// not by swapping paths per module.
 // docs/ROADMAP.md §6.7 — `chrome.sidePanel.open()` must be called SYNCHRONOUSLY within this
 // listener, with nothing awaited first — the user-gesture "activation" this relies on (carried
 // across the chrome.runtime.sendMessage round trip from the content script's click handler)
@@ -166,9 +170,9 @@ chrome.runtime.onMessage.addListener((message: { type?: string } | undefined, _s
 // fixed by narrowing it to only ever touch a tab it has itself disabled — so no setOptions call is
 // needed here anymore at all.
 chrome.runtime.onMessage.addListener((message: { type?: string } | undefined, sender) => {
-  if (message?.type !== 'synapse:open-network-sniffer-panel' || !sender.tab?.id) return;
+  if (message?.type !== 'synapse:open-side-panel' || !sender.tab?.id) return;
   chrome.sidePanel.open({ tabId: sender.tab.id }).catch((err) => {
-    console.error('Synapse: failed to open network-sniffer Side Panel', err);
+    console.error('Synapse: failed to open Side Panel', err);
   });
 });
 

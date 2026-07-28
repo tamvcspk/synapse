@@ -389,15 +389,16 @@ async function crawlSite(ctx: ModuleContext): Promise<ReaderModeResult> {
   return buildCrawlResult(pages);
 }
 
+// docs/ROADMAP.md §9.1: no uiSchema — this module isn't triggered from the Popup at all. A
+// content-script-injected floating icon (content-scripts/index.ts's showReaderModeIcons, reusing
+// utils/floating-widget.ts the same way network-sniffer's icon does) offers the Convert/Crawl
+// choice directly on the page and calls `run()` in-process, since trigger and execution are
+// already the same context — no chrome.tabs.sendMessage round trip needed. uiParadigm:
+// 'float-widget' just gives it the same "Shows on-page alerts when active" popup tooltip
+// network-sniffer already gets (list-view.ts).
 export const ReaderModeConverterModule: Module<{ action?: string } | undefined, ReaderModeResult> = {
   ...pageComposite,
-  uiSchema: {
-    kind: 'action',
-    actions: [
-      { id: 'convert-page', actionLabel: 'Convert', resultView: 'files' },
-      { id: 'crawl-site', actionLabel: 'Crawl', resultView: 'files' },
-    ],
-  },
+  uiParadigm: 'float-widget',
   async run(input, ctx) {
     if (input?.action === 'crawl-site') return crawlSite(ctx);
     const page = (await pageComposite.run(undefined, ctx)) as PageConversionResult;

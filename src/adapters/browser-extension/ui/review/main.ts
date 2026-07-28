@@ -1,40 +1,28 @@
 import van from 'vanjs-core';
 import '@picocss/pico/css/pico.min.css';
 import './review.css';
-import { deleteBlob, getBlob } from '../../utils/blob-store';
-import { buildZip, type ZipEntryInput } from '../../../../shared/zip';
 import { slugify } from '../../../../shared/slugify';
+import { downloadReviewZip } from '../review-zip';
+import type { ReviewPayload } from '../review-handoff';
 
 /**
- * Review page (docs/ROADMAP.md #3, extended #1) — a standalone Tab (opened via `chrome.tabs.create`
- * from the popup, see `ui/popup/review-handoff.ts`) for an Action-schema module's `resultView:
- * 'files'` result: a big, "print-preview"-style look at the Markdown before committing to it
+ * Review page (docs/ROADMAP.md #3, extended #1, §9.1) — a standalone Tab for a converted page (or
+ * crawl) result: a big, "print-preview"-style look at the Markdown before committing to it
  * (editable, not read-only), plus a Download ZIP action bundling every page's Markdown — laid out
  * as a file-per-page structure mirroring the crawled site (docs/ROADMAP.md #1's Crawl & Convert
  * Site), not one giant concatenated file — plus whatever image files were fetched alongside them
- * (optional, see the "Download images" toggle). Scoped to a single `?reviewId=` — one-shot, the
- * payload is consumed and cleared from `chrome.storage.session` on load, same "no module list of
- * its own" scoping as the Dashboard.
+ * (optional, see the "Download images" toggle).
+ *
+ * Scoped to a single `?reviewId=` — one-shot, the payload is consumed and cleared from
+ * `chrome.storage.session` on load (same "no module list of its own" scoping as the Dashboard).
+ * Reached either via the popup's fast Action-schema path (`ui/review-handoff.ts`'s
+ * `openReviewPage`) or via the Side Panel's "Open in new tab" (docs/ROADMAP.md §9.1's in-page-icon
+ * → Side Panel flow, `ui/side-panel/main.ts`'s `publishReviewSession` call) — both just write the
+ * same `ReviewPayload` shape into session storage under a fresh id, so this page doesn't need to
+ * know which one sent it.
  */
 
 const { header, h1, label, input, select, option, textarea, div, button } = van.tags;
-
-interface ReviewFileRef {
-  fileName: string;
-  blobRef: string;
-}
-
-interface ReviewPage {
-  path: string;
-  title: string;
-  markdown: string;
-}
-
-interface ReviewPayload {
-  title: string;
-  pages: ReviewPage[];
-  fileRefs: ReviewFileRef[];
-}
 
 const root = document.getElementById('root')!;
 const reviewId = new URLSearchParams(location.search).get('reviewId');
@@ -48,7 +36,7 @@ function renderError(message: string): void {
 
 async function load(): Promise<void> {
   if (!reviewId) {
-    renderError("No review to show — open this page via a module's result in the Synapse popup.");
+    renderError("No review to show — open this page via a module's result in the Synapse popup or Side Panel.");
     return;
   }
 
@@ -165,37 +153,7 @@ async function handleDownload(
       payload.pages[0]!.path = `${base}.md`;
     }
 
-    const includeImages = downloadImagesInput.checked;
-    const entries: ZipEntryInput[] = payload.pages.map((page) => ({
-      name: page.path,
-      data: new TextEncoder().encode(page.markdown),
-    }));
-
-    if (includeImages) {
-      for (const ref of payload.fileRefs) {
-        const blob = await getBlob(ref.blobRef);
-        // `ref.fileName` already carries its own `images/...` path (see
-        // reader-mode-converter.module.ts's `localPath`/`buildCrawlResult`) — used as-is, not
-        // re-prefixed.
-        if (blob) entries.push({ name: ref.fileName, data: new Uint8Array(blob.bytes) });
-      }
-    }
-
-    const zipBytes = buildZip(entries);
-    const blobUrl = URL.createObjectURL(new Blob([zipBytes], { type: 'application/zip' }));
-    const anchor = document.createElement('a');
-    anchor.href = blobUrl;
-    anchor.download = `${slugify(payload.title, 'reader-mode')}.zip`;
-    anchor.click();
-    URL.revokeObjectURL(blobUrl);
-
-    // Best-effort cleanup now that the bytes have actually been zipped — only for images that
-    // were included this time (leave the rest, in case the user downloads again with the toggle
-    // on), and only orphaned if the tab closes before this point (same "best-effort, not
-    // guaranteed" treatment as mock-file blob cleanup elsewhere in this codebase).
-    if (includeImages) {
-      for (const ref of payload.fileRefs) void deleteBlob(ref.blobRef);
-    }
+    await downloadReviewZip(payload, downloadImagesInput.checked);
   } finally {
     downloadBtn.disabled = false;
     downloadBtn.textContent = originalText;

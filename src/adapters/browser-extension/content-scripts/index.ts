@@ -24,7 +24,7 @@ installStorageToMainWorldRelay(MOCK_CONFIG_STORAGE_KEY, MOCK_CONFIG_CHANNEL_ID);
 // notifyTabMediaFound). Registered here (not frame-media-observer.ts) for the same top-frame-only
 // reason as registerDomModule above: showing one icon per page, not one per iframe. No
 // count/message — see showFloatingIcon's doc comment for why. Click messages background to open
-// the Side Panel (synapse:open-network-sniffer-panel, background/index.ts) rather than a real
+// the Side Panel (synapse:open-side-panel, background/index.ts) rather than a real
 // `chrome.sidePanel` call — content scripts don't have that API at all.
 function showNetworkSnifferIcon(): void {
   showFloatingIcon({
@@ -32,7 +32,7 @@ function showNetworkSnifferIcon(): void {
     label: '⬇',
     title: 'Media detected on this page — click to view',
     onClick: () => {
-      chrome.runtime.sendMessage({ type: 'synapse:open-network-sniffer-panel' }).catch(() => {});
+      chrome.runtime.sendMessage({ type: 'synapse:open-side-panel' }).catch(() => {});
     },
   });
 }
@@ -89,3 +89,56 @@ for (const mod of domModules.filter((mod) => !AUTORUN_EXCLUDED.has(mod.id))) {
     }
   })();
 }
+
+// docs/ROADMAP.md §9.1 — Reader Mode Converter's trigger: two floating icons (top-right, stacked
+// alongside network-sniffer's via the same utils/floating-widget.ts, distinct ids so they don't
+// collide), always shown while the module is active (unlike network-sniffer's icon, there's no
+// "detected" event to gate on here — "can I convert this page" is always true). Replaces the old
+// Popup action-button trigger entirely (docs/ROADMAP.md §9.1's evaluation: a Popup-triggered crawl
+// can outlive the popup and also backgrounds the very tab doing the crawling). Runs `run()`
+// in-process — trigger and execution are already the same content-script context, no
+// chrome.tabs.sendMessage round trip needed the way the Popup's old path required.
+let readerModeJobRunning = false;
+
+async function runReaderModeJob(mod: (typeof domModules)[number], actionId: 'convert-page' | 'crawl-site'): Promise<void> {
+  if (readerModeJobRunning) return;
+  readerModeJobRunning = true;
+  try {
+    const result = await mod.run({ action: actionId }, { services: buildDomModuleServices(mod.id, mod.needs) });
+    chrome.runtime.sendMessage({ type: 'synapse:reader-mode-result', data: result }).catch(() => {});
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    chrome.runtime.sendMessage({ type: 'synapse:reader-mode-error', message }).catch(() => {});
+  } finally {
+    readerModeJobRunning = false;
+  }
+}
+
+function showReaderModeIcons(): void {
+  const mod = domModules.find((m) => m.id === 'reader-mode-converter');
+  if (!mod) return;
+
+  // Fires the Side Panel open SYNCHRONOUSLY (no await before it — see relay.ts's doc comment on
+  // this exact gotcha) before kicking off the (potentially long) run() call.
+  const trigger = (actionId: 'convert-page' | 'crawl-site') => () => {
+    chrome.runtime.sendMessage({ type: 'synapse:open-side-panel' }).catch(() => {});
+    void runReaderModeJob(mod, actionId);
+  };
+
+  showFloatingIcon({
+    id: 'reader-mode-convert',
+    label: '📄',
+    title: 'Convert this page to Markdown',
+    onClick: trigger('convert-page'),
+  });
+  showFloatingIcon({
+    id: 'reader-mode-crawl',
+    label: '🕸️',
+    title: 'Crawl & convert this whole site',
+    onClick: trigger('crawl-site'),
+  });
+}
+
+void (async () => {
+  if (await isModuleActive('reader-mode-converter')) showReaderModeIcons();
+})();
