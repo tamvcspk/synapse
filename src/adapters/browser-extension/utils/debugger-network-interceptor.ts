@@ -82,7 +82,13 @@ async function onDebuggerEvent(source: chrome.debugger.Debuggee, method: string,
     const commandParams: Record<string, unknown> = { requestId };
     if (overrides.url !== undefined) commandParams.url = overrides.url;
     if (overrides.method !== undefined) commandParams.method = overrides.method;
-    if (overrides.body !== undefined) commandParams.postData = toBase64Utf8(overrides.body);
+    // 'base64' means overrides.body is already-encoded file bytes (docs/ROADMAP.md §2.6.1's
+    // rewriteBodyFile/rewriteBodyFileInline) — re-running it through toBase64Utf8 (meant for
+    // *text*) would corrupt it, not just double-encode it. Same convention `onDebuggerEvent`'s own
+    // fulfill() branch below already uses for fakeResponseFile.
+    if (overrides.body !== undefined) {
+      commandParams.postData = overrides.bodyEncoding === 'base64' ? overrides.body : toBase64Utf8(overrides.body);
+    }
     if (overrides.headers !== undefined) {
       commandParams.headers = Object.entries(overrides.headers).map(([name, value]) => ({ name, value }));
     }

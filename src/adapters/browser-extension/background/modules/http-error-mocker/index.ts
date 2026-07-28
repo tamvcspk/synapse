@@ -165,6 +165,18 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
           { field: 'mechanism', equals: ['main-world', 'debugger'] },
         ],
       },
+      {
+        key: 'rewriteBodyFile',
+        label: 'Or upload a file',
+        hint: 'Takes precedence over the text above; files over ~2MB only work with mechanism: debugger, not main-world — same file-upload mechanics as "Or upload a file" under Fake response',
+        type: 'file',
+        fileInlineKey: 'rewriteBodyFileInline',
+        fileNameKey: 'rewriteBodyFileName',
+        showWhen: [
+          { field: 'action', equals: ['rewrite-request'] },
+          { field: 'mechanism', equals: ['main-world', 'debugger'] },
+        ],
+      },
       // Not tied to any single action via showWhen — matching is orthogonal to what a rule does
       // once matched, so this applies the same way to fake-response/rewrite-request/block alike.
       // mechanism: 'dnr' is excluded, though (unlike hitCountLimit below) — it can't inspect the
@@ -211,12 +223,15 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
       if (!result.valid) throw new Error(`Invalid MockConfig: ${result.reason}`);
       const configs = await getMockConfigs(cache);
       const index = configs.findIndex((c) => c.id === result.config.id);
-      // Replacing a rule's uploaded file (or clearing it/switching away from fake-response) leaves
-      // the old blob orphaned in IndexedDB unless cleaned up here — the only place both the old and
-      // new value are in hand at once.
-      const previousBlobRef = index === -1 ? undefined : configs[index]?.fakeResponseFile;
-      if (previousBlobRef && previousBlobRef !== result.config.fakeResponseFile) {
-        await deleteBlob(previousBlobRef);
+      // Replacing a rule's uploaded file (or clearing it/switching away from fake-response/
+      // rewrite-request) leaves the old blob orphaned in IndexedDB unless cleaned up here — the
+      // only place both the old and new value are in hand at once.
+      const previous = index === -1 ? undefined : configs[index];
+      if (previous?.fakeResponseFile && previous.fakeResponseFile !== result.config.fakeResponseFile) {
+        await deleteBlob(previous.fakeResponseFile);
+      }
+      if (previous?.rewriteBodyFile && previous.rewriteBodyFile !== result.config.rewriteBodyFile) {
+        await deleteBlob(previous.rewriteBodyFile);
       }
       if (index === -1) configs.push(result.config);
       else configs[index] = result.config;
@@ -225,6 +240,7 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
       const configs = await getMockConfigs(cache);
       const deleted = configs.find((c) => c.id === command.id);
       if (deleted?.fakeResponseFile) await deleteBlob(deleted.fakeResponseFile);
+      if (deleted?.rewriteBodyFile) await deleteBlob(deleted.rewriteBodyFile);
       await setMockConfigs(configs.filter((c) => c.id !== command.id), cache);
     }
 
@@ -346,7 +362,18 @@ async function evaluateDebuggerRequest(
 
   const action = getAction(match);
   if (action === 'block') return { intercept: 'block' };
-  if (action === 'rewrite-request') return { intercept: 'rewrite', overrides: buildRewriteOverrides(match) };
+  if (action === 'rewrite-request') {
+    const overrides = buildRewriteOverrides(match);
+    // rewriteBodyFile's blobRef needs IndexedDB access, which buildRewriteOverrides deliberately
+    // doesn't have (Global SDK, no I/O) — only resolvable here. Takes precedence over whatever
+    // buildRewriteOverrides already produced from rewriteBody/rewriteBodyFileInline, same "file
+    // beats typed text" precedence fakeResponseFile establishes below.
+    if (match.rewriteBodyFile) {
+      const blob = await getBlob(match.rewriteBodyFile);
+      if (blob) return { intercept: 'rewrite', overrides: { ...overrides, body: bytesToBase64(blob.bytes), bodyEncoding: 'base64' } };
+    }
+    return { intercept: 'rewrite', overrides };
+  }
 
   const fake = buildFakeResponseInit(match);
 

@@ -102,6 +102,19 @@ export interface MockConfig {
    * inventing a dedicated "key-value list" UIFieldDef type for just this one field. */
   rewriteHeaders?: string;
   rewriteBody?: string;
+  /** docs/ROADMAP.md §2.6.1 — same blobRef/inline/name trio as `fakeResponseFile` below, for
+   * `action: 'rewrite-request'`'s body instead of a fake response's. Only meaningful together with
+   * `mechanism: 'main-world'|'debugger'` (same as `rewriteBody`/`rewriteMethod` — 'dnr' has no
+   * action to rewrite a request body at all). Takes precedence over `rewriteBody` text when set,
+   * same "file beats typed text" precedence `fakeResponseFile` already establishes. */
+  rewriteBodyFile?: string;
+  /** `mechanism: 'main-world'` counterpart to `rewriteBodyFile`, same reasoning as
+   * `fakeResponseFileInline` — the MAIN-world patch can't reach IndexedDB, only whatever's inlined
+   * onto this MockConfig itself. Same ~2MB client-side cap (item-form-view.ts), re-checked here via
+   * the shared `parseFileFieldValue`. */
+  rewriteBodyFileInline?: { mimeType: string; fileName: string; base64: string };
+  /** Cosmetic display name, same role as `fakeResponseFileName`. */
+  rewriteBodyFileName?: string;
   /** Multiline JSON text merged into the fake response's headers (default is always just
    * `Content-Type: application/json`) — only meaningful when `action === 'fake-response'`. */
   responseHeaders?: string;
@@ -229,7 +242,7 @@ export function validateMockConfig(candidate: unknown): MockConfigValidation {
   if (mechanism === 'dnr' && action === 'rewrite-request' && c.rewriteMethod) {
     return { valid: false, reason: 'mechanism "dnr" cannot change the request method (declarativeNetRequest has no such action)' };
   }
-  if (mechanism === 'dnr' && action === 'rewrite-request' && c.rewriteBody) {
+  if (mechanism === 'dnr' && action === 'rewrite-request' && (c.rewriteBody || c.rewriteBodyFile)) {
     return { valid: false, reason: 'mechanism "dnr" cannot rewrite the request body (declarativeNetRequest has no such action)' };
   }
   if (mechanism === 'dnr' && c.requestMatchContains) {
@@ -255,6 +268,9 @@ export function validateMockConfig(candidate: unknown): MockConfigValidation {
   // and `parseFileFieldValue` below.
   if (c.fakeResponseFile !== undefined && (typeof c.fakeResponseFile !== 'string' || c.fakeResponseFile.length === 0)) {
     return { valid: false, reason: 'fakeResponseFile must be a non-empty string' };
+  }
+  if (c.rewriteBodyFile !== undefined && (typeof c.rewriteBodyFile !== 'string' || c.rewriteBodyFile.length === 0)) {
+    return { valid: false, reason: 'rewriteBodyFile must be a non-empty string' };
   }
   if (typeof c.active !== 'boolean') {
     return { valid: false, reason: 'active must be a boolean' };
@@ -286,6 +302,12 @@ export function validateMockConfig(candidate: unknown): MockConfigValidation {
     if (c.rewriteMethod) config.rewriteMethod = (c.rewriteMethod as string).toUpperCase();
     if (c.rewriteHeaders) config.rewriteHeaders = c.rewriteHeaders as string;
     if (c.rewriteBody) config.rewriteBody = c.rewriteBody as string;
+    if (c.rewriteBodyFile) {
+      const { blobRef, fileName, inline } = parseFileFieldValue(c.rewriteBodyFile as string);
+      if (blobRef) config.rewriteBodyFile = blobRef;
+      if (fileName) config.rewriteBodyFileName = fileName;
+      if (inline) config.rewriteBodyFileInline = inline;
+    }
   }
   if (c.delayMs !== undefined) config.delayMs = c.delayMs as number;
   if (c.requestMatchContains) config.requestMatchContains = c.requestMatchContains as string;
@@ -385,18 +407,37 @@ export interface RewriteOverrides {
   method?: string;
   headers?: Record<string, string>;
   body?: string;
+  /** `'utf8'` (default when omitted) means `body` is decoded text, as it always was before this
+   * field existed. `'base64'` means `body` is already base64 — an uploaded file's raw bytes
+   * (`rewriteBodyFileInline`, resolvable here with no I/O; `rewriteBodyFile`'s blobRef needs
+   * IndexedDB, resolved by the caller instead — see `evaluateDebuggerRequest`) — and must reach
+   * the network layer as-is, not re-encoded as if it were text (same `bodyEncoding` convention
+   * `InterceptResponse` already uses for `fakeResponseFile`). */
+  bodyEncoding?: 'utf8' | 'base64';
 }
 
 /** Renders a MockConfig's rewrite fields into the primitives a request-rewrite needs — same
  * "primitives, not environment classes" split as `buildFakeResponseInit`. Only ever called by a
- * caller that already checked `getAction(config) === 'rewrite-request'`. */
+ * caller that already checked `getAction(config) === 'rewrite-request'`.
+ *
+ * `rewriteBodyFileInline` takes precedence over `rewriteBody` text (docs/ROADMAP.md §2.6.1, same
+ * "file beats typed text" precedence `fakeResponseFile`/`fakeResponse` already establishes) — it's
+ * the only file-upload form resolvable here (no I/O, Global SDK): `rewriteBodyFile`'s blobRef needs
+ * an actual IndexedDB read, which only the background composition root can do (mirrors
+ * `fakeResponseFile`'s exact split — see that field's doc comment). A caller with `mechanism:
+ * 'debugger'` (which DOES have IndexedDB access) must check `config.rewriteBodyFile` itself and
+ * override the result of this function accordingly. */
 export function buildRewriteOverrides(config: MockConfig): RewriteOverrides {
   const headers = parseHeadersJson(config.rewriteHeaders);
   return {
     ...(config.rewriteUrl ? { url: config.rewriteUrl } : {}),
     ...(config.rewriteMethod ? { method: config.rewriteMethod } : {}),
     ...(headers ? { headers } : {}),
-    ...(config.rewriteBody ? { body: config.rewriteBody } : {}),
+    ...(config.rewriteBodyFileInline
+      ? { body: config.rewriteBodyFileInline.base64, bodyEncoding: 'base64' as const }
+      : config.rewriteBody
+        ? { body: config.rewriteBody }
+        : {}),
   };
 }
 

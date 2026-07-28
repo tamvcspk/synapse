@@ -39,6 +39,11 @@ export interface InterceptRewriteOverrides {
   method?: string;
   headers?: Record<string, string>;
   body?: string;
+  /** `'utf8'` (default when omitted) means `body` is decoded text. `'base64'` means `body` is an
+   * uploaded file's raw bytes (docs/ROADMAP.md §2.6.1's `rewriteBodyFile`/`rewriteBodyFileInline`)
+   * and must be decoded back to bytes before being sent, not passed through as the base64 *string*
+   * itself — same convention `InterceptResponse.bodyEncoding` already uses for `fakeResponseFile`. */
+  bodyEncoding?: 'utf8' | 'base64';
 }
 
 export type InterceptDecision =
@@ -73,6 +78,15 @@ export function installNetworkInterceptor(evaluate: EvaluateRequest): void {
   patchXhr(evaluate);
 }
 
+/** `overrides.bodyEncoding === 'base64'` means `overrides.body` is an uploaded file's raw bytes
+ * (docs/ROADMAP.md §2.6.1) — decoded back to bytes so binary content reaches the network intact
+ * instead of being sent as the base64 *string* itself (same reasoning as `patchFetch`'s existing
+ * fake-response `bodyEncoding` handling below, just on the request side instead of the response). */
+function resolveRewriteBody(overrides: InterceptRewriteOverrides): BodyInit | undefined {
+  if (overrides.body === undefined) return undefined;
+  return overrides.bodyEncoding === 'base64' ? base64ToBytes(overrides.body) : overrides.body;
+}
+
 function patchFetch(evaluate: EvaluateRequest): void {
   const originalFetch = window.fetch.bind(window);
 
@@ -86,13 +100,14 @@ function patchFetch(evaluate: EvaluateRequest): void {
 
     if (decision.intercept === 'rewrite') {
       const { overrides } = decision;
+      const rewriteBody = resolveRewriteBody(overrides);
       return originalFetch(overrides.url ?? url, {
         ...init,
         ...(overrides.method !== undefined ? { method: overrides.method } : {}),
         ...(overrides.headers !== undefined
           ? { headers: { ...(init?.headers as Record<string, string> | undefined), ...overrides.headers } }
           : {}),
-        ...(overrides.body !== undefined ? { body: overrides.body } : {}),
+        ...(rewriteBody !== undefined ? { body: rewriteBody } : {}),
       });
     }
 
@@ -172,7 +187,8 @@ function patchXhr(evaluate: EvaluateRequest): void {
           originalSetRequestHeader.call(this, name, value);
         }
       }
-      originalSend.call(this, overrides.body !== undefined ? overrides.body : body);
+      const rewriteBody = resolveRewriteBody(overrides);
+      originalSend.call(this, rewriteBody !== undefined ? (rewriteBody as XMLHttpRequestBodyInit) : body);
       return;
     }
 
