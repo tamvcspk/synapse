@@ -301,7 +301,9 @@ async function probeMagicBytesKind(url: string): Promise<MediaKind | undefined> 
 /** Sent directly by content-scripts/dom-media-observer.ts (docs/ROADMAP.md #4 Phase 1) via
  * `chrome.runtime.sendMessage({event: 'network-sniffer', payload: ...})` — a second detection
  * source alongside chrome.webRequest, not part of the generic CollectionCommand wire shape (this
- * op is specific to this Module, not a generic Dashboard CRUD write). */
+ * op is specific to this Module, not a generic Dashboard CRUD write). Handled by a standalone
+ * `chrome.runtime.onMessage` listener below (docs/ROADMAP.md §10.4), not `run()`'s Bus dispatch —
+ * see that listener's doc comment for why. */
 interface ReportDomMediaCommand {
   op: 'report-dom-media';
   items: { url: string; pageUrl?: string }[];
@@ -311,7 +313,9 @@ interface ReportDomMediaCommand {
  * (docs/ROADMAP.md #4.1's third detection source) — same "module-specific op, bypasses the generic
  * CollectionCommand shape" reasoning as ReportDomMediaCommand above. `pageUrl` (added docs/ROADMAP.md
  * §6.5, `location.href` at the sender) is required for the Side Panel's per-tab scoping (§6.3) to
- * ever show an entry detected via this source — previously omitted entirely. */
+ * ever show an entry detected via this source — previously omitted entirely. Handled by a
+ * standalone `chrome.runtime.onMessage` listener below (docs/ROADMAP.md §10.4), not `run()`'s Bus
+ * dispatch. */
 interface ReportMainWorldMediaCommand {
   op: 'report-main-world-media';
   url: string;
@@ -378,16 +382,71 @@ async function inspectStreamEntry(entry: DetectedMedia, cache: CacheService = ch
   }
 }
 
-// docs/ROADMAP.md §6.3 — a second, independent listener on the SAME `report-dom-media` bus message
-// the Kernel/run() also handles below (Chrome allows multiple onMessage listeners per message; this
-// one only peeks at `sender` for the tabId, which the generic BusService.on() handler shape doesn't
-// expose). dom-media-observer.ts runs in every frame (frame-media-observer.ts, all_frames:true), so
-// this is the only way to notify the top frame's floating icon when the detection happened in a
-// nested/cross-origin iframe — chrome.tabs.sendMessage broadcasts to every frame with no frameId,
-// but only content-scripts/index.ts's top-frame instance is listening for `synapse:media-found`.
-chrome.runtime.onMessage.addListener((message: { event?: string; payload?: { op?: string } } | undefined, sender) => {
-  if (message?.event !== 'network-sniffer' || message.payload?.op !== 'report-dom-media' || !sender.tab?.id) return;
-  notifyTabMediaFound(sender.tab.id);
+/** docs/ROADMAP.md §10.4 — shared by the report-main-world-media/report-dom-media listeners below:
+ * validates (never trusts the content-script shim to have already filtered), builds the
+ * `DetectedMedia` record — now including `tabUrl` when the sender's tab is known — stores it, and
+ * kicks off auto-inspect for a newly-added stream. `tabUrl` is what fixes cross-origin-iframe
+ * entries being invisible to the Side Panel's per-tab scoping (docs/ROADMAP.md §6.3/§6.4): `pageUrl`
+ * alone is the reporting FRAME's own origin, not the tab's top-level one, and the two disagree
+ * exactly for a nested/cross-origin iframe — the case §10.4 was opened for. */
+async function persistDetectedMedia(url: string, pageUrl: string | undefined, tabUrl: string | undefined, cache: CacheService): Promise<void> {
+  if (isJunkRequest(url, pageUrl)) return;
+  const kind = classifyMediaUrl(url);
+  if (!kind) return;
+  const media: DetectedMedia = {
+    id: crypto.randomUUID(),
+    url,
+    kind,
+    detectedAt: new Date().toISOString(),
+    ...(pageUrl ? { pageUrl } : {}),
+    ...(tabUrl !== undefined ? { tabUrl } : {}),
+    ...(looksLikeSignedUrl(url) ? { expiring: true } : {}),
+  };
+  if (await addDetectedMedia(media, cache) && kind === 'stream') {
+    void inspectStreamEntry(media, cache);
+  }
+}
+
+// docs/ROADMAP.md §6.3, extended §10.4 — a standalone listener (not `run()`'s Bus dispatch) so it
+// can peek at `sender.tab` directly, which the generic BusService.on() handler shape doesn't
+// expose (same reasoning as the report-dom-media notify-only listener this replaces). Two things
+// need `sender.tab`: (a) the tabId, to notify the top frame's floating icon when the detection
+// happened in a nested/cross-origin iframe (dom-media-observer.ts runs in every frame,
+// frame-media-observer.ts's all_frames:true — chrome.tabs.sendMessage broadcasts to every frame
+// with no frameId, so only content-scripts/index.ts's top-frame instance is listening for
+// `synapse:media-found`); (b) the tab's own url, to record on the entry as `tabUrl` — `sender.tab`
+// is a full `chrome.tabs.Tab` (host_permissions already cover `<all_urls>`), no extra
+// `chrome.tabs.get` round trip needed. Uses `chromeStorageCache` directly, not `ctx.services.cache`
+// — this listener has no Kernel-provided `ctx` at all, same reasoning as `handleObservedRequest`'s
+// doc comment below.
+chrome.runtime.onMessage.addListener((message: { event?: string; payload?: ReportDomMediaCommand } | undefined, sender) => {
+  if (message?.event !== 'network-sniffer' || message.payload?.op !== 'report-dom-media') return;
+  if (sender.tab?.id) notifyTabMediaFound(sender.tab.id);
+  const items = message.payload.items;
+  void (async () => {
+    // Re-validates server-side rather than trusting the content script's own filtering — same
+    // "never trust the shim to self-limit" posture rpc-handler.ts already documents.
+    if (!(await isModuleActive('network-sniffer'))) return;
+    for (const item of items) {
+      await persistDetectedMedia(item.url, item.pageUrl, sender.tab?.url, chromeStorageCache);
+    }
+  })();
+});
+
+// docs/ROADMAP.md §10.4 — report-main-world-media's own counterpart to the listener above. No
+// notify call here (unlike report-dom-media): this source is registered top-frame-only
+// (content-scripts/index.ts, matching where the MAIN-world script itself runs), so the sender is
+// already the tab's own top frame — it shows its own floating icon directly, no round trip needed
+// (see content-scripts/index.ts's doc comment on this). `tabUrl` is added for the same consistency
+// reasoning as report-dom-media, even though for this always-top-frame source it's expected to
+// equal `pageUrl` in practice.
+chrome.runtime.onMessage.addListener((message: { event?: string; payload?: ReportMainWorldMediaCommand } | undefined, sender) => {
+  if (message?.event !== 'network-sniffer' || message.payload?.op !== 'report-main-world-media') return;
+  const { url, pageUrl } = message.payload;
+  void (async () => {
+    if (!(await isModuleActive('network-sniffer'))) return;
+    await persistDetectedMedia(url, pageUrl, sender.tab?.url, chromeStorageCache);
+  })();
 });
 
 // docs/ROADMAP.md #4.2 — the anchored badge's click handler (dom-media-observer.ts) can't call
@@ -399,7 +458,7 @@ chrome.runtime.onMessage.addListener((message: { type?: string; url?: string } |
   const url = message.url;
   void (async () => {
     // Re-validates rather than trusting the content script's own filtering — same "never trust the
-    // shim to self-limit" posture as run()'s own report-dom-media branch below.
+    // shim to self-limit" posture as the report-dom-media/report-main-world-media listeners below.
     if (!(await isModuleActive('network-sniffer')) || !classifyMediaUrl(url)) return;
     await chrome.downloads.download({ url });
   })();
@@ -419,10 +478,7 @@ chrome.runtime.onMessage.addListener((message: { type?: string; url?: string } |
  * primary UI is now the Side Panel (docs/ROADMAP.md §6) — this Management View stays as a
  * secondary, unscoped-to-tab view of the same underlying log.
  */
-export const NetworkSnifferModule: Module<
-  CollectionCommand<DetectedMedia> | ReportDomMediaCommand | ReportMainWorldMediaCommand | undefined,
-  void
-> = {
+export const NetworkSnifferModule: Module<CollectionCommand<DetectedMedia> | undefined, void> = {
   id: 'network-sniffer',
   label: 'Media Sniffer',
   description: 'Passively detects video/audio/stream URLs requested by pages you visit, and lets you download them.',
@@ -546,47 +602,10 @@ export const NetworkSnifferModule: Module<
       await removeDetectedMedia(command.id, ctx.services.cache);
     }
 
-    if (command?.op === 'report-main-world-media') {
-      // Re-validates server-side rather than trusting the content script's own relay — same "never
-      // trust the shim to self-limit" posture as report-dom-media below. docs/ROADMAP.md #5.2/§6.5 —
-      // same junk check (now including pageUrl) as classifyDetection's webRequest path, so this
-      // second detection source doesn't reopen the ad-network hole the webRequest path just closed.
-      const kind = !isJunkRequest(command.url, command.pageUrl) ? classifyMediaUrl(command.url) : undefined;
-      if (kind) {
-        const media: DetectedMedia = {
-          id: crypto.randomUUID(),
-          url: command.url,
-          kind,
-          detectedAt: new Date().toISOString(),
-          ...(command.pageUrl ? { pageUrl: command.pageUrl } : {}),
-          ...(looksLikeSignedUrl(command.url) ? { expiring: true } : {}),
-        };
-        if (await addDetectedMedia(media, ctx.services.cache) && kind === 'stream') {
-          void inspectStreamEntry(media, ctx.services.cache);
-        }
-      }
-    }
-
-    if (command?.op === 'report-dom-media') {
-      // Re-validates server-side rather than trusting the content script's own filtering — same
-      // "never trust the shim to self-limit" posture rpc-handler.ts already documents.
-      for (const item of command.items) {
-        if (isJunkRequest(item.url, item.pageUrl)) continue;
-        const kind = classifyMediaUrl(item.url);
-        if (!kind) continue;
-        const media: DetectedMedia = {
-          id: crypto.randomUUID(),
-          url: item.url,
-          kind,
-          detectedAt: new Date().toISOString(),
-          ...(item.pageUrl ? { pageUrl: item.pageUrl } : {}),
-          ...(looksLikeSignedUrl(item.url) ? { expiring: true } : {}),
-        };
-        if (await addDetectedMedia(media, ctx.services.cache) && kind === 'stream') {
-          void inspectStreamEntry(media, ctx.services.cache);
-        }
-      }
-    }
+    // 'report-main-world-media'/'report-dom-media' (docs/ROADMAP.md §10.4) are handled by their
+    // own standalone chrome.runtime.onMessage listeners above, not here — see persistDetectedMedia
+    // and the listeners registered right after it for why (need `sender.tab`, which the generic
+    // BusService.on() handler shape this run() is invoked through doesn't expose).
   },
 };
 

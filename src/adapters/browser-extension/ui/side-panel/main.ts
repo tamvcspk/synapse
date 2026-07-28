@@ -18,8 +18,9 @@ import downloadIconUrl from '../../../../assets/icon/download.svg';
  * dashboard/views/management-view.ts's generic table: one real video is one list item here, even
  * when its manifest has N resolutions (merged into a single <select>), and there's exactly one
  * Download action per item instead of management-view.ts's separate download/inspect/open-tab
- * rowActions. Scoped to the active tab's origin — unlike the Dashboard's Management View, which
- * shows the entire cross-tab detected-media log unfiltered.
+ * rowActions. Scoped to the active tab's EXACT current page (docs/ROADMAP.md §10.4's follow-up,
+ * `load()` below) — unlike the Dashboard's Management View, which shows the entire cross-tab
+ * detected-media log unfiltered.
  */
 
 const { div, h1, p, span, select, option, button, img, label, input, progress: progressTag } = van.tags;
@@ -108,40 +109,30 @@ void chrome.storage.local.get(TURBO_STORAGE_KEY).then((result) => {
   scheduleRender();
 });
 
-async function activeTabOrigin(): Promise<string | undefined> {
+async function activeTabUrl(): Promise<string | undefined> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.url) return undefined;
-  try {
-    return new URL(tab.url).origin;
-  } catch {
-    return undefined;
-  }
+  return tab?.url;
 }
 
 async function load(): Promise<void> {
-  const origin = await activeTabOrigin();
+  const tabUrl = await activeTabUrl();
   const all = await listDetectedMedia();
   checkpoints = await listDownloadJobCheckpoints();
-  // Scoping prefers `tabUrl` (the TAB's own top-level url) over `pageUrl` (the INITIATING FRAME's
-  // origin). They differ exactly when a cross-origin iframe loads the media — an embedded player, or
-  // an ad frame — and comparing `pageUrl` there asks "was this served by the site you're looking
-  // at?", which is not the question. The answer was `false` for every such entry, so the Side Panel
-  // hid media that had been detected and stored correctly all along. `pageUrl` stays as the fallback
-  // for entries recorded before `tabUrl` existed and for the DOM/MAIN-world sources, which have no
-  // tabId to resolve one from.
-  items = origin
-    ? collapseVariantShadowedEntries(
-        all.filter((m) => {
-          const scopeUrl = m.tabUrl ?? m.pageUrl;
-          if (!scopeUrl) return false;
-          try {
-            return new URL(scopeUrl).origin === origin;
-          } catch {
-            return false;
-          }
-        }),
-      )
-    : [];
+  // Scoped to the EXACT current page (docs/ROADMAP.md §10.4's follow-up) — was origin-only before,
+  // which meant every video ever detected anywhere on a site accumulated into one list the moment
+  // you looked at ANY page on that site, regardless of whether you'd navigated away from the page
+  // that actually had it (reported as "messy, hard to use"). Exact-URL match fixes that at the cost
+  // of hiding an entry across an SPA route change that updates the address bar without a real
+  // navigation — accepted tradeoff, matching the browser's own `chrome.tabs.query` url (which DOES
+  // track pushState/history navigation, so this isn't as narrow as "hard reload only").
+  //
+  // Prefers `tabUrl` (the TAB's own top-level url at detection time) over `pageUrl` (the INITIATING
+  // FRAME's url) — they differ exactly when a cross-origin iframe loads the media (an embedded
+  // player, or an ad frame), and comparing `pageUrl` there asks "was this served by the exact frame
+  // you're looking at?", which is not the question. `pageUrl` stays as the fallback only for
+  // entries recorded before `tabUrl` existed (docs/ROADMAP.md §10.4 added it to every detection
+  // source, not just `webRequest`).
+  items = tabUrl ? collapseVariantShadowedEntries(all.filter((m) => (m.tabUrl ?? m.pageUrl) === tabUrl)) : [];
   scheduleRender();
 }
 

@@ -4,6 +4,7 @@ import { showAnchoredBadge } from '../utils/floating-widget';
 import {
   MAIN_WORLD_REPORT_CHANNEL_ID,
   MAIN_WORLD_CORRELATION_CHANNEL_ID,
+  MAIN_WORLD_HLS_CORRELATION_CHANNEL_ID,
   HLS_CORRELATION_ATTRIBUTE,
 } from '../background/modules/network-sniffer/constants';
 
@@ -156,6 +157,15 @@ export function installDomMediaObserver(): void {
   // docs/ROADMAP.md #7.3(a) — the generic MediaSource/createObjectURL correlation signal.
   createMainWorldChannel<{ blobUrl: string; url: string }>(MAIN_WORLD_CORRELATION_CHANNEL_ID).onUpdate(({ blobUrl, url }) => {
     blobUrlCorrelation.set(blobUrl, url);
+    scanNow();
+  });
+
+  // docs/ROADMAP.md §7.3(a-hls) bugfix — hls-global-hook.ts's exact-match signal sets
+  // HLS_CORRELATION_ATTRIBUTE directly on the DOM, which the MutationObserver below can't see (it's
+  // scoped to attributeFilter: ['src'], not this custom attribute) — this explicit signal is what
+  // actually triggers the rescan that picks the attribute back up. Empty payload, re-reads the
+  // attribute fresh in collectCandidates() rather than carrying the value itself.
+  createMainWorldChannel<Record<string, never>>(MAIN_WORLD_HLS_CORRELATION_CHANNEL_ID).onUpdate(() => {
     scanNow();
   });
 

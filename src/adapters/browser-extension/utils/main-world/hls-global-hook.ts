@@ -30,13 +30,33 @@ interface HlsLikeInstance {
 
 interface HlsLikeConstructor {
   new (...args: never[]): HlsLikeInstance;
-  Events?: { MANIFEST_LOADED?: string };
+  Events?: { MANIFEST_LOADED?: string; MEDIA_ATTACHED?: string };
 }
 
 function isHlsLikeConstructor(value: unknown): value is HlsLikeConstructor {
   return typeof value === 'function';
 }
 
+/** Two real bugs found via live testing, both fixed here:
+ *
+ * (1) A page that calls `hls.loadSource(url)` BEFORE `hls.attachMedia(video)` (one of hls.js's two
+ * documented call orders — `loadSource`'s manifest fetch is async, so `MANIFEST_LOADED` can easily
+ * fire before `attachMedia` ever runs) used to drop the correlation silently — the old code only
+ * checked `this.media` at the exact instant `MANIFEST_LOADED` fired, with no retry once
+ * `attachMedia` actually happened later. Fixed by also listening for `Hls.Events.MEDIA_ATTACHED`
+ * and calling `tryFire` from both handlers — whichever arrives second is what actually fires.
+ *
+ * (2) `tryFire` used to be a ONE-SHOT per `Hls` instance (an early version latched on a `fired`
+ * boolean). That's wrong: a real player commonly reuses the SAME `Hls` instance across multiple
+ * videos (playlist/queue auto-advance, switching videos without a full page reload) — each later
+ * `MANIFEST_LOADED` is a genuinely NEW video and must update the correlation, not be ignored. The
+ * observed symptom was the badge staying bound to the FIRST video's now-stale/expired manifest URL
+ * forever ("File wasn't available" on download), while a SEPARATE, correctly-detected entry for the
+ * actual current video showed up via the independent `chrome.webRequest` path instead. Fixed by
+ * just removing the latch — `tryFire` now re-fires on every `MANIFEST_LOADED`, keeping the
+ * attribute (and the rescan signal, see constants.ts) current. Firing an identical
+ * `{url, media}` pair twice in a row (e.g. both handlers firing in the same tick) is harmless — the
+ * caller's `setAttribute`+channel-dispatch are idempotent for an unchanged value. */
 function wrap(
   OriginalHls: HlsLikeConstructor,
   onManifestLoaded: (event: { url: string; media: HTMLMediaElement }) => void,
@@ -47,9 +67,20 @@ function wrap(
       try {
         const manifestLoadedEvent = OriginalHls.Events?.MANIFEST_LOADED;
         if (!manifestLoadedEvent) return;
+
+        let manifestUrl: string | undefined;
+        const tryFire = () => {
+          if (manifestUrl === undefined || !this.media) return;
+          onManifestLoaded({ url: manifestUrl, media: this.media });
+        };
+
         this.on(manifestLoadedEvent, (_event, data) => {
-          if (this.media) onManifestLoaded({ url: data.url, media: this.media });
+          manifestUrl = data.url;
+          tryFire();
         });
+
+        const mediaAttachedEvent = OriginalHls.Events?.MEDIA_ATTACHED;
+        if (mediaAttachedEvent) this.on(mediaAttachedEvent, () => tryFire());
       } catch {
         // Best-effort — never let our hook crash the page's own player.
       }

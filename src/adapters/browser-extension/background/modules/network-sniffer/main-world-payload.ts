@@ -3,7 +3,12 @@ import { createMainWorldChannel } from '../../../utils/main-world/event-channel'
 import { installNetworkInterceptor, type InterceptDecision } from '../../../utils/main-world/network-interceptor';
 import { installMediaSourceInterceptor } from '../../../utils/main-world/media-source-interceptor';
 import { installHlsGlobalHook } from '../../../utils/main-world/hls-global-hook';
-import { MAIN_WORLD_REPORT_CHANNEL_ID, MAIN_WORLD_CORRELATION_CHANNEL_ID, HLS_CORRELATION_ATTRIBUTE } from './constants';
+import {
+  MAIN_WORLD_REPORT_CHANNEL_ID,
+  MAIN_WORLD_CORRELATION_CHANNEL_ID,
+  MAIN_WORLD_HLS_CORRELATION_CHANNEL_ID,
+  HLS_CORRELATION_ATTRIBUTE,
+} from './constants';
 
 /**
  * MAIN-world composition root for network-sniffer's third detection source (docs/ROADMAP.md #4.1)
@@ -36,6 +41,9 @@ import { MAIN_WORLD_REPORT_CHANNEL_ID, MAIN_WORLD_CORRELATION_CHANNEL_ID, HLS_CO
 const reportChannel = createMainWorldChannel<{ url: string }>(MAIN_WORLD_REPORT_CHANNEL_ID);
 // docs/ROADMAP.md #7.3(a)
 const correlationChannel = createMainWorldChannel<{ blobUrl: string; url: string }>(MAIN_WORLD_CORRELATION_CHANNEL_ID);
+// docs/ROADMAP.md §7.3(a-hls) bugfix — see constants.ts's doc comment: the attribute write alone
+// doesn't trigger dom-media-observer.ts's rescan, this explicit signal does.
+const hlsCorrelationChannel = createMainWorldChannel<Record<string, never>>(MAIN_WORLD_HLS_CORRELATION_CHANNEL_ID);
 
 // docs/ROADMAP.md #7.3(a) — a short ring buffer of recently classified media/manifest URLs, keyed
 // only by recency, not by which MediaSource/player fetched it (no browser API links a fetch() call
@@ -78,4 +86,5 @@ installMediaSourceInterceptor((event) => {
 // see HLS_CORRELATION_ATTRIBUTE's doc comment in constants.ts.
 installHlsGlobalHook(({ url, media }) => {
   media.setAttribute(HLS_CORRELATION_ATTRIBUTE, url);
+  hlsCorrelationChannel.dispatch({});
 });

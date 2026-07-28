@@ -22,8 +22,12 @@ export interface DetectedMedia {
    * `pageUrl: https://<iframe-origin>` while the user is looking at a completely different host.
    * The Side Panel's per-tab scoping (docs/ROADMAP.md §6.3) compared `pageUrl`'s origin against the
    * active tab's and therefore hid every one of those entries — detected, stored, and invisible.
-   * Absent when the tab's url couldn't be read (chrome:// page, tab closed between detection and
-   * lookup) or for detection sources with no tabId in hand. */
+   * docs/ROADMAP.md §10.4 — all three detection sources (`webRequest`, `report-main-world-media`,
+   * `report-dom-media`) now set this, read from `chrome.runtime.MessageSender.tab.url` in a
+   * standalone listener that isn't routed through the generic Bus (`index.ts`'s
+   * `persistDetectedMedia` and its callers) — previously only `webRequest` had a tabId in hand at
+   * all. Still absent when the tab's url genuinely couldn't be read (chrome:// page, tab closed
+   * between detection and lookup, or the message didn't originate from a tab). */
   tabUrl?: string;
   /** docs/ROADMAP.md #7.4 — best-effort signal that this URL's query string carries a signed/expiry
    * key (S3-style presigned URL, CDN token-auth, etc.) — see shared/signed-url-detector.ts. A LABEL,
