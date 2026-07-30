@@ -57,6 +57,10 @@ interface DownloadProgress {
    * during a download) without affecting the job already in flight. Shown alongside progress so a
    * user with several resolutions available isn't left guessing which one is actually downloading. */
   resolutionLabel?: string | undefined;
+  /** docs/ROADMAP.md §10.1 — set for the whole duration of a live-manifest capture; `total` never
+   * becomes meaningful for one of these (a live/sliding-window playlist has no fixed segment set), so
+   * `renderDownloadProgress` needs this to render "N captured" instead of "Part N/total". */
+  live?: boolean | undefined;
 }
 const activeDownloads = new Map<string, DownloadProgress>();
 // Gives the 'done'/'error'/'cancelled' state a moment on screen before this row's progress UI
@@ -221,6 +225,7 @@ chrome.runtime.onMessage.addListener((message: Partial<DownloadEngineEvent> & { 
     message: message.message,
     bytesPerSec: message.bytesPerSec,
     etaMs: message.etaMs,
+    live: message.live,
   });
   scheduleRender();
   if (message.phase === 'done' || message.phase === 'error' || message.phase === 'cancelled') settleDownload(message.jobId);
@@ -386,6 +391,16 @@ function renderDownloadProgress(state: DownloadProgress) {
   if (state.phase === 'remux') {
     return span({ class: 'download-progress-text' }, 'Remuxing...');
   }
+  if (state.live) {
+    // docs/ROADMAP.md §10.1 — a live/sliding-window manifest has no fixed segment set, so there's no
+    // "N/total" to show — just how many segments have landed so far, same Pause/Resume wording as VOD.
+    const statusPrefix = state.phase === 'paused' ? 'Paused — ' : state.phase === 'pausing' ? 'Pausing… ' : '';
+    return div(
+      { class: 'download-progress' },
+      progressTag(),
+      span({ class: 'download-progress-text' }, `${statusPrefix}${state.done ?? 0} segment${state.done === 1 ? '' : 's'} captured — recording…`),
+    );
+  }
   // 'segments' (HLS) and 'chunks' (§8.2 turbo) render identically — both are just "N of M pieces
   // done" with the same done/total/bytesPerSec/etaMs shape (shared/download-engine-protocol.ts).
   const total = state.total;
@@ -493,6 +508,15 @@ function renderItem(item: DetectedMedia) {
                       },
                       downloadProgress.phase === 'paused' ? '▶' : '⏸',
                     ),
+                // docs/ROADMAP.md §10.1 — Stop is live-only and distinct from Cancel: it finalizes
+                // (remuxes) whatever's been captured so far instead of discarding it, the same
+                // graceful finish reaching #EXT-X-ENDLIST would trigger on its own.
+                downloadProgress.live
+                  ? button(
+                      { class: 'secondary', title: 'Stop (save what was captured)', 'aria-label': 'Stop', onclick: () => sendEngineCommand('STOP_LIVE', item.id) },
+                      '⏹',
+                    )
+                  : null,
                 button(
                   { class: 'secondary', title: 'Cancel', 'aria-label': 'Cancel', onclick: () => sendEngineCommand('CANCEL', item.id) },
                   '✕',

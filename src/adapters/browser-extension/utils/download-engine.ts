@@ -59,6 +59,15 @@ interface JobControl {
   /** Which phase a RESUME should re-emit — the UI renders `'segments'`/`'chunks'` identically, this
    * just keeps emitted events semantically accurate for whichever job kind this is. */
   kind: 'segments' | 'chunks';
+  /** docs/ROADMAP.md §10.1 — set once at job creation. `pauseJob`/`resumeJob`/`noteFetchSettled` are
+   * generic (not live-aware) and emit on behalf of any job kind, so this is threaded through their
+   * events the same way `kind` already is — otherwise a pause/resume event for a live job would emit
+   * with no `live` flag at all, which the Side Panel would read as "live-ness unknown" and silently
+   * revert its live-specific rendering on every Pause click. */
+  live: boolean;
+  /** docs/ROADMAP.md §10.1 — set by the `STOP_LIVE` command or by the live poll loop itself seeing
+   * `#EXT-X-ENDLIST`. Only ever read by `runLiveJob`; VOD/turbo jobs never set it. */
+  liveStopRequested?: boolean;
 }
 
 const jobs = new Map<string, JobControl>();
@@ -106,7 +115,24 @@ export function handleEngineCommand(cmd: DownloadEngineRelayedCommand): void {
     case 'RESUME_CHECKPOINT':
       if (cmd.checkpoint) void resumeJobFromCheckpoint(cmd.checkpoint);
       break;
+    case 'STOP_LIVE':
+      stopLiveJob(cmd.jobId);
+      break;
   }
+}
+
+/** docs/ROADMAP.md §10.1 — a GRACEFUL finish for a live capture: drain whatever's already queued,
+ * then fall through to the same finish path as reaching `#EXT-X-ENDLIST` naturally (remux once,
+ * produce output) — as opposed to `CANCEL`, which discards. No-op if `jobId` isn't a live job (or
+ * isn't running at all): `runLiveJob` is the only reader of this flag. */
+function stopLiveJob(jobId: string): void {
+  const control = jobs.get(jobId);
+  if (!control?.live) {
+    debugLog(jobId, 'STOP_LIVE ignored — no such job, or not a live job');
+    return;
+  }
+  debugLog(jobId, 'STOP_LIVE requested');
+  control.liveStopRequested = true;
 }
 
 /**
@@ -133,7 +159,7 @@ function pauseJob(jobId: string): void {
     control.resolvePause = resolve;
   });
   debugLog(jobId, `PAUSE requested, inFlight=${control.inFlight}`);
-  emit(jobId, control.inFlight > 0 ? 'pausing' : 'paused', { segmentsDone: control.segmentsDone, segmentsTotal: control.segmentsTotal });
+  emit(jobId, control.inFlight > 0 ? 'pausing' : 'paused', { segmentsDone: control.segmentsDone, segmentsTotal: control.segmentsTotal, live: control.live });
 }
 
 function resumeJob(jobId: string): void {
@@ -146,7 +172,7 @@ function resumeJob(jobId: string): void {
   control.pausedPromise = null;
   control.resolvePause = null;
   debugLog(jobId, `RESUME — re-emitting '${control.kind}'`);
-  emit(jobId, control.kind, { segmentsDone: control.segmentsDone, segmentsTotal: control.segmentsTotal });
+  emit(jobId, control.kind, { segmentsDone: control.segmentsDone, segmentsTotal: control.segmentsTotal, live: control.live });
 }
 
 /** Decrements `inFlight` once a segment/chunk fetch ATTEMPT settles (success or failure) and
@@ -157,7 +183,7 @@ function noteFetchSettled(jobId: string, control: JobControl): void {
   debugLog(jobId, `fetch attempt settled, inFlight now ${control.inFlight}`);
   if (control.pausedPromise && control.inFlight === 0) {
     debugLog(jobId, "inFlight reached 0 while pausing — promoting to 'paused'");
-    emit(jobId, 'paused', { segmentsDone: control.segmentsDone, segmentsTotal: control.segmentsTotal });
+    emit(jobId, 'paused', { segmentsDone: control.segmentsDone, segmentsTotal: control.segmentsTotal, live: control.live });
   }
 }
 
@@ -339,6 +365,92 @@ async function tryRefreshSegmentsFromIndex(
   }
 }
 
+interface SegmentFetchDeps {
+  jobId: string;
+  control: JobControl;
+  replayHeadersFor: (url: string) => Promise<void>;
+  onAuthFailure: (url: string, statusCode: number) => Promise<void>;
+  /** VOD-only (§7.4): a wholesale, by-index manifest re-fetch on 401/403/404/410. Live capture
+   * (§10.1) has no equivalent — its own poll loop already refetches the manifest on its own cadence
+   * — so live callers omit this and simply let the segment fail after exhausted retries. */
+  tryRecoverExpiredUrl?: (() => Promise<boolean>) | undefined;
+}
+
+/**
+ * docs/ROADMAP.md §8.3/§10.1 — one segment's fetch/retry/backoff/decrypt, shared by VOD's pooled
+ * `worker()` and live capture's sequential loop. Retries up to 3 times (exponential backoff) before
+ * giving up; the CALLER decides what an exhausted-retries failure means (VOD: abort the whole job,
+ * missing segment = broken video; live: log and skip, one dropped segment shouldn't kill an
+ * hours-long capture). `getSegment()` is called fresh on every attempt (not read once) so a VOD
+ * caller's `tryRecoverExpiredUrl` replacing the whole segment list mid-retry is actually observed on
+ * the next attempt, not just on the very first one.
+ *
+ * Bugfix (§8.1 follow-up): each attempt gets its own `AbortController`, registered on
+ * `control.abortControllers` — CANCEL used to just let whichever segment was already in flight
+ * finish naturally, but in practice that delay was long enough to be confusing: a fresh Download
+ * click right after Cancel would silently no-op because the old job's entry hadn't settled out of
+ * `jobs`/`activeDownloads` yet. `inFlight` tracking is the CALLER's job (per claimed-segment
+ * lifecycle, not per attempt — see `noteFetchSettled`'s doc comment), not done here.
+ */
+async function fetchAndDecryptSegment(getSegment: () => ManifestSegment, sequenceNumber: number, label: string, deps: SegmentFetchDeps): Promise<ArrayBuffer> {
+  const { jobId, control, replayHeadersFor, onAuthFailure, tryRecoverExpiredUrl } = deps;
+  const MAX_ATTEMPTS = 4; // 1 initial try + 3 retries
+  let lastError: unknown;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    control.abortControllers.add(controller);
+    try {
+      const segment = getSegment();
+      debugLog(jobId, `${label} attempt ${attempt + 1}/${MAX_ATTEMPTS} — fetching`, { url: segment.url });
+      await replayHeadersFor(segment.url);
+      const res = await fetch(segment.url, { signal: controller.signal });
+      debugLog(jobId, `${label} attempt ${attempt + 1}/${MAX_ATTEMPTS} — HTTP ${res.status}`);
+      if (res.status === 401 || res.status === 403) {
+        await onAuthFailure(segment.url, res.status);
+        if (tryRecoverExpiredUrl && (await tryRecoverExpiredUrl())) continue; // retry now, doesn't consume a backoff wait
+        throw new Error(`${label} failed: HTTP ${res.status} — the link expired and no manifest refresh was available, or this CDN's hotlink protection rejected the request.`);
+      }
+      if (res.status === 404 || res.status === 410) {
+        if (tryRecoverExpiredUrl && (await tryRecoverExpiredUrl())) continue;
+        throw new Error(`${label} failed: HTTP ${res.status} — that segment URL is no longer served${tryRecoverExpiredUrl ? ', and refreshing the manifest did not yield a working one' : ''}.`);
+      }
+      if (!res.ok) throw new Error(`${label} failed: HTTP ${res.status}`);
+      const bytes = await res.arrayBuffer();
+      control.bytesDownloaded += bytes.byteLength;
+      return segment.key ? await decryptSegment(bytes, segment.key, sequenceNumber) : bytes;
+    } catch (err) {
+      lastError = err;
+      debugLog(jobId, `${label} attempt ${attempt + 1}/${MAX_ATTEMPTS} — threw`, { error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      control.abortControllers.delete(controller);
+    }
+    // A CANCEL-triggered abort lands here as a caught error too — without this check the segment
+    // would burn through its remaining retries against a server that never actually rejected it.
+    if (control.cancelled) throw lastError instanceof Error ? lastError : new Error('Download cancelled.');
+    if (attempt < MAX_ATTEMPTS - 1) await new Promise((r) => setTimeout(r, Math.min(500 * 2 ** attempt, 5000)));
+  }
+  debugLog(jobId, `${label} — exhausted all ${MAX_ATTEMPTS} attempts, giving up`);
+  throw lastError instanceof Error ? lastError : new Error(`${label} failed after ${MAX_ATTEMPTS} attempts.`);
+}
+
+/** The `#EXT-X-MAP` init segment, written as the FIRST bytes of the output file — fetched inline,
+ * bypassing the pool/writeChain (no worker has started yet at this point). Shared by VOD's `runJob`
+ * and live capture's `runLiveJob` (docs/ROADMAP.md §10.1). */
+async function fetchInitSegmentBytes(
+  init: ManifestSegment,
+  mediaSequence: number,
+  replayHeadersFor: (url: string) => Promise<void>,
+  onAuthFailure: (url: string, statusCode: number) => Promise<void>,
+): Promise<ArrayBuffer> {
+  await replayHeadersFor(init.url);
+  const range = init.byteRange ? byteRangeToHeader(init.byteRange) : undefined;
+  const res = await fetch(init.url, range ? { headers: { Range: range } } : {});
+  if (res.status === 401 || res.status === 403) await onAuthFailure(init.url, res.status);
+  if (!res.ok) throw new Error(`Initialization segment failed: HTTP ${res.status} (${init.url})`);
+  const bytes = await res.arrayBuffer();
+  return init.key ? await decryptSegment(bytes, init.key, mediaSequence) : bytes;
+}
+
 async function startJob(jobId: string, manifestUrl: string, resolutionLabel?: string): Promise<void> {
   if (jobs.has(jobId)) return; // already running — Side Panel already guards this, enforced again
   // here since Dashboard's smart-download can trigger the same id independently.
@@ -353,6 +465,7 @@ async function startJob(jobId: string, manifestUrl: string, resolutionLabel?: st
     abortControllers: new Set(),
     inFlight: 0,
     kind: 'segments',
+    live: false, // flipped to manifest.isLive once the manifest is fetched, below
   };
   jobs.set(jobId, control);
   debugLog(jobId, `START — manifestUrl=${manifestUrl}`);
@@ -399,7 +512,12 @@ async function startJob(jobId: string, manifestUrl: string, resolutionLabel?: st
       return;
     }
 
-    await runJob(jobId, control, manifest, manifestUrl, replayHeadersFor, { resolutionLabel });
+    control.live = manifest.isLive;
+    if (manifest.isLive) {
+      await runLiveJob(jobId, control, manifest, manifestUrl, replayHeadersFor);
+    } else {
+      await runJob(jobId, control, manifest, manifestUrl, replayHeadersFor, { resolutionLabel });
+    }
   } catch (err) {
     // Bugfix: nothing in this file used to `console.error` a genuine job failure — only the 401/403
     // diagnostic (`logSegmentAuthDiagnostics`) and a remux fallback ever logged anything, so a plain
@@ -442,6 +560,7 @@ async function resumeJobFromCheckpoint(checkpoint: DownloadJobCheckpoint): Promi
     abortControllers: new Set(),
     inFlight: 0,
     kind: 'segments',
+    live: false, // §8.12 explicitly refuses to resume a checkpoint whose manifest has since gone live
   };
   jobs.set(jobId, control);
   debugLog(jobId, `RESUME_CHECKPOINT — opfsRunId=${checkpoint.opfsRunId}, resuming from segment index ${checkpoint.lastConfirmedSegmentIndex + 1}/${checkpoint.total}`);
@@ -596,50 +715,13 @@ async function runJob(
    * actually using the network, so it shouldn't hold up a PAUSE from settling into `'paused'`.
    */
   async function fetchSegment(index: number): Promise<ArrayBuffer> {
-    const MAX_ATTEMPTS = 4; // 1 initial try + 3 retries
-    let lastError: unknown;
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      const controller = new AbortController();
-      control.abortControllers.add(controller);
-      try {
-        const segment = segments[index]!;
-        debugLog(jobId, `segment ${index + 1}/${total} attempt ${attempt + 1}/${MAX_ATTEMPTS} — fetching`, { url: segment.url });
-        await replayHeadersFor(segment.url);
-        const res = await fetch(segment.url, { signal: controller.signal });
-        debugLog(jobId, `segment ${index + 1}/${total} attempt ${attempt + 1}/${MAX_ATTEMPTS} — HTTP ${res.status}`);
-        if (res.status === 401 || res.status === 403) {
-          await logSegmentAuthDiagnostics(segment.url, res.status);
-          if (await ensureRefreshed(index)) continue; // retry now, doesn't consume a backoff wait
-          throw new Error(
-            `Segment ${index + 1} failed: HTTP ${res.status} — the link expired and no manifest refresh was available, ` +
-              "or this CDN's hotlink protection rejected the request.",
-          );
-        }
-        if (res.status === 404 || res.status === 410) {
-          if (await ensureRefreshed(index)) continue;
-          throw new Error(
-            manifest.isLive
-              ? `Segment ${index + 1} is already gone (HTTP ${res.status}). This playlist carries no #EXT-X-ENDLIST, so it is a live/sliding-window stream: segments expire out of the window as it advances, and there is no fixed set of them to save.`
-              : `Segment ${index + 1} failed: HTTP ${res.status} — that segment URL is no longer served, and refreshing the manifest did not yield a working one.`,
-          );
-        }
-        if (!res.ok) throw new Error(`Segment ${index + 1} failed: HTTP ${res.status}`);
-        const bytes = await res.arrayBuffer();
-        control.bytesDownloaded += bytes.byteLength;
-        return segment.key ? await decryptSegment(bytes, segment.key, manifest.mediaSequence + index) : bytes;
-      } catch (err) {
-        lastError = err;
-        debugLog(jobId, `segment ${index + 1}/${total} attempt ${attempt + 1}/${MAX_ATTEMPTS} — threw`, { error: err instanceof Error ? err.message : String(err) });
-      } finally {
-        control.abortControllers.delete(controller);
-      }
-      // A CANCEL-triggered abort lands here as a caught error too — without this check the segment
-      // would burn through its remaining retries against a server that never actually rejected it.
-      if (control.cancelled) throw lastError instanceof Error ? lastError : new Error('Download cancelled.');
-      if (attempt < MAX_ATTEMPTS - 1) await new Promise((r) => setTimeout(r, Math.min(500 * 2 ** attempt, 5000)));
-    }
-    debugLog(jobId, `segment ${index + 1}/${total} — exhausted all ${MAX_ATTEMPTS} attempts, giving up`);
-    throw lastError instanceof Error ? lastError : new Error(`Segment ${index + 1} failed after ${MAX_ATTEMPTS} attempts.`);
+    return fetchAndDecryptSegment(() => segments[index]!, manifest.mediaSequence + index, `Segment ${index + 1}/${total}`, {
+      jobId,
+      control,
+      replayHeadersFor,
+      onAuthFailure: logSegmentAuthDiagnostics,
+      tryRecoverExpiredUrl: () => ensureRefreshed(index),
+    });
   }
 
   // docs/ROADMAP.md #8.3 — pool of concurrent fetches; segments still land in the OPFS file in
@@ -784,24 +866,13 @@ async function runJob(
     }
   }
 
-  /** The `#EXT-X-MAP` init segment, written as the FIRST bytes of the output file — fetched inline,
-   * bypassing the pool/writeChain, since no worker has started yet at this point. */
-  async function fetchInitSegment(init: ManifestSegment): Promise<ArrayBuffer> {
-    await replayHeadersFor(init.url);
-    const range = init.byteRange ? byteRangeToHeader(init.byteRange) : undefined;
-    const res = await fetch(init.url, range ? { headers: { Range: range } } : {});
-    if (res.status === 401 || res.status === 403) await logSegmentAuthDiagnostics(init.url, res.status);
-    if (!res.ok) throw new Error(`Initialization segment failed: HTTP ${res.status} (${init.url})`);
-    const bytes = await res.arrayBuffer();
-    return init.key ? await decryptSegment(bytes, init.key, manifest.mediaSequence) : bytes;
-  }
-
   try {
     // §8.12 resume: the init segment (if any) is always the very first bytes written, before any
     // worker starts — by the time a checkpoint exists to resume FROM, it must already be on disk.
     if (manifest.initSegment && !options.resume) {
       debugLog(jobId, 'fetching init segment (#EXT-X-MAP)');
-      await opfsRun.write(new Uint8Array(await fetchInitSegment(manifest.initSegment)));
+      const initBytes = await fetchInitSegmentBytes(manifest.initSegment, manifest.mediaSequence, replayHeadersFor, logSegmentAuthDiagnostics);
+      await opfsRun.write(new Uint8Array(initBytes));
       debugLog(jobId, 'init segment written');
     }
 
@@ -841,6 +912,166 @@ async function runJob(
     await pendingCheckpointSave.catch(() => {});
     void clearCheckpoint(jobId);
     void removeOpfsRun(runId).catch(() => {});
+  }
+}
+
+/** docs/ROADMAP.md §10.1 — HLS's own recommended re-poll cadence is the playlist's own
+ * `#EXT-X-TARGETDURATION`; this is only the fallback for a manifest that omits it. */
+const LIVE_POLL_FALLBACK_MS = 5000;
+const MAX_CONSECUTIVE_LIVE_POLL_FAILURES = 5;
+
+/**
+ * docs/ROADMAP.md §10.1 — a live/sliding-window HLS manifest has no fixed segment set, so this is
+ * NOT `runJob` with a bigger `total`: it's a sequential poll-fetch-write loop, not a pool. New
+ * segments show up one at a time at roughly `targetDurationSec` cadence, so there's no backlog to
+ * parallelize the way VOD's `SEGMENT_POOL_SIZE` workers do — sequential fetch also means writes land
+ * in order for free, with no `pendingWrites`/`flushReady` reordering buffer needed. Segment identity
+ * across polls is tracked by absolute HLS media-sequence number (`manifest.mediaSequence + i`), not
+ * array index — a live playlist's window slides, so index `i` doesn't name the same segment across
+ * two fetches (docs/ROADMAP.md #7.4's existing rationale for refusing wholesale index-remap on live).
+ *
+ * Ends one of three ways: `control.cancelled` (user Cancel — discard, same as VOD); the manifest
+ * gains `#EXT-X-ENDLIST` (stream ended naturally); or `control.liveStopRequested` (user clicked Stop,
+ * §10.1's `STOP_LIVE` command) — the latter two both drain whatever's already queued from the most
+ * recent poll, then fall through to the SAME finish path as VOD (`opfsRun.finish()` →
+ * `produceOutput()`, one remux at the very end, same `REMUX_SIZE_CAP_BYTES` fallback).
+ *
+ * Deliberately does NOT checkpoint (no `persistCheckpoint`/`opfsRun.commit()` calls) — see
+ * docs/ROADMAP.md §10.1's "Explicitly out of scope" note: `commit()` is O(current file size) and this
+ * file has no final size, and a live capture interrupted by an Offscreen Document restart is simply
+ * lost (same as Cancel), matching the codebase's existing explicit refusal to resume a stream that
+ * has since gone live (see `resumeJobFromCheckpoint`/`ensureRefreshed` above).
+ */
+async function runLiveJob(
+  jobId: string,
+  control: JobControl,
+  initialManifest: Extract<ParsedManifest, { kind: 'media' }>,
+  sourceUrl: string,
+  replayHeadersFor: (url: string) => Promise<void>,
+): Promise<void> {
+  const runId = crypto.randomUUID();
+  const opfsRun = await createOpfsRun(runId);
+  let manifest = initialManifest;
+  let nextSequenceToFetch = initialManifest.mediaSequence;
+  let authDiagnosticLogged = false;
+
+  debugLog(jobId, `runLiveJob starting — runId=${runId}, initial mediaSequence=${initialManifest.mediaSequence}`);
+
+  /** Same one-shot-per-job diagnostic as VOD's `logSegmentAuthDiagnostics` (§7.1) — kept as its own
+   * copy rather than shared, since sharing would need threading `sourceUrl`/`authDiagnosticLogged`
+   * across both closures for no real benefit (this is the only other call site). */
+  async function logAuthDiagnostics(url: string, statusCode: number): Promise<void> {
+    if (authDiagnosticLogged) return;
+    authDiagnosticLogged = true;
+    try {
+      const host = new URL(url).hostname;
+      const replay = await requestFromBackground<DescribeHeaderReplayResult>({ type: 'synapse:describe-header-replay', host });
+      const likelyCause = !replay.intended
+        ? `No headers were captured for this manifest, or syncHeaderReplayRule was never called for ${host} — the CDN saw a bare extension request.`
+        : !replay.liveRule
+          ? `Rule ${replay.intended.ruleId} was synced for ${host} but is not in the live session ruleset — evicted by MAX_HOSTS, or updateSessionRules failed (check for an earlier console error from header-replay-rules).`
+          : `Rule ${replay.intended.ruleId} is live and carries ${replay.intended.headerNames.join(', ')}. So either (a) Chrome overrode a value after the rule applied (it does this for Origin on CORS-mode requests), or (b) this CDN gates on something other than these headers.`;
+      console.warn(`Synapse: live segment fetch got HTTP ${statusCode} — header replay did not satisfy ${host}.\n\nLikely cause: ${likelyCause}`, { segmentUrl: url, manifestUrl: sourceUrl, ...replay });
+    } catch {
+      // Diagnostics must never mask the real error the caller is already reporting.
+    }
+  }
+
+  try {
+    if (manifest.initSegment) {
+      debugLog(jobId, 'fetching init segment (#EXT-X-MAP)');
+      const initBytes = await fetchInitSegmentBytes(manifest.initSegment, initialManifest.mediaSequence, replayHeadersFor, logAuthDiagnostics);
+      await opfsRun.write(new Uint8Array(initBytes));
+      debugLog(jobId, 'init segment written');
+    }
+
+    let consecutivePollFailures = 0;
+
+    pollLoop: for (;;) {
+      if (control.cancelled) break;
+
+      // Fetch every segment the CURRENT manifest lists that hasn't been fetched yet, oldest first.
+      for (let i = 0; i < manifest.segments.length; i++) {
+        const absoluteSeq = manifest.mediaSequence + i;
+        if (absoluteSeq < nextSequenceToFetch) continue;
+        if (control.cancelled) break pollLoop;
+        if (control.pausedPromise) await control.pausedPromise;
+        if (control.cancelled) break pollLoop;
+
+        const segment = manifest.segments[i]!;
+        // Same mandatory guard as `startJob`'s initial check (docs/ROADMAP.md #5.3/#8.4) — a live
+        // source could start using real DRM mid-capture even if the first poll didn't show any.
+        if (segment.key && isRealDrm(segment.key)) {
+          throw new Error(`This stream became DRM-protected mid-capture (METHOD=${segment.key.method}${segment.key.keyFormat ? `, KEYFORMAT=${segment.key.keyFormat}` : ''}) — stopping.`);
+        }
+
+        control.inFlight++;
+        try {
+          const bytes = await fetchAndDecryptSegment(() => segment, absoluteSeq, `Live segment #${absoluteSeq}`, {
+            jobId,
+            control,
+            replayHeadersFor,
+            onAuthFailure: logAuthDiagnostics,
+          });
+          await opfsRun.write(new Uint8Array(bytes));
+          nextSequenceToFetch = absoluteSeq + 1;
+          control.segmentsDone = nextSequenceToFetch - initialManifest.mediaSequence;
+          debugLog(jobId, `live segment #${absoluteSeq} written to OPFS`);
+          const elapsedMs = Date.now() - control.startedAt;
+          const bytesPerSec = control.bytesDownloaded / Math.max(elapsedMs / 1000, 1);
+          emit(jobId, 'segments', { segmentsDone: control.segmentsDone, bytesPerSec, live: true });
+        } catch (err) {
+          if (control.cancelled) break pollLoop;
+          // One dropped segment shouldn't kill an hours-long capture — log and move past it.
+          console.warn(`Synapse: live capture ${jobId} skipping segment #${absoluteSeq} after exhausted retries`, err);
+          nextSequenceToFetch = absoluteSeq + 1;
+        } finally {
+          noteFetchSettled(jobId, control);
+        }
+      }
+
+      if (control.cancelled) break;
+      if (!manifest.isLive) control.liveStopRequested = true; // #EXT-X-ENDLIST showed up
+      if (control.liveStopRequested) break;
+
+      const waitMs = manifest.targetDurationSec ? manifest.targetDurationSec * 1000 : LIVE_POLL_FALLBACK_MS;
+      debugLog(jobId, `live poll — waiting ${waitMs}ms before refetching manifest`);
+      await new Promise((r) => setTimeout(r, waitMs));
+      if (control.cancelled) break;
+      if (control.pausedPromise) await control.pausedPromise;
+      if (control.cancelled) break;
+      if (control.liveStopRequested) break; // STOP_LIVE may have arrived during the wait/pause above
+
+      try {
+        await replayHeadersFor(sourceUrl);
+        const text = await (await fetch(sourceUrl)).text();
+        const reparsed = parseM3u8(text, sourceUrl);
+        if (reparsed.kind !== 'media') throw new Error('This URL no longer looks like a media playlist.');
+        manifest = reparsed;
+        consecutivePollFailures = 0;
+      } catch (err) {
+        consecutivePollFailures++;
+        debugLog(jobId, `live manifest poll failed (${consecutivePollFailures}/${MAX_CONSECUTIVE_LIVE_POLL_FAILURES})`, { error: err instanceof Error ? err.message : String(err) });
+        if (consecutivePollFailures >= MAX_CONSECUTIVE_LIVE_POLL_FAILURES) {
+          throw new Error(`Could not refetch the live manifest after ${MAX_CONSECUTIVE_LIVE_POLL_FAILURES} attempts: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+
+    if (control.cancelled) {
+      await opfsRun.abort();
+      emit(jobId, 'cancelled');
+      return;
+    }
+
+    debugLog(jobId, 'live capture stopped — finishing OPFS run and producing output');
+    const file = await opfsRun.finish();
+    await produceOutput(jobId, file, sourceUrl, initialManifest.initSegment ? 'mp4' : 'ts');
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Synapse download engine: live job ${jobId} failed`, err);
+    await opfsRun.abort();
+    emit(jobId, 'error', { message });
   }
 }
 
@@ -904,6 +1135,7 @@ async function startTurboJob(jobId: string, url: string): Promise<void> {
     abortControllers: new Set(),
     inFlight: 0,
     kind: 'chunks',
+    live: false, // turbo is a plain Range downloader, never manifest-driven — never live
   };
   jobs.set(jobId, control);
   debugLog(jobId, `START_TURBO — url=${url}`);

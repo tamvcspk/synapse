@@ -76,6 +76,10 @@ export type ParsedManifest =
        * sequence number is `mediaSequence + i`. docs/ROADMAP.md #8.4's AES-128 decrypt engine needs
        * this to derive a segment's IV when its `SegmentKey` doesn't carry an explicit `IV=` attribute. */
       mediaSequence: number;
+      /** From `#EXT-X-TARGETDURATION:N` (seconds), absent if the tag is missing/malformed.
+       * docs/ROADMAP.md #10.1 — the live-capture poll loop paces manifest refetches off this
+       * (the HLS spec's own recommended polling cadence), not off a value made up here. */
+      targetDurationSec?: number;
     }
   | { kind: 'unknown' };
 
@@ -128,6 +132,7 @@ export function parseM3u8(text: string, baseUrl: string): ParsedManifest {
   let hasEndList = false;
   let playlistType: string | undefined;
   let mediaSequence = 0;
+  let targetDurationSec: number | undefined;
   let currentKey: SegmentKey | undefined;
   let initSegment: ManifestSegment | undefined;
   let pendingVariantResolution: string | undefined;
@@ -232,6 +237,12 @@ export function parseM3u8(text: string, baseUrl: string): ParsedManifest {
       if (!Number.isNaN(n)) mediaSequence = n;
       continue;
     }
+
+    if (line.startsWith('#EXT-X-TARGETDURATION')) {
+      const n = parseInt(line.split(':')[1] ?? '', 10);
+      if (!Number.isNaN(n)) targetDurationSec = n;
+      continue;
+    }
   }
 
   if (isMaster) return { kind: 'master', variants };
@@ -243,6 +254,7 @@ export function parseM3u8(text: string, baseUrl: string): ParsedManifest {
       encrypted: segments.some((s) => s.key !== undefined),
       isLive: !hasEndList || playlistType === 'EVENT',
       mediaSequence,
+      ...(targetDurationSec !== undefined ? { targetDurationSec } : {}),
     };
   }
   return { kind: 'unknown' };

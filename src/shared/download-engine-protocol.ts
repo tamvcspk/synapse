@@ -23,13 +23,15 @@ export type DownloadEnginePhase = 'segments' | 'chunks' | 'remux' | 'pausing' | 
 
 export interface DownloadEngineCommand {
   type: 'synapse:download-engine-command';
-  /** `START` = HLS manifest job (§8.1). `START_TURBO` = §8.2's opt-in multi-connection Range
+  /** `START` = HLS manifest job (§8.1) — branches internally to a live-capture loop when the parsed
+   * manifest reports `isLive` (§10.1). `START_TURBO` = §8.2's opt-in multi-connection Range
    * downloader for a plain static file. `RESUME_CHECKPOINT` (§8.12) starts a NEW in-memory job that
    * continues a previously-interrupted HLS job from a persisted `DownloadJobCheckpoint` — distinct
-   * from `RESUME`, which only un-pauses a job that's still alive in `jobs`. PAUSE/RESUME/CANCEL are
-   * generic — they act on whichever `JobControl` is registered for `jobId` regardless of which
-   * START variant created it. */
-  op: 'START' | 'START_TURBO' | 'PAUSE' | 'RESUME' | 'CANCEL' | 'RESUME_CHECKPOINT';
+   * from `RESUME`, which only un-pauses a job that's still alive in `jobs`. `STOP_LIVE` (§10.1) is
+   * live-capture-only: a GRACEFUL finish (drain what's queued, then remux) as opposed to `CANCEL`'s
+   * discard — a no-op if `jobId` isn't a live job. PAUSE/RESUME/CANCEL are generic — they act on
+   * whichever `JobControl` is registered for `jobId` regardless of which START variant created it. */
+  op: 'START' | 'START_TURBO' | 'PAUSE' | 'RESUME' | 'CANCEL' | 'RESUME_CHECKPOINT' | 'STOP_LIVE';
   jobId: string;
   /** Only meaningful for START/START_TURBO — the manifest or file URL to download. Explicit
    * `| undefined` (not just `?`) — tsconfig's `exactOptionalPropertyTypes` requires it since callers
@@ -110,4 +112,8 @@ export interface DownloadEngineEvent {
   bytesPerSec?: number | undefined;
   etaMs?: number | undefined;
   message?: string | undefined;
+  /** §10.1 — set for the whole duration of a live-manifest capture. `segmentsTotal` is deliberately
+   * left `undefined` throughout (a live/sliding-window playlist has no real total), so the UI needs
+   * this flag to tell "genuinely unbounded" apart from "total just hasn't loaded yet". */
+  live?: boolean | undefined;
 }
