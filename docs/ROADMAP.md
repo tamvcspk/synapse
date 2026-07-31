@@ -156,7 +156,7 @@ Trước đây `tabUrl` (top-level URL của tab, khác `pageUrl` — origin c�
 
 ---
 
-## 11. Pivot: Userscript Platform — KẾ HOẠCH, chưa implement
+## 11. Pivot: Userscript Platform — Phase 0 đã implement, Phase 1→7 còn là KẾ HOẠCH
 
 Định vị lại sản phẩm: Synapse là **một bản nâng cấp của Tampermonkey**, không còn là "playground automation cá nhân có vài module builtin". User script thành công dân hạng nhất; module builtin (network-sniffer, http-error-mocker, reader-mode) tụt xuống vai trò reference implementation + nguồn cung cấp API. Đối tượng: người có kỹ năng code. Chia sẻ script là quyết định của user (policy kiểu Tampermonkey) — việc của platform là làm quyền hạn **minh bạch và theo từng script**.
 
@@ -168,7 +168,7 @@ Skills liên quan (đã viết trước, đọc khi bắt tay): [`userscript-api
 
 | Chủ đề | Chốt | Vì |
 |---|---|---|
-| Adapter thứ 2 | **Khai tử.** `RuntimeEnv` còn 1 giá trị | Audit: ~0% adapter port được — mọi feature phụ thuộc `webRequest`/DNR/CDP/`userScripts`/offscreen/trang web thật. Domain của Synapse CHÍNH LÀ trình duyệt |
+| Adapter thứ 2 | **Khai tử.** `RuntimeEnv` xoá hẳn (§11.1) | Audit: ~0% adapter port được — mọi feature phụ thuộc `webRequest`/DNR/CDP/`userScripts`/offscreen/trang web thật. Domain của Synapse CHÍNH LÀ trình duyệt |
 | Hexagonal | **Giữ**, nhưng vì testability + kỷ luật phụ thuộc, KHÔNG phải portability | `kernel/`+`shared/` phải chứng minh được là sạch `chrome.*`. Đừng biện minh thiết kế bằng "để sau này port được" |
 | "Framework/template" | Framework thật là **`synapseApi`**, không phải `kernel/` | Chỉ `synapseApi` có người dùng ngoài → chỉ nó cần ổn định/versioned/có docs. Phần kiến trúc đáng tái dùng đã ở dạng `.claude/skills/` rồi |
 | Facade | `synapseApi` là global do shim tiêm, **trong USER_SCRIPT world**. World vẫn cô lập như cũ | MAIN-world global sẽ cho MỌI website truy cập, và làm `moduleId` không còn xác thực được (`sender` chỉ biết frame, không biết script) → sập hẳn phân quyền |
@@ -176,13 +176,13 @@ Skills liên quan (đã viết trước, đọc khi bắt tay): [`userscript-api
 | Engine UI | Chạy **cùng world với script**; Core sở hữu host/portal/lifecycle/component library | Engine ở Core giết closure (`onClick` không qua clone) → mất vĩnh viễn kiểu viết template, và mỗi lần đổi state là 1 round-trip. Đổi lại KHÔNG mua được an toàn nào: script vốn đã có full DOM |
 | Styling | **`adoptedStyleSheets`** | Đã đo Chrome 150 (2026-07-30): không bị `style-src` chi phối, khác hẳn `<style>`/`style=""`. Viết CSS thật được. Xem [LESSONS.md](LESSONS.md) |
 
-### 11.1 Phase 0 — Nền (độc lập, không rủi ro thiết kế)
+### 11.1 Phase 0 — Nền — Đã implement (94 test xanh, `typecheck` + `build` sạch)
 
-- **vitest + `npm test`.** Test đầu tiên nhắm `src/shared/` (pure, không cần browser): `media-manifest-parser`, `zip`, `http-mock`, `media-url-matcher`, `signed-url-detector`.
-- **`RuntimeEnv` → 1 giá trị**; gỡ `environment-guard` khỏi hot path; `supportedEnvs` xoá hoặc thành no-op. `design.md` §8 viết lại thành "đã cân nhắc, đã từ chối + lý do" (đây là lúc được sửa design.md).
-- **Gỡ demo/smoke module** (`append-a`/`append-b`/`demo-composite`, `background/index.ts` cuối file) — chuyển thành test thật cho `workflow.ts`/`composite-module.ts`. Hiện chúng chạy + `console.log` trong mọi bản build.
-- **`workflowId` dispatch**: implement hoặc xoá hẳn (đang hardcode `kernel.run([], …)`, `workflowId` không được đọc ở đâu).
-- **Xong khi**: `npm test` xanh; service worker khởi động không còn log demo.
+- **vitest** ([vitest.config.ts](../vitest.config.ts), tách RIÊNG khỏi `vite.config.ts` — config kia bọc plugin crx, để vitest fallback vào nó là chạy nguyên build MV3 mỗi lần `npm test`). `environment: 'node'`, `include: ['src/**/*.test.ts']` (co-located, không thư mục `tests/` riêng; glob của `bundled-modules.ts`/`background-modules.ts` không đụng `.test.ts` nên bundle không dính). Script mới: `npm test` (`vitest run`) + `npm run test:watch`.
+- **74 test cho `src/shared/`**: `media-manifest-parser` (master/media/unknown, live-vs-VOD, `#EXT-X-KEY` xoay khoá + ranh giới AES-128/DRM, `#EXT-X-MAP`, URI cách tag nhiều dòng), `zip` (đọc ngược archive qua central directory như extractor thật, CRC-32 đối chiếu vector chuẩn `"123456789"`→`0xcbf43926`, cờ UTF-8, deterministic), `http-mock` (validate + giới hạn theo mechanism + `bodyEncoding` base64 của §2.6.1), `media-url-matcher`, `signed-url-detector`.
+- **20 test kernel** thay 2 smoke-test demo: [workflow.test.ts](../src/kernel/workflow.test.ts) + [composite-module.test.ts](../src/kernel/composite-module.test.ts). `append-a`/`append-b`/`demo-composite` xoá hẳn khỏi `background/index.ts` (trước đây chạy + `console.log` trong MỌI bản build, mỗi lần service worker khởi động).
+- **Adapter thứ 2 khai tử ở mức code**: xoá hẳn `RuntimeEnv`/`RUNTIME_ENVS`/`Module.supportedEnvs`/`RegistryEntry.supportedEnvs`+`envSupported`/status `'env-mismatch'`/`kernel/environment-guard.ts`. Không giữ dạng no-op: một type đúng 1 giá trị mà không ai đọc vẫn là speculative generality, chỉ nhỏ hơn. `manifest-validator` BỎ QUA `supportedEnvs` của script cũ (như mọi field lạ), không reject. `design.md` §8 viết lại thành "đã cân nhắc, đã từ chối" kèm bảng audit từng feature → API browser nó phụ thuộc.
+- **`workflowId` dispatch: XOÁ**, không implement — không có `Workflow` nào tồn tại trong repo để dispatch tới, viết resolver cho 0 caller đúng là thứ §11.0 vừa khai tử. `kernel/workflow.ts` GIỮ (primitive thứ tự, nay có test); đường declare chuỗi cho user script là Phase 5 Tier 3.
 - **Phụ thuộc**: không.
 
 ### 11.2 Phase 1 — Tách `download-engine.ts` (1.355 dòng)
@@ -322,9 +322,11 @@ Việc phải làm:
 
 ### 11.9 Thứ tự & cách vào việc
 
-`0 → 1 → 2 → 3 → 4 → 5 → 6 → 7`.
+`0 → 1 → 2 → 3 → 4 → 5 → 6 → 7`. **Phase 0 xong.**
 
-Phase 0 và 1 **độc lập hoàn toàn với phần pivot** — bắt đầu được ngay, không cần chốt thêm gì. Phase 2 là keystone, mọi phase sau phụ thuộc nó. Mỗi phase có "Xong khi" riêng nên dừng giữa chừng ở ranh giới phase là an toàn.
+Phase 0 và 1 **độc lập hoàn toàn với phần pivot** — Phase 1 bắt đầu được ngay, không cần chốt thêm gì. Phase 2 là keystone, mọi phase sau phụ thuộc nó. Mỗi phase có "Xong khi" riêng nên dừng giữa chừng ở ranh giới phase là an toàn.
+
+**Một điểm CÓ THỂ phải đảo thứ tự 1↔2:** Open Point "[§11 Phase 2] Upload 2 user script cùng lúc" (khu vực "Chưa verify bằng browser thật") — nếu `const __SYNAPSE_MODULE_ID__` ở top-level shim thật sự trùng khai báo và script thứ 2 `SyntaxError`, thì hôm nay platform chỉ chạy được ĐÚNG 1 user script, và Phase 2 phải chen lên trước Phase 1. Thử mất 2 phút (upload 2 file `.js` bất kỳ, mở console USER_SCRIPT world) — làm trước khi cam kết vào Phase 1.
 
 ---
 
@@ -334,8 +336,8 @@ Mọi việc chưa xong, chưa chốt hướng, hoặc chưa verify — gom theo
 
 ### Chưa implement / chưa chọn hướng
 
-- **[§11] Toàn bộ pivot Userscript Platform** — xem §11 ở trên (đã chốt hướng, chia 7 phase, mỗi phase có "Xong khi" riêng). Ba lỗi đã xác định qua đọc code, cố ý KHÔNG vá lẻ mà để Phase 2 dọn một lượt: `synapse.bus.on()` gãy câm lặng (handler là function, không qua structured clone — `rpc-client.ts` đã biết và cố tình không proxy `bus`, nhưng shim vẫn expose); `needs: ['net'|'dom']` là no-op (có trong `Capability`, không có service trong `ModuleContext.services`); `ai.*` throw vì `background/index.ts` chưa wire factory.
-- **[§11] Không có test nào trong repo** — Phase 0 mở màn bằng vitest cho `src/shared/`. Đây là điều kiện tiên quyết của Phase 1 (tách `download-engine.ts` mà không có lưới an toàn là liều).
+- **[§11] Pivot Userscript Platform — Phase 0 xong, còn Phase 1→7** (đã chốt hướng, mỗi phase có "Xong khi" riêng). Ba lỗi đã xác định qua đọc code, cố ý KHÔNG vá lẻ mà để Phase 2 dọn một lượt: `synapse.bus.on()` gãy câm lặng (handler là function, không qua structured clone — `rpc-client.ts` đã biết và cố tình không proxy `bus`, nhưng shim vẫn expose); `needs: ['net'|'dom']` là no-op (có trong `Capability`, không có service trong `ModuleContext.services`); `ai.*` throw vì `background/index.ts` chưa wire factory.
+- **[§11 Phase 1] Lưới an toàn cho việc tách `download-engine.ts` mới chỉ phủ `src/shared/` + `kernel/`** — Phase 0 đã dựng vitest, nhưng chính `download-engine.ts` (1.355 dòng) chưa có test nào, và phần lớn nội dung của nó (OPFS, ffmpeg.wasm, `chrome.*` relay) không test được trong `environment: 'node'`. Đúng thứ tự Phase 1 đặt ra: tách phần PURE ra `shared/` TRƯỚC rồi test phần đó — không phải cố test nguyên file tại chỗ.
 - **[§11.6 Tier 4] Workflow engine kiểu DAG (Prefect-like: node tuỳ ý, phân nhánh, loop tường minh, visual editor) — ĐÃ CÂN NHẮC, HOÃN.** Không vào plan. Lý do: (a) trong pipeline tuần tự mà mỗi bước là hàm JS, phân nhánh là `if` và loop là `for` **bên trong** một bước — DAG tường minh chỉ đáng khi có thứ *tiêu thụ* cấu trúc đó (scheduler phân tán — không cần; visualizer — đã có `steps-view` cho pipeline tuyến tính); (b) 5/6 value prop của Prefect không áp dụng (song song hoá: engine tự pool bên trong rồi; retry: đã có per-segment; cron: không phải use case; resume: đã có nhưng theo từng feature ở §8.12) — chỉ **observability** là khoảng trống thật, và Tier 3 lấp được mà không cần DAG; (c) **mâu thuẫn kiến trúc**: node ở context khác nhau biến mọi cạnh thành ranh giới `structured-clone`, trong khi pipeline đang chạy tốt nhất (`reader-mode-converter`) truyền một **`Document` sống** qua cả 4 bước — thứ đó không thể qua ranh giới; nó chạy được CHỈ VÌ cả 4 bước cùng world. **Điều kiện vào lại**: có ≥2 ca thật mà `if`/`for` bên trong một bước không diễn đạt nổi, VÀ các bước đó cùng context (hoặc dữ liệu giữa chúng đã là handle chứ không phải giá trị sống).
 - **[§7.3-open] Anchor badge cho MSE/HLS player vẫn KHÔNG hoạt động ổn định, sau 3 vòng vá dựa trên đọc code (§7.3(a-hls) bug i/ii/iii) — user xác nhận vấn đề gốc VẪN CÒN Y NGUYÊN.** Side Panel (qua `webRequest`, độc lập với DOM/MSE correlation) vẫn phát hiện + tải được đúng — chỉ riêng badge neo vào `<video>` là sai/thiếu. 3 bug đã vá (race `MEDIA_ATTACHED`, thiếu rescan-channel, latch `fired` một-lần) đều hợp lý khi đọc code nhưng KHÔNG giải quyết được triệu chứng thật → khả năng cao còn nguyên nhân khác chưa xác định, hoặc site cụ thể user test không đi qua nhánh `window.Hls` như đã tưởng (dù `window.Hls` xác nhận có tồn tại — có thể trang dùng ĐA instance Hls, hoặc 1 instance khác không phải cái điều khiển badge đang thấy, hoặc badge bị một scan SAU đó ghi đè/xoá bởi tín hiệu khác). **Việc tiếp theo bắt buộc phải có debug trực tiếp trên trang thật** (console.log tạm trong `hls-global-hook.ts`/`dom-media-observer.ts`, hoặc đơn giản hơn: kiểm tra `el.getAttribute('data-synapse-hls-url')` trực tiếp trên phần tử `<video>` qua DevTools của TRANG đó) trước khi vá thêm bất kỳ giả thuyết nào nữa — dừng đoán mò dựa thuần trên đọc code. Đường tổng quát hơn (né toàn bộ lớp correlation-đoán-mò này) vẫn là **§7.3(b)/§10.3 hook `SourceBuffer.appendBuffer`** — bắt trực tiếp byte đã phát thay vì đoán URL nào khớp phần tử nào.
 - **[§10.2] Ad-filter cho stream trực tiếp — làm SAU 10.1.** Cố ý chưa lọc (cần case thật để hoàn thiện logic bắt link trước). Đã biết: 3 nguồn phát hiện bất đồng (webRequest thấy `initiator` thật của iframe quảng cáo, MAIN-world/DOM chỉ thấy `pageUrl` trang chủ → cùng 1 stream lọt/bị chặn tuỳ nguồn nào bắt trước — không nhất quán, không phải bug); không thêm domain sạch (vd `sacdnssedge`) vào denylist — cần tín hiệu khác (initiator frame, quan hệ với VAST/VPAID đã thấy trên trang).

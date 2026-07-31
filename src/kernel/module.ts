@@ -4,12 +4,13 @@ export type Capability = 'net' | 'ai' | 'cache' | 'bus' | 'dom';
 export const CAPABILITIES: Capability[] = ['net', 'ai', 'cache', 'bus', 'dom'];
 
 /**
- * Runtime environments Synapse's Hexagonal Core can be deployed into (docs/design.md §1).
- * Only 'browser-extension' has an Adapter implementation today — 'vscode' | 'electron' | 'node'
- * are reserved enum values for future Adapters and must not be treated as usable.
+ * There is no `RuntimeEnv` type here anymore, and no `supportedEnvs` on `Module` (docs/ROADMAP.md
+ * §11.1, docs/design.md §8): the browser extension is the only runtime Synapse targets, by
+ * decision, not by "not yet". Every feature the project actually has depends on `webRequest`/DNR/
+ * CDP/`userScripts`/offscreen documents/real web pages — the browser IS the domain. The Hexagonal
+ * boundary survives for testability and dependency discipline (`kernel/` + `shared/` stay free of
+ * `chrome.*`), which is a claim this repo's tests can check; portability was a claim nothing could.
  */
-export type RuntimeEnv = 'browser-extension' | 'vscode' | 'electron' | 'node';
-export const RUNTIME_ENVS: RuntimeEnv[] = ['browser-extension', 'vscode', 'electron', 'node'];
 
 export interface ModuleContext {
   services: Partial<{
@@ -32,11 +33,6 @@ export interface Module<In = unknown, Out = unknown> {
    * not the whole Module). */
   description?: string;
   needs?: Capability[];
-  /**
-   * Environments this Module may run in. Defaults to ['browser-extension'] when omitted, since
-   * that's the only Adapter Synapse currently ships — see environment-guard.ts.
-   */
-  supportedEnvs?: RuntimeEnv[];
   /** Declarative UI Schema (docs/ROADMAP.md #2) — presence of this field is what makes the
    * popup show a Gear/Arrow icon for this Module; its `kind` decides the icon's behavior. */
   uiSchema?: UISchema;

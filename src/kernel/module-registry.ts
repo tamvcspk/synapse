@@ -1,8 +1,10 @@
-import type { Capability, RuntimeEnv } from './module';
+import type { Capability } from './module';
 import type { UISchema } from './ui-schema';
 
 export type ModuleSource = 'bundled' | 'uploaded';
-export type ModuleStatus = 'ok' | 'invalid' | 'env-mismatch';
+/** `'env-mismatch'` is gone with the Environment Guard (docs/ROADMAP.md §11.1) — a Module can no
+ * longer be well-formed but unrunnable here, so "invalid" is the only remaining not-ok state. */
+export type ModuleStatus = 'ok' | 'invalid';
 
 export interface RegistryEntry {
   id: string;
@@ -15,9 +17,7 @@ export interface RegistryEntry {
   description?: string;
   source: ModuleSource;
   needs: Capability[];
-  supportedEnvs: RuntimeEnv[];
   active: boolean;
-  envSupported: boolean;
   status: ModuleStatus;
   reason?: string;
   grantedCapabilities: Capability[];

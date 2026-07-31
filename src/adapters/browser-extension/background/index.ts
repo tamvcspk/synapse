@@ -1,8 +1,5 @@
 import { Kernel } from '../../../kernel';
-import type { Module } from '../../../kernel/module';
 import { ServiceInjector } from '../../../kernel/service-injector';
-import { resolveWorkflowSteps, type Workflow } from '../../../kernel/workflow';
-import { createCompositeModule } from '../../../kernel/composite-module';
 import { registerRpcHandler } from '../module-registry/rpc-handler';
 import { BACKGROUND_MODULES } from '../module-registry/background-modules';
 import { setUserScriptsPermissionGranted } from '../module-registry/storage';
@@ -85,8 +82,9 @@ chrome.runtime.onMessage.addListener((message: DownloadEngineCommand | undefined
  * download since the engine moved into the Offscreen Document; only `chrome.downloads` crashed
  * loudly, which is what actually surfaced this. Background is the one context with full `chrome.*`
  * access, so it now does all three on the engine's behalf via simple request/response relays —
- * matching the `sendResponse`+`return true` pattern already used by the kernel dispatch listener
- * above, just gated on each message's own `type` instead of that one's `workflowId`.
+ * each using the `sendResponse`+`return true` pattern, and each gated on its own message `type`
+ * before it ever calls `sendResponse` (a listener without that guard answers messages meant for
+ * other listeners and wins the race; see docs/LESSONS.md).
  */
 chrome.runtime.onMessage.addListener((message: { type?: string; url?: string } | undefined, _sender, sendResponse) => {
   if (message?.type !== 'synapse:query-replay-headers' || !message.url) return;
@@ -216,23 +214,14 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 });
 chrome.tabs.onRemoved.addListener((tabId) => disabledSidePanelTabs.delete(tabId));
 
-// Bugfix: this had NO type guard at all — it called `sendResponse` for literally every message this
-// service worker ever receives, including ones meant for other listeners entirely. `kernel.run([], ...)`
-// with an empty module array resolves almost immediately (no modules to run), so this was racing —
-// and usually WINNING — against any other listener trying to `sendResponse` to the SAME message
-// (Chrome delivers whichever listener's `sendResponse` call lands first; a later one is silently a
-// no-op). Harmless as long as nothing relied on a real response coming back, but became a real bug
-// the moment request/response-style relays were added below (§8.11) — this workflow dispatch is also
-// still unimplemented scaffolding (`workflowId` isn't read anywhere yet, hence the hardcoded `[]`),
-// so gating it on `message?.workflowId` being present costs nothing today and stops it from
-// swallowing every other listener's response.
-chrome.runtime.onMessage.addListener((message: { workflowId?: string; input?: unknown } | undefined, _sender, sendResponse) => {
-  if (!message?.workflowId) return;
-  kernel.run(/* resolve modules for message.workflowId */ [], message.input, (failure) => {
-    console.error(`Synapse: module "${failure.moduleId}" failed`, failure.error);
-  }).then(sendResponse);
-  return true; // keep the message channel open for the async sendResponse
-});
+// The `workflowId` message dispatch that used to live here is DELETED, not implemented
+// (docs/ROADMAP.md §11.1). It had been scaffolding since day one — `kernel.run([], ...)` with a
+// hardcoded empty module array, `workflowId` read by nothing — and there is still no Workflow
+// defined anywhere in the repo to dispatch to. Building a resolver for zero callers would be the
+// same speculative generality §11.0 just retired the second Adapter for. `kernel/workflow.ts` stays
+// (it's the ordering primitive, now covered by kernel/workflow.test.ts) and Phase 5's Tier 3 is
+// where user scripts get a real way to declare a chain; a message dispatch, if it's ever wanted, is
+// cheaper to write then against a real caller than to keep alive as an empty shell now.
 
 // Lets uploaded modules (chrome.userScripts, USER_SCRIPT world) reach the background via
 // chrome.runtime.sendMessage — throws if the user hasn't enabled "Allow User Scripts" for this
@@ -255,40 +244,7 @@ try {
   void setUserScriptsPermissionGranted(false);
 }
 
-// Smoke-test for Workflow (kernel/workflow.ts): 'append-a' sorts before 'append-b' alphabetically,
-// but the Workflow explicitly orders b-then-a — proving execution order comes from Workflow.steps,
-// never from module-discovery/glob iteration order (see bundled-modules.ts).
-const demoModules: Module<string, string>[] = [
-  { id: 'append-a', needs: [], async run(input) { return `${input} A`; } },
-  { id: 'append-b', needs: [], async run(input) { return `${input} B`; } },
-];
-const demoWorkflow: Workflow = { id: 'demo-chain', steps: ['append-b', 'append-a'] };
-const demoResolution = resolveWorkflowSteps(demoWorkflow, (id) => demoModules.find((m) => m.id === id));
-if (demoResolution.missing.length === 0) {
-  kernel.run(demoResolution.modules, 'start').then((result) => {
-    console.log('Synapse: workflow demo ->', result); // expected "start B A"
-  });
-}
-
-// Smoke-test for Composite Module (kernel/composite-module.ts, docs/ROADMAP.md #3): proves
-// createCompositeModule's own sequential dispatch + bypass logic, reusing the same demoModules
-// above rather than registering a fake business Module into the Registry. `getSubState` stands in
-// for RegistryEntry.subState — a real Composite Module instance wires this to the chrome.storage
-// read the Adapter already has (see chrome-module-registry.ts's getSubStateMap).
-let demoBypassAppendB = false;
-const demoComposite = createCompositeModule({
-  id: 'demo-composite',
-  subModules: demoModules,
-  getSubState: async () => (demoBypassAppendB ? { 'append-b': false } : {}),
-  onSubFailure: (failure) => console.error(`Synapse: composite demo step "${failure.moduleId}" failed`, failure.error),
-});
-kernel
-  .run([demoComposite], 'start')
-  .then((result) => {
-    console.log('Synapse: composite demo (no bypass) ->', result); // expected "start A B"
-    demoBypassAppendB = true;
-    return kernel.run([demoComposite], 'start');
-  })
-  .then((result) => {
-    console.log('Synapse: composite demo (append-b bypassed) ->', result); // expected "start A"
-  });
+// The `append-a`/`append-b` Workflow smoke test and the `demo-composite` Composite Module smoke
+// test that used to close this file are DELETED (docs/ROADMAP.md §11.1). They ran — and
+// `console.log`'d — in every shipped build on every service-worker start, and what they proved is
+// now asserted properly in kernel/workflow.test.ts and kernel/composite-module.test.ts.

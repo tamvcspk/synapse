@@ -6,7 +6,7 @@
 
 Structurally, Synapse follows **Hexagonal Architecture (Ports & Adapters)**: a deterministic, runtime-agnostic **Core** (the `Kernel`, `Module` contracts, execution lifecycles) surrounded by **Ports** (abstract Service interfaces such as `AiService`/`CacheService`/`BusService` — the Core only ever depends on these) and **Adapters** (concrete implementations of those Ports for a specific host runtime). This is what makes "Progressive Complexity" possible without coupling Module logic to any one host API.
 
-**Current scope: only the Browser Extension Adapter is implemented.** Synapse runs entirely as a **Browser Extension (Manifest V3)**—there is no backend/server, and it does not depend on a Node.js runtime during execution. Every Port (AI Adapter, Cache, Bus, Session State) is implemented via native browser APIs (see Section 7). The Hexagonal shape is deliberately designed to admit other host Adapters later (VS Code, Electron, plain Node) — Section 8 documents that direction — but **no other Adapter exists yet, and none should be built without an explicit request.** Treat every other `RuntimeEnv` value as a reserved placeholder, not a target.
+**Scope: the Browser Extension is the only runtime, by decision.** Synapse runs entirely as a **Browser Extension (Manifest V3)**—there is no backend/server, and it does not depend on a Node.js runtime during execution. Every Port (AI Adapter, Cache, Bus, Session State) is implemented via native browser APIs (see Section 7). A second host Adapter (VS Code, Electron, plain Node) was considered and **rejected** — Section 8 records the audit and the reasoning. The Hexagonal shape is kept, but for **testability and dependency discipline** (`src/kernel/` and `src/shared/` stay provably free of `chrome.*`, which the test suite can check), never as a portability promise.
 
 This allows for:
 
@@ -19,7 +19,7 @@ This allows for:
 * **Module:** The smallest unit of work. It can be a pure function (`run(input) -> output`) or a full-fledged Mini-Agent (Decision Engine, AI Adapter, etc.)—depending on the Capability Declaration. It runs in one of the extension's **Execution Contexts** (background / content script / popup) based on its declared capabilities.
 * **Capability Declaration:** Metadata provided by the Module (e.g., `ai`, `net`, `cache`, `bus`, `dom`) to inform the Kernel of the Services it requires. No declaration = zero overhead, zero dependencies.
 * **Service (= Port, in Hexagonal terms):** Shared infrastructure, initialized only if at least one Module declares a dependency on it. Includes: AI Adapter (+ Throttle/Rate-limit), Shared Cache, Event Bus, and Session State. Each Service is an abstract interface defined by the Core (`AiService`, `CacheService`, `BusService` in `src/kernel/module.ts`); Modules only interact with these interfaces and are agnostic to which concrete Adapter backs them. Today every Service is backed by a `chrome.*`-based Adapter (Section 7) — that's the only Adapter implementation that exists.
-* **Runtime Env & Environment Guard:** Each Module optionally declares `supportedEnvs: RuntimeEnv[]` (see `src/kernel/module.ts`), the set of host runtimes it may execute in. Before scheduling a Module, the Kernel's Environment Guard (`src/kernel/environment-guard.ts`) checks the Module's `supportedEnvs` against the Kernel's active `currentEnv` and throws `EnvironmentMismatchError` on mismatch. A Module that omits `supportedEnvs` implicitly targets `['browser-extension']`, since that is the only Adapter Synapse ships today.
+* **~~Runtime Env & Environment Guard~~ — removed (Section 8).** `RuntimeEnv`, `Module.supportedEnvs`, and `kernel/environment-guard.ts` no longer exist. With one runtime, the guard could only ever pass; it was a per-Module check on every run that bought nothing. A Module declares *capabilities* and *execution context*, never a host runtime.
 * **Context Frame:** A standardized data structure passed through Modules in a Workflow, containing accumulated input/output. It is suitable for both simple sequential pipelines and complex agentic workflows.
 * **Workflow:** An explicit, ordered list of Module ids (`{ id, steps: string[] }`, `src/kernel/workflow.ts`) that determines execution order for a sequential chain. Auto-discovery of Modules (§3.D) only answers "what Modules exist," never "in what order" — iteration order from a glob/registry listing must never be relied on for sequencing; only a Workflow's `steps` does that.
 
@@ -28,7 +28,6 @@ This allows for:
 ### A. Kernel Layer (Minimalist & Persistent)
 
 * **Manifest Resolver:** Reads the Capability Declaration of every Module before execution.
-* **Environment Guard:** Runs before the Manifest Resolver hands a Module to the Scheduler. Compares the Module's `supportedEnvs` against the Kernel's `currentEnv` (defaults to `'browser-extension'`); on mismatch it aborts that Module's execution with `EnvironmentMismatchError` rather than letting it reach a Service Injector/Adapter it wasn't written for. This is what keeps a future non-browser Module from silently breaking when Synapse boots inside an Adapter it doesn't support — see Section 8.
 * **Service Injector:** Initializes/lazy-loads only the Services declared by the Module.
 * **Execution Scheduler:** Determines how to run the Module—direct invocation (sync, if the Module does not declare `bus`/async) or via the Event Bus (if the Module requires decoupled/asynchronous coordination). If a Module declares `dom`, the Scheduler routes calls via messaging to the content script (as background lacks DOM access). A throwing `run()` is caught and reported via an optional `onFailure` callback (`ModuleFailure { moduleId, error }`) rather than aborting the whole pipeline/bus dispatch — this applies uniformly regardless of Module source (§3.D), since uploaded Modules have no compile-time guarantee of correctness.
 * **MV3 Note:** The background service worker is **non-persistent**—it can be terminated and restarted by the browser at any time between events. The Kernel must not hold critical state solely in memory; data requiring persistence across restarts (Session State, Cache) must be read/written via `chrome.storage`.
@@ -41,7 +40,6 @@ Each Module minimally consists of:
 Module {
   id: string
   needs?: Capability[]        // e.g., ['net'], ['ai', 'cache', 'bus']
-  supportedEnvs?: RuntimeEnv[] // defaults to ['browser-extension'] — see §2 Runtime Env & Environment Guard
   run(input, ctx) -> output
 }
 
@@ -69,12 +67,12 @@ Module {
 
 Beyond Modules bundled at build time, Synapse supports Modules uploaded at runtime through the extension popup — Tampermonkey-style. This exists because MV3's CSP makes `eval`/dynamic `import()` of arbitrary code impossible in privileged contexts (background/content-script); `chrome.userScripts` (registering code into an isolated `USER_SCRIPT` execution world) is the only sanctioned mechanism for running user-supplied code, so this layer is built around that constraint rather than around a hypothetical filesystem/folder-path model.
 
-* **Module Registry (`ModuleRegistryService`, a Port in `src/kernel/module-registry.ts`):** Unifies two Module sources — `'bundled'` (discovered at build time, see below) and `'uploaded'` (registered at runtime via `chrome.userScripts`). Tracks per-Module activation state, granted capabilities, and validation status (`RegistryEntry.status: 'ok' | 'invalid' | 'env-mismatch'`), all persisted via `chrome.storage` (`src/adapters/browser-extension/module-registry/chrome-module-registry.ts`).
+* **Module Registry (`ModuleRegistryService`, a Port in `src/kernel/module-registry.ts`):** Unifies two Module sources — `'bundled'` (discovered at build time, see below) and `'uploaded'` (registered at runtime via `chrome.userScripts`). Tracks per-Module activation state, granted capabilities, and validation status (`RegistryEntry.status: 'ok' | 'invalid'`), all persisted via `chrome.storage` (`src/adapters/browser-extension/module-registry/chrome-module-registry.ts`).
 * **Bundled-module auto-discovery:** `module-registry/bundled-modules.ts` globs `content-scripts/modules/**/*.module.ts` via Vite's `import.meta.glob(..., { eager: true })`. A Module file placed in that folder is automatically discovered and registered — no manual import/wiring step in `content-scripts/index.ts` is needed. Iteration order here is explicitly not meaningful for execution order (see Workflow, §2).
-* **Uploaded modules and the RPC bridge:** An uploaded `.js` file has no build step and therefore no `import` — it declares itself via a global convention, `globalThis.__synapseModule = { id, needs, supportedEnvs, run }` (see `docs/user-scripts.md`), and is registered into an isolated `USER_SCRIPT` world via `chrome.userScripts.register()`. Because that world cannot reach Kernel Services directly, a shim (`module-registry/user-script-shim.ts`) is wrapped around the uploaded source, exposing `globalThis.synapse.{ai,cache,bus}` proxies that relay calls to the background via `chrome.runtime.sendMessage` (enabled once by `chrome.userScripts.configureWorld({ messaging: true })`, called from `background/index.ts`). The background's `module-registry/rpc-handler.ts` is the sole authority: it re-checks every call against persisted activation + capability-grant state before forwarding to the real Service — the uploaded script is never trusted to self-limit.
+* **Uploaded modules and the RPC bridge:** An uploaded `.js` file has no build step and therefore no `import` — it declares itself via a global convention, `globalThis.__synapseModule = { id, needs, run }` (see `docs/user-scripts.md`), and is registered into an isolated `USER_SCRIPT` world via `chrome.userScripts.register()`. Because that world cannot reach Kernel Services directly, a shim (`module-registry/user-script-shim.ts`) is wrapped around the uploaded source, exposing `globalThis.synapse.{ai,cache,bus}` proxies that relay calls to the background via `chrome.runtime.sendMessage` (enabled once by `chrome.userScripts.configureWorld({ messaging: true })`, called from `background/index.ts`). The background's `module-registry/rpc-handler.ts` is the sole authority: it re-checks every call against persisted activation + capability-grant state before forwarding to the real Service — the uploaded script is never trusted to self-limit.
 * **Identity:** `chrome.userScripts.register()` requires an id before the uploaded code has ever run, so the extension assigns a canonical UUID at upload time (used for storage, activation, and RPC routing — `RegistryEntry.id`). The script's own self-declared `__synapseModule.id` is only known after its first execution and is surfaced purely as a display label (`RegistryEntry.label`) — it never affects routing or storage keys.
 * **Capability consent:** Bundled Modules are trusted build-time code and auto-grant their declared `needs[]` the first time they're discovered. Uploaded Modules start with no granted capabilities — since their `needs[]` isn't known until their first run reports it, the popup surfaces a "Grant" action once that's known, and until granted, the RPC handler rejects those specific `synapse.*` calls. (The Module itself still executes and has ordinary page/DOM access via `chrome.userScripts` regardless — the grant only gates access to Kernel Services, matching how Tampermonkey-style user scripts inherently get page access on registration; it is not a general sandboxing mechanism.)
-* **Graceful fail, not type-check:** Uploaded code has no compile step, so three separate layers catch failure without crashing anything: (1) registration/parse errors surface immediately from `chrome.userScripts.register()`; (2) a hand-rolled shape validator (`kernel/manifest-validator.ts` — no schema library, since the input is a bare `unknown` that hasn't passed through TypeScript) checks `id`/`needs`/`supportedEnvs` once a manifest report arrives; (3) the Scheduler (§3.A) catches a throwing `run()` uniformly for every Module regardless of source.
+* **Graceful fail, not type-check:** Uploaded code has no compile step, so three separate layers catch failure without crashing anything: (1) registration/parse errors surface immediately from `chrome.userScripts.register()`; (2) a hand-rolled shape validator (`kernel/manifest-validator.ts` — no schema library, since the input is a bare `unknown` that hasn't passed through TypeScript) checks `id`/`needs` once a manifest report arrives; (3) the Scheduler (§3.A) catches a throwing `run()` uniformly for every Module regardless of source.
 
 ## 4. Operational Logic
 
@@ -132,7 +130,7 @@ The Kernel initializes an AI Adapter, Bus, and Cache specifically for this modul
 
 ## 7. Tech Stack & Execution Contexts (Browser Extension Adapter)
 
-**Platform:** Browser Extension, **Manifest V3**, TypeScript. No proprietary backend/server—all Services rely on native browser APIs. This section describes the **only Adapter implemented today** — everything in it is specific to the browser-extension `RuntimeEnv` and does not apply if/when another Adapter is ever built (Section 8).
+**Platform:** Browser Extension, **Manifest V3**, TypeScript. No proprietary backend/server—all Services rely on native browser APIs. This section describes the **only Adapter there is** (Section 8) — everything in it is browser-extension-specific by design, not by staging.
 
 * **Language & Build:** TypeScript, bundler (e.g., Vite + `@crxjs/vite-plugin`)—producing `background`, `content-scripts`, and `popup`/`options` as distinct entry points. Use `@types/chrome` for type-safe `chrome.*` API access.
 * **Project Structure:** Source is split so the Core/Adapter boundary from Section 1 is visible on disk, not just conceptual:
@@ -140,7 +138,7 @@ The Kernel initializes an AI Adapter, Bus, and Cache specifically for this modul
   ```
   src/
     kernel/                              # Core — platform-agnostic, no chrome.* imports
-      index.ts, module.ts, service-injector.ts, scheduler.ts, environment-guard.ts
+      index.ts, module.ts, service-injector.ts, scheduler.ts
     shared/                              # Global SDK — pure functions, zero side-effects (§9)
     modules/                             # portable Modules (no `dom`, zero chrome.* even transitively)
                                           # — depend only on kernel/module Ports
@@ -159,15 +157,17 @@ The Kernel initializes an AI Adapter, Bus, and Cache specifically for this modul
           dashboard/                      # standalone Tab for Collection-schema Management View
   ```
 
-  A future Adapter (Section 8) would add a sibling `src/adapters/<env>/`, never touch `src/kernel/`,
-  and only touch `src/modules/` if a Module explicitly opts into that `RuntimeEnv`.
-* **Build scripts are per-Adapter:** `npm run build:browser` (aliased by the bare `npm run build`,
-  since it's the only Adapter) runs `vite build` against `vite.config.ts`, which outputs to
-  `dist/browser-extension/` — scoped so a future `build:vscode`/`build:electron` can output to its
-  own `dist/<env>/` without collision. `npm run dev:browser` (aliased by `npm run dev`) runs the
-  same Vite/crx dev flow. Neither alias should silently start meaning "build everything" once a
-  second Adapter exists — at that point `build`/`dev` should either be dropped or turned into an
-  explicit multi-target script, not left ambiguous.
+  `src/adapters/browser-extension/` is the only Adapter directory and (per Section 8) the only one
+  there will be — the nesting stays because it's what keeps `src/kernel/` and `src/shared/` honest
+  about not importing `chrome.*`, not because a sibling is coming.
+* **Build/test scripts:** `npm run build:browser` (aliased by the bare `npm run build`) runs
+  `vite build` against `vite.config.ts`, outputting to `dist/browser-extension/`. `npm run
+  dev:browser` (aliased by `npm run dev`) runs the same Vite/crx dev flow. `npm test` runs Vitest
+  (`vitest.config.ts` — deliberately separate from `vite.config.ts`, whose crx plugin would
+  otherwise drive a full extension build on every test run) over `src/**/*.test.ts` in a plain Node
+  environment; a test needing a DOM opts in per-file with `// @vitest-environment jsdom` rather than
+  changing that default, so a `src/shared/` file that reaches for `document` still fails as it
+  should.
 * **Execution Contexts:**
 * **Background (Service Worker):** Home of the Kernel. Runs all modules *not* declaring `dom` (`net`, `ai`, `cache`, `bus`).
 * **Content Script:** Mandatory for modules declaring `dom`. Cannot securely invoke the AI Gateway directly (due to host page CSP)—all `ai`/`net` intensive tasks must be delegated to the background via the Bus.
@@ -180,21 +180,30 @@ The Kernel initializes an AI Adapter, Bus, and Cache specifically for this modul
 * **Permissions:** `storage`; `userScripts` (for uploaded/dynamic Modules, §3.D — requires the user to manually enable "Allow User Scripts" for the extension in `chrome://extensions`, a Chrome UX step outside the code's control).
 * **Exclusions:** No Node.js APIs (`fs`, `path`, `process`) in any Module or Service—as the entire runtime operates within the browser.
 
-## 8. Future Runtime Adapters (Not Yet Implemented)
+## 8. A Second Runtime Adapter — Considered and Rejected
 
-This section is a **roadmap, not a build spec.** It records the intended shape of additional Adapters so the Core stays designed to admit them, but **none of the following exists in `src/` and none should be scaffolded without an explicit, separate request.** Building any of this speculatively would violate Progressive Complexity (Section 5) at the architecture level, not just the Module level.
+Earlier revisions of this section described VS Code / Electron / Node Adapters as *deferred*, and the code carried `RuntimeEnv`, `Module.supportedEnvs`, and an Environment Guard to hold the door open for them. **That direction is now closed** (docs/ROADMAP.md §11.0/§11.1). This section is kept — rather than deleted — so the decision doesn't get silently re-litigated by whoever next notices the Hexagonal shape and asks "where are the other Adapters?"
 
-* **`RuntimeEnv` reserved values:** `'vscode' | 'electron' | 'node'` exist in the type (`src/kernel/module.ts`) purely so a future Module can declare intent (`supportedEnvs: ['vscode']`) and have the Environment Guard reject it cleanly on today's browser-extension-only Kernel, rather than the value not existing at all.
-* **Intended Port → Adapter mapping**, if/when a given host is targeted:
+**What the audit found.** Roughly **0% of the feature surface would port.** Every capability Synapse actually has is a browser capability, not an abstract one:
 
-  | Port | Browser Extension Adapter (implemented) | VS Code Adapter (planned) | Electron Adapter (planned) |
-  |---|---|---|---|
-  | `IStoragePort` (→ `CacheService`) | `chrome.storage.local` / `chrome.storage.session` | `vscode.ExtensionContext.globalState` | Node local file / embedded db |
-  | `IMessagingPort` (→ `BusService`) | `chrome.runtime.sendMessage` / `chrome.runtime.connect` | VS Code `EventEmitter` / Node `EventEmitter` | `ipcRenderer` / `ipcMain` |
-  | Host Interactivity Port (→ the `dom` capability) | content-script DOM injection | `vscode.workspace` / `vscode.window` (editors, files, selections) | scripts inside a `BrowserWindow`/`WebView` |
-  | `IAIAdapterPort` (→ `AiService`) | `fetch()` from the background service worker | Node HTTP client or local model runner | Node HTTP client or local model runner |
+| Feature | Depends on |
+|---|---|
+| Network Sniffer (§ROADMAP 4–7) | `chrome.webRequest`, `declarativeNetRequest`, MAIN-world script injection into a real page |
+| HTTP Error Mocker (§ROADMAP 2.6) | `chrome.debugger` (CDP), `declarativeNetRequest`, page-world `fetch`/XHR patching |
+| Downloader Engine (§ROADMAP 8) | Offscreen Documents, OPFS, `chrome.downloads` |
+| Reader Mode (§ROADMAP 1) | A live `Document` from a real web page |
+| User scripts (§ROADMAP 11) | `chrome.userScripts` and its USER_SCRIPT world |
 
-* **Why this is deferred, not abandoned:** the Core (`src/kernel/`) already has zero `chrome.*` imports — Modules only depend on the `Module`/`AiService`/`CacheService`/`BusService` contracts in `src/kernel/module.ts`, and Services are injected via `ServiceInjector` rather than imported directly. The project structure (§7) already reserves `src/adapters/<env>/` as a sibling location — `src/adapters/browser-extension/` is the only one populated today. That's the Hexagonal boundary that would let a second Adapter be added later without touching the Core. What's missing is simply the second Adapter itself, plus its own build target (a `build:<env>` script and bundler config, per §7), and neither should be built until there's an actual second target to run against.
+There is no `IStoragePort` shaped hole here that a `vscode.ExtensionContext.globalState` could fill and thereby deliver a working product. **The browser is not a host Synapse happens to run in — the browser is Synapse's domain.** A "VS Code Adapter" would not be the same product on another host; it would be a different product sharing a `Module` interface.
+
+**What was removed.** `RuntimeEnv`, `RUNTIME_ENVS`, `Module.supportedEnvs`, `RegistryEntry.supportedEnvs`/`envSupported`, the `'env-mismatch'` module status, and `src/kernel/environment-guard.ts` (with `EnvironmentMismatchError`). An uploaded user script that still declares `supportedEnvs` is not rejected — the field is ignored like any other unknown one.
+
+**What was kept, and why it is NOT the same claim.** The Hexagonal boundary stays: `src/kernel/` and `src/shared/` import no `chrome.*`, Services are injected through `ServiceInjector` rather than imported, and Adapter code lives under `src/adapters/browser-extension/`. The justification is now **testability and dependency discipline**, not portability:
+
+* `src/shared/` is defined by the most restrictive context that must be able to import it — a MAIN-world payload with zero `chrome.*` (§9). That constraint is real and enforced daily, independent of any second host.
+* Pure, `chrome.*`-free code is code `npm test` can run in plain Node with no browser harness. That is the whole reason Phase 0's first tests could target `src/shared/` at all.
+
+The difference matters: "keep it clean so it survives a MAIN-world import and a unit test" is a claim this repo can check on every commit. "Keep it clean so it could be ported someday" was a claim nothing could check, and — as the audit above shows — one that was not true anyway. **Do not reintroduce a runtime-env abstraction, and do not justify a design decision by appealing to a future Adapter.**
 
 ## 9. Utility/SDK Layering
 
@@ -233,4 +242,4 @@ split into two layers, so a helper's placement always signals how portable it is
 
 ### Strategic Summary
 
-Synapse is now a **minimalist Hexagonal Core** (`Kernel` + `Module` contracts) surrounded by **on-demand Ports/Services**, currently backed entirely by **one Adapter: the browser extension.** You do not build a "heavy agentic machine" and force every task through it—you build a small core capable of "sprouting" the necessary infrastructure exactly where and when required, based on individual Module declarations. This keeps the playground lightweight enough for "vibe-coding" quick personal tasks, while remaining open-ended for complex AI experiments, without requiring a complete platform refactor — and, per Section 8, without requiring a Core rewrite if a second host runtime is ever targeted.
+Synapse is now a **minimalist Hexagonal Core** (`Kernel` + `Module` contracts) surrounded by **on-demand Ports/Services**, currently backed entirely by **one Adapter: the browser extension.** You do not build a "heavy agentic machine" and force every task through it—you build a small core capable of "sprouting" the necessary infrastructure exactly where and when required, based on individual Module declarations. This keeps the playground lightweight enough for "vibe-coding" quick personal tasks, while remaining open-ended for complex AI experiments, without requiring a complete platform refactor. Per Section 8 that Core stays `chrome.*`-free for testability and dependency discipline — not as a down payment on a second host runtime, which has been considered and rejected.

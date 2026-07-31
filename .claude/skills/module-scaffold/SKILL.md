@@ -27,12 +27,10 @@ Ask (only what's missing from context):
    That skill owns the criteria for when a local KB is actually warranted and how to confirm with
    the user before crawling — don't re-derive that logic here, just defer to it.
 
-Don't ask about `supportedEnvs` / target runtime unless the user brings it up themselves — Synapse
-only ships the browser-extension Adapter today (docs/design.md §1, §8), so every Module implicitly
-targets `['browser-extension']` by omitting the field. If the user does mention another runtime
-(vscode/electron/node), tell them that `RuntimeEnv` value is a reserved placeholder with no Adapter
-built yet (docs/design.md §8) and the Module can't actually run there — don't scaffold as if it
-would.
+Never ask about a target runtime. There is no `supportedEnvs` field and no `RuntimeEnv` type — the
+browser extension is the only runtime Synapse targets, by decision after an audit, not by "not yet"
+(docs/design.md §8, docs/ROADMAP.md §11.1). If the user raises vscode/electron/node, say that
+plainly rather than scaffolding as if a Module could declare its way there.
 
 ## Placement convention
 
@@ -139,9 +137,9 @@ skip this — see the note above.
   genuinely ambiguous. A deterministic task doesn't need one just because the template shows it.
 - **Don't declare `bus`** unless this module truly needs to run decoupled/async from others via
   the Event Bus. Most one-off personal-automation modules run fine as a direct pipeline step.
-- **Don't add `supportedEnvs`** to a scaffolded Module unless the user explicitly targets a
-  non-browser runtime — omitting it defaults to `['browser-extension']` (the Environment Guard in
-  `src/kernel/environment-guard.ts` handles this), which is correct for every Module today.
+- **Don't add `supportedEnvs`** — the field, the `RuntimeEnv` type, and the Environment Guard were
+  all removed (docs/design.md §8). A Module declares capabilities and execution context, nothing
+  about a host runtime.
 - Keep `run()` `async` even if the body is fully sync, for uniform Kernel scheduling.
 - After scaffolding, report which capabilities were declared and why, so the user can catch an
   over-declared module early. For a `dom` module under auto-discovery, also mention that no manual

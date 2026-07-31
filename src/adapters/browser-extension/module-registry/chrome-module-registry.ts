@@ -1,6 +1,5 @@
 import { validateModuleManifestShape } from '../../../kernel/manifest-validator';
-import { assertEnvSupported, EnvironmentMismatchError } from '../../../kernel/environment-guard';
-import type { Capability, Module, RuntimeEnv } from '../../../kernel/module';
+import type { Capability } from '../../../kernel/module';
 import type { ModuleRegistryService, RegistryEntry, UploadResult } from '../../../kernel/module-registry';
 import { BUNDLED_MODULES } from './bundled-modules';
 import { BACKGROUND_MODULES } from './background-modules';
@@ -17,18 +16,6 @@ import {
   setUploadedSource,
   type StoredManifestReport,
 } from './storage';
-
-const CURRENT_ENV: RuntimeEnv = 'browser-extension';
-
-function isEnvSupported(mod: Pick<Module, 'id' | 'supportedEnvs'>): boolean {
-  try {
-    assertEnvSupported(mod as Module, CURRENT_ENV);
-    return true;
-  } catch (err) {
-    if (err instanceof EnvironmentMismatchError) return false;
-    throw err;
-  }
-}
 
 /**
  * Best-effort nudge so a bus-needing Module's `run()` re-checks `isModuleActive` right away instead
@@ -144,8 +131,6 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     // the same RegistryEntry treatment (Navigation Flow's Gear/Arrow icon applies to either).
     for (const mod of [...BUNDLED_MODULES, ...BACKGROUND_MODULES]) {
       const needs = mod.needs ?? [];
-      const supportedEnvs = mod.supportedEnvs ?? ['browser-extension'];
-      const envSupported = isEnvSupported(mod);
 
       // Bundled = trusted build-time code: auto-grant declared needs the first time we see it.
       let grantedCapabilities = grants[mod.id];
@@ -158,13 +143,10 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
         id: mod.id,
         source: 'bundled',
         needs,
-        supportedEnvs,
         active: activation[mod.id] ?? true,
-        envSupported,
-        status: envSupported ? 'ok' : 'env-mismatch',
+        status: 'ok',
         grantedCapabilities,
       };
-      if (!envSupported) entry.reason = `not supported in ${CURRENT_ENV} (supports: ${supportedEnvs.join(', ')})`;
       if (mod.uiSchema) entry.uiSchema = mod.uiSchema;
       if (mod.uiParadigm) entry.uiParadigm = mod.uiParadigm;
       if (mod.label) entry.label = mod.label;
@@ -204,37 +186,30 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     // No report yet (script hasn't run on a matching page since upload) — optimistic 'ok',
     // graceful-fail layer 2/3 (run-time + shape) resolve once a report arrives.
     if (!report) {
-      return { id, source: 'uploaded', needs: [], supportedEnvs: ['browser-extension'], active, envSupported: true, status: 'ok', grantedCapabilities };
+      return { id, source: 'uploaded', needs: [], active, status: 'ok', grantedCapabilities };
     }
 
     if (report.runError) {
-      return { id, source: 'uploaded', needs: [], supportedEnvs: [], active, envSupported: true, status: 'invalid', reason: report.runError, grantedCapabilities };
+      return { id, source: 'uploaded', needs: [], active, status: 'invalid', reason: report.runError, grantedCapabilities };
     }
     if (!report.hasRun) {
-      return { id, source: 'uploaded', needs: [], supportedEnvs: [], active, envSupported: true, status: 'invalid', reason: 'globalThis.__synapseModule.run is not a function', grantedCapabilities };
+      return { id, source: 'uploaded', needs: [], active, status: 'invalid', reason: 'globalThis.__synapseModule.run is not a function', grantedCapabilities };
     }
 
-    const shapeCheck = validateModuleManifestShape({ id: id, needs: report.needs, supportedEnvs: report.supportedEnvs });
+    const shapeCheck = validateModuleManifestShape({ id: id, needs: report.needs });
     if (!shapeCheck.valid) {
-      return { id, source: 'uploaded', needs: [], supportedEnvs: [], active, envSupported: true, status: 'invalid', reason: shapeCheck.reason, grantedCapabilities };
+      return { id, source: 'uploaded', needs: [], active, status: 'invalid', reason: shapeCheck.reason, grantedCapabilities };
     }
-
-    const needs = shapeCheck.manifest.needs;
-    const supportedEnvs = shapeCheck.manifest.supportedEnvs ?? ['browser-extension'];
-    const envSupported = isEnvSupported({ id, supportedEnvs });
 
     const entry: RegistryEntry = {
       id,
       source: 'uploaded',
-      needs,
-      supportedEnvs,
+      needs: shapeCheck.manifest.needs,
       active,
-      envSupported,
-      status: envSupported ? 'ok' : 'env-mismatch',
+      status: 'ok',
       grantedCapabilities,
     };
     if (typeof report.id === 'string' && report.id.length > 0) entry.label = report.id;
-    if (!envSupported) entry.reason = `not supported in ${CURRENT_ENV} (supports: ${supportedEnvs.join(', ')})`;
 
     return entry;
   }

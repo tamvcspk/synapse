@@ -5,8 +5,8 @@
  * sub-isolation within that world) — intentionally minimal, no per-script sandboxing beyond what
  * chrome.userScripts itself provides, which is enough for a personal-use playground.
  *
- * Uploaded scripts declare themselves via `globalThis.__synapseModule = { id, needs, supportedEnvs, run }`
- * since there's no ESM import available inside USER_SCRIPT-world code (see docs/user-scripts.md).
+ * Uploaded scripts declare themselves via `globalThis.__synapseModule = { id, needs, run }` since
+ * there's no ESM import available inside USER_SCRIPT-world code (see docs/user-scripts.md).
  */
 function header(moduleId: string): string {
   const idLiteral = JSON.stringify(moduleId);
@@ -63,7 +63,6 @@ function trailer(): string {
     moduleId: __SYNAPSE_MODULE_ID__,
     id: manifest && manifest.id,
     needs: manifest && manifest.needs,
-    supportedEnvs: manifest && manifest.supportedEnvs,
     hasRun: hasRun,
   });
 
@@ -81,7 +80,6 @@ function trailer(): string {
       moduleId: __SYNAPSE_MODULE_ID__,
       id: manifest.id,
       needs: manifest.needs,
-      supportedEnvs: manifest.supportedEnvs,
       hasRun: hasRun,
       runError: err instanceof Error ? err.message : String(err),
     });

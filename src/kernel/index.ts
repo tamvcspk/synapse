@@ -1,18 +1,20 @@
 import { ServiceInjector } from './service-injector';
 import { Scheduler } from './scheduler';
-import { assertEnvSupported } from './environment-guard';
-import type { Module, ModuleFailure, RuntimeEnv } from './module';
+import type { Module, ModuleFailure } from './module';
 
 export class Kernel {
   private scheduler: Scheduler;
 
-  constructor(private injector: ServiceInjector, private currentEnv: RuntimeEnv = 'browser-extension') {
+  constructor(private injector: ServiceInjector) {
     this.scheduler = new Scheduler(injector);
   }
 
+  /**
+   * The per-run Environment Guard that used to head this method is gone (docs/ROADMAP.md §11.1):
+   * with one runtime, it could only ever pass, so it was a check on every module of every run that
+   * bought nothing.
+   */
   async run(modules: Module[], input: unknown, onFailure?: (f: ModuleFailure) => void): Promise<unknown> {
-    for (const mod of modules) assertEnvSupported(mod, this.currentEnv);
-
     const [pipelineModules, busModules] = partition(modules, (m) => !m.needs?.includes('bus'));
     for (const mod of busModules) {
       const ctx = this.injector.resolve(mod.needs);

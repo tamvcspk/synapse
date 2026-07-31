@@ -100,10 +100,7 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
   return li(
     { class: 'module-row' + (entry.status !== 'ok' ? ' disabled' : '') },
     label,
-    // Same grey-out + reason treatment for both 'invalid' and 'env-mismatch'.
-    entry.status !== 'ok'
-      ? span({ class: 'reason', title: entry.reason ?? '' }, entry.status === 'invalid' ? 'invalid' : 'unsupported')
-      : null,
+    entry.status !== 'ok' ? span({ class: 'reason', title: entry.reason ?? '' }, 'invalid') : null,
     entry.status === 'ok' && ungranted.length > 0
       ? button({ title: `Requests: ${ungranted.join(', ')}`, onclick: () => callbacks.onGrant(entry) }, 'Grant')
       : null,

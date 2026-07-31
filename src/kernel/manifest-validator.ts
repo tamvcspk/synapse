@@ -1,9 +1,8 @@
-import { CAPABILITIES, RUNTIME_ENVS, type Capability, type RuntimeEnv } from './module';
+import { CAPABILITIES, type Capability } from './module';
 
 export interface RawModuleManifest {
   id: string;
   needs: Capability[];
-  supportedEnvs?: RuntimeEnv[];
 }
 
 export type ManifestValidation =
@@ -32,14 +31,7 @@ export function validateModuleManifestShape(candidate: unknown): ManifestValidat
     return { valid: false, reason: 'manifest.needs must be an array of valid capabilities' };
   }
 
-  if (c.supportedEnvs !== undefined) {
-    if (!Array.isArray(c.supportedEnvs) || !c.supportedEnvs.every((e) => RUNTIME_ENVS.includes(e as RuntimeEnv))) {
-      return { valid: false, reason: 'manifest.supportedEnvs must be an array of valid runtime envs' };
-    }
-  }
-
-  const manifest: RawModuleManifest = { id: c.id, needs: needs as Capability[] };
-  if (c.supportedEnvs !== undefined) manifest.supportedEnvs = c.supportedEnvs as RuntimeEnv[];
-
-  return { valid: true, manifest };
+  // A `supportedEnvs` left over in an older uploaded script's manifest is ignored rather than
+  // rejected (docs/ROADMAP.md §11.1 removed the concept) — same posture as any other unknown field.
+  return { valid: true, manifest: { id: c.id, needs: needs as Capability[] } };
 }

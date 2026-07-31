@@ -81,12 +81,13 @@ a bug the type checker won't catch for you; catch it in review.
 - **Modules import only from `kernel/module`** (the public contract), never from
   `kernel/service-injector` or `kernel/scheduler` internals. That boundary is what keeps a Module
   swappable without touching the Kernel.
-- **`RuntimeEnv` has reserved values you must not act on.** `'vscode' | 'electron' | 'node'` exist
-  in the type (`kernel/module.ts`) only so the Environment Guard (`kernel/environment-guard.ts`)
-  can reject a mismatched Module by name — there is no Adapter behind them (docs/design.md §8).
-  Never write `chrome.*`-alternative code (e.g. `vscode.*`, `ipcRenderer`, Node `fs`) gated on one
-  of these values; that would be building an Adapter that doesn't exist yet, which is out of scope
-  unless separately requested.
+- **There is no runtime-env abstraction, and reintroducing one is out of scope.** `RuntimeEnv`,
+  `Module.supportedEnvs`, and `kernel/environment-guard.ts` were removed after an audit found ~0%
+  of the codebase could ever port (docs/design.md §8). Never write `chrome.*`-alternative code
+  (`vscode.*`, `ipcRenderer`, Node `fs`), and never justify a design choice — an interface shape, a
+  file's placement, an extra layer — by appealing to a hypothetical second Adapter. The reason
+  `kernel/` and `shared/` stay `chrome.*`-free is that they must survive a MAIN-world import and
+  run under `npm test` in plain Node; both are checkable, portability was not.
 
 ## Error handling
 
@@ -107,8 +108,23 @@ a bug the type checker won't catch for you; catch it in review.
 
 ## Testing
 
+- **Runner: Vitest.** `npm test` (`vitest run`) / `npm run test:watch`. Config is `vitest.config.ts`
+  — deliberately NOT `vite.config.ts`, whose crx plugin would otherwise drive a full MV3 build on
+  every test run.
+- **Tests are co-located** as `<file>.test.ts` next to what they test, and collected by
+  `include: ['src/**/*.test.ts']`. Safe from the bundle: `bundled-modules.ts`/`background-modules.ts`
+  glob `*.module.ts` / `*/index.ts`, so a `.test.ts` is never reachable from an entry point.
+- **`environment: 'node'` is the default and should stay that way.** A test genuinely needing a DOM
+  opts in per-file with a `// @vitest-environment jsdom` docblock. The moment the global default
+  becomes browser-ish, a `src/shared/` file that accidentally reaches for `document` stops failing
+  the way it should.
+- **What is worth testing, in order:** `src/shared/` (pure by definition — no excuse not to), then
+  `src/kernel/` (contracts + wiring), then a Module's own pure helpers. Code that only exists to
+  call `chrome.*` is not unit-testable here and shouldn't be contorted into being so; that's what
+  the "chưa verify bằng browser thật" list in docs/ROADMAP.md is for.
 - Simple Modules (`needs: []` or `['net']`) are pure functions — test with plain unit tests, no
   Kernel involved.
 - Modules using `ai`/`cache`/`bus` — test by constructing a `ModuleContext` with fake services
   directly (no need for a full `ServiceInjector`/`Kernel` in unit tests); reserve
-  Kernel-in-the-loop tests for integration-level checks of the pipeline/bus wiring itself.
+  Kernel-in-the-loop tests for integration-level checks of the pipeline/bus wiring itself (see
+  `kernel/workflow.test.ts`'s bus-registration case for the pattern).

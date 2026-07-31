@@ -9,6 +9,8 @@
     "dev:browser": "vite",
     "build": "npm run build:browser",
     "build:browser": "vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -25,6 +27,7 @@
     "@types/chrome": "^0.0.287",
     "@types/turndown": "^5.0.6",
     "typescript": "^5.6.3",
-    "vite": "^5.4.10"
+    "vite": "^5.4.10",
+    "vitest": "^3.2.7"
   }
 }

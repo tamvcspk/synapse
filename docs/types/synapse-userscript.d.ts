@@ -8,7 +8,6 @@
  */
 
 type SynapseCapability = 'net' | 'ai' | 'cache' | 'bus' | 'dom';
-type SynapseRuntimeEnv = 'browser-extension' | 'vscode' | 'electron' | 'node';
 
 declare const synapse: {
   ai: {
@@ -32,6 +31,5 @@ declare const synapse: {
 declare let __synapseModule: {
   id: string;
   needs?: SynapseCapability[];
-  supportedEnvs?: SynapseRuntimeEnv[];
   run(input: unknown, ctx: { services: Record<string, unknown> }): Promise<unknown>;
 };

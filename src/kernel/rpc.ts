@@ -32,7 +32,6 @@ export interface ManifestReport {
   moduleId: string;
   id?: string;
   needs?: unknown;
-  supportedEnvs?: unknown;
   hasRun: boolean;
   runError?: string;
 }

@@ -108,12 +108,11 @@ This bundles the extension optimized for production and outputs to `dist/browser
 
 ```
 src/
-  kernel/                          # Core (platform-agnostic)
+  kernel/                          # Core (no chrome.* — see docs/design.md §8)
     index.ts
     module.ts                      # Module contract, Service interfaces
     service-injector.ts
     scheduler.ts
-    environment-guard.ts
   modules/                         # Portable modules (no DOM access)
   adapters/
     browser-extension/             # Browser Extension Adapter
@@ -192,6 +191,8 @@ See [docs/design.md](docs/design.md) for more examples and full API documentatio
 | `npm run build` | Build the extension for production |
 | `npm run build:browser` | Alias for `npm run build` |
 | `npm run typecheck` | Run TypeScript type checking (no emit) |
+| `npm test` | Run the Vitest unit suite once (`src/**/*.test.ts`) |
+| `npm run test:watch` | Same suite in watch mode |
 
 ---
 

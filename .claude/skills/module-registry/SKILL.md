@@ -37,9 +37,10 @@ uploaded into the same USER_SCRIPT world.
 
 **Core (`src/kernel/`, zero `chrome.*` imports):**
 - `module-registry.ts` — the `ModuleRegistryService` Port: `RegistryEntry { id, label?, source:
-  'bundled'|'uploaded', needs, supportedEnvs, active, envSupported, status: 'ok'|'invalid'|
-  'env-mismatch', reason?, grantedCapabilities, uiSchema? }`, and the service interface (`list`,
-  `activate`, `deactivate`, `uploadModule`, `grantCapabilities`, `refresh`).
+  'bundled'|'uploaded', needs, active, status: 'ok'|'invalid', reason?, grantedCapabilities,
+  uiSchema? }`, and the service interface (`list`, `activate`, `deactivate`, `uploadModule`,
+  `grantCapabilities`, `refresh`). (`supportedEnvs`/`envSupported`/`'env-mismatch'` were removed
+  with the Environment Guard — docs/design.md §8.)
 - `ui-schema.ts` — the Declarative UI Schema a `Module` optionally self-declares (`Module.uiSchema`,
   mirrored onto `RegistryEntry.uiSchema`): `UISchema = UICollectionSchema | UIActionSchema`,
   discriminated by `kind` (never a boolean `hasConfig`-style flag) — `'collection'` means a
@@ -54,8 +55,9 @@ uploaded into the same USER_SCRIPT world.
   **this is the fix for a real boundary violation the popup→Dashboard split introduced once**, so
   don't reintroduce a per-id branch here when adding a new Collection-schema Module.
 - `manifest-validator.ts` — hand-rolled shape check (no schema lib — the input is `unknown` that
-  never passed through TypeScript) for `id`/`needs`/`supportedEnvs` on an uploaded module's
-  self-reported manifest.
+  never passed through TypeScript) for `id`/`needs` on an uploaded module's self-reported manifest.
+  Unknown fields (including a `supportedEnvs` left over in an older script) are ignored, not
+  rejected.
 - `rpc.ts` — message contracts only (`RpcRequest`, `RpcResponse`, `ManifestReport`), no transport.
 - `workflow.ts` — `Workflow { id, steps: string[] }` + `resolveWorkflowSteps(workflow, lookup)`.
   This is the *only* thing that should ever determine chained execution order — never glob/registry
