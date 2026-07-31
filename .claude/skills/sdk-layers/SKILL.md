@@ -62,6 +62,30 @@ A single file that mixes both is a sign to split it: keep the generic mechanism 
 the policy to wherever the Module composes the two (see `main-world-interceptor`'s "composition
 root" pattern for a worked example of this split).
 
+## The third axis — `features/` (docs/ROADMAP.md §11, planned)
+
+The two layers above are a **vertical** split (how portable is this code?). They say nothing about
+the **horizontal** one (which feature does this code serve?), and that gap is measurable: the
+media detect→download feature is ~4.800 lines spread across 8 directories — 43% of the repo with
+no directory of its own.
+
+Target shape once §11 Phase 4 lands: `utils/` keeps only mechanism, and all policy moves into
+`adapters/browser-extension/features/<name>/`, with `background/index.ts` and
+`content-scripts/index.ts` reduced to thin composition roots. Feature names map **1:1 onto
+permission scopes** (`features/media/` ↔ `media.*`, see `userscript-api`) — that alignment is the
+main reason to do it, not tidiness.
+
+Known violation to fix first: `utils/download-engine.ts` is 1.355 lines of pure policy (it imports
+`parseM3u8`, knows HLS/live/turbo/remux/job lifecycle) sitting in Layer 2 — 41% of `utils/`. Until
+§11 Phase 1 splits it, don't cite it as an example of anything.
+
+**Mandatory if you move files into `features/`:** MV3 partitions code by execution context, and each
+context has different `chrome.*` availability — an Offscreen Document has **only** `chrome.runtime`
+(docs/LESSONS.md). Today the directory path carries that signal (`background/` vs
+`content-scripts/` vs `ui/offscreen/`). Feature-slicing destroys it, so it must be replaced by a
+filename convention: `*.background.ts`, `*.content.ts`, `*.offscreen.ts`, `*.page.ts`. Without that,
+the reorganization is a net regression.
+
 ## Don't do this
 
 - **Don't create `src/shared/` entries speculatively.** If only one call site needs a helper and

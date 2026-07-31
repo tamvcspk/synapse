@@ -35,9 +35,11 @@ for picking a surface — it does not itself imply any surface exists in Synapse
 - Use for: an action that only makes sense anchored to something the user is looking at right
   now (a video element, a selected phrase). Must be near-zero-intrusion: never render unless
   triggered, never break host-page layout.
-- Crucial technical rule (already learned the hard way, ROADMAP §4.2): style via CSSOM
-  (`el.style.xxx = …`) not a `<style>` tag or inline `style=""` string — a `<style>` tag is
-  subject to the **host page's** `style-src` CSP and gets silently dropped on strict sites.
+- Crucial technical rule (learned the hard way, ROADMAP §4.2): never a `<style>` tag or an inline
+  `style=""` string — both are subject to the **host page's** `style-src` CSP and get silently
+  dropped on strict sites, even from an isolated world. Use `adoptedStyleSheets` (real CSS text,
+  not CSP-gated — verified Chrome 150, see `docs/LESSONS.md`) or direct CSSOM assignment.
+- How to actually build one: `in-page-ui-engine` skill.
 - Today: `network-sniffer`'s anchored badge + toast fallback (docs/ROADMAP.md §4.2).
 
 ### 4. Side Panel (`chrome.sidePanel`)

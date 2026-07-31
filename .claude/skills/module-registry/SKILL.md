@@ -19,6 +19,20 @@ only touch what the user specifically asked for (e.g. "add a new registry method
 rewriting `chrome-module-registry.ts`). Only build this layer from scratch if the folder is
 genuinely missing and the user has asked for activate/deactivate, uploads, or a popup.
 
+## Direction of travel (docs/ROADMAP.md §11, planned)
+
+The registry survives §11 largely intact, but its **permission model does not**. `grantCapabilities`
+over `Capability = 'net'|'ai'|'cache'|'bus'|'dom'` is being replaced by per-script **scope** grants
+(`media.download`, `net.mock`, …) — because `bus` is a god-capability (it reaches every bundled
+Module's own listener, so granting it grants everything) and `net`/`dom` resolve to no service at
+all. Read `userscript-api` before touching grants, consent UI, or `rpc-handler.ts`. The enforcement
+*location* is unchanged and correct: background re-checks every call; the shim is never trusted.
+
+Known bugs in the current bridge, fixed by §11 Phase 2 — don't "fix" them piecemeal first:
+`synapse.bus.on()` silently no-ops (its handler argument can't survive structured clone), and the
+shim's top-level `const __SYNAPSE_MODULE_ID__` is suspected to collide when a second script is
+uploaded into the same USER_SCRIPT world.
+
 ## The pieces
 
 **Core (`src/kernel/`, zero `chrome.*` imports):**

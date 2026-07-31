@@ -156,12 +156,187 @@ Trước đây `tabUrl` (top-level URL của tab, khác `pageUrl` — origin c�
 
 ---
 
+## 11. Pivot: Userscript Platform — KẾ HOẠCH, chưa implement
+
+Định vị lại sản phẩm: Synapse là **một bản nâng cấp của Tampermonkey**, không còn là "playground automation cá nhân có vài module builtin". User script thành công dân hạng nhất; module builtin (network-sniffer, http-error-mocker, reader-mode) tụt xuống vai trò reference implementation + nguồn cung cấp API. Đối tượng: người có kỹ năng code. Chia sẻ script là quyết định của user (policy kiểu Tampermonkey) — việc của platform là làm quyền hạn **minh bạch và theo từng script**.
+
+Lý do buộc phải làm: bề mặt user script hiện tại là 5 method, trong đó `ai.*` throw (`background/index.ts` chưa wire adapter), `bus.on` gãy câm lặng (handler là function, không qua được structured clone), `net`/`dom` no-op (có trong `Capability` nhưng không có service). Thực dùng còn 2: `cache.get/set`. Mọi năng lực thật của extension (sniffer, download engine, mock, DNR, offscreen) không có mặt trong capability model.
+
+Skills liên quan (đã viết trước, đọc khi bắt tay): [`userscript-api`](../.claude/skills/userscript-api/SKILL.md), [`in-page-ui-engine`](../.claude/skills/in-page-ui-engine/SKILL.md), [`sdk-layers`](../.claude/skills/sdk-layers/SKILL.md) (mục "third axis"), [`module-registry`](../.claude/skills/module-registry/SKILL.md) (mục "Direction of travel").
+
+### 11.0 Quyết định đã chốt — đọc trước, KHÔNG mở lại
+
+| Chủ đề | Chốt | Vì |
+|---|---|---|
+| Adapter thứ 2 | **Khai tử.** `RuntimeEnv` còn 1 giá trị | Audit: ~0% adapter port được — mọi feature phụ thuộc `webRequest`/DNR/CDP/`userScripts`/offscreen/trang web thật. Domain của Synapse CHÍNH LÀ trình duyệt |
+| Hexagonal | **Giữ**, nhưng vì testability + kỷ luật phụ thuộc, KHÔNG phải portability | `kernel/`+`shared/` phải chứng minh được là sạch `chrome.*`. Đừng biện minh thiết kế bằng "để sau này port được" |
+| "Framework/template" | Framework thật là **`synapseApi`**, không phải `kernel/` | Chỉ `synapseApi` có người dùng ngoài → chỉ nó cần ổn định/versioned/có docs. Phần kiến trúc đáng tái dùng đã ở dạng `.claude/skills/` rồi |
+| Facade | `synapseApi` là global do shim tiêm, **trong USER_SCRIPT world**. World vẫn cô lập như cũ | MAIN-world global sẽ cho MỌI website truy cập, và làm `moduleId` không còn xác thực được (`sender` chỉ biết frame, không biết script) → sập hẳn phân quyền |
+| Phân quyền | **Scope** (`media.download`) thay Capability (`bus`) | `bus.emit(moduleId,…)` chạm được listener của mọi module builtin → god-capability. "Cho phép bus?" là câu hỏi user không trả lời được |
+| Engine UI | Chạy **cùng world với script**; Core sở hữu host/portal/lifecycle/component library | Engine ở Core giết closure (`onClick` không qua clone) → mất vĩnh viễn kiểu viết template, và mỗi lần đổi state là 1 round-trip. Đổi lại KHÔNG mua được an toàn nào: script vốn đã có full DOM |
+| Styling | **`adoptedStyleSheets`** | Đã đo Chrome 150 (2026-07-30): không bị `style-src` chi phối, khác hẳn `<style>`/`style=""`. Viết CSS thật được. Xem [LESSONS.md](LESSONS.md) |
+
+### 11.1 Phase 0 — Nền (độc lập, không rủi ro thiết kế)
+
+- **vitest + `npm test`.** Test đầu tiên nhắm `src/shared/` (pure, không cần browser): `media-manifest-parser`, `zip`, `http-mock`, `media-url-matcher`, `signed-url-detector`.
+- **`RuntimeEnv` → 1 giá trị**; gỡ `environment-guard` khỏi hot path; `supportedEnvs` xoá hoặc thành no-op. `design.md` §8 viết lại thành "đã cân nhắc, đã từ chối + lý do" (đây là lúc được sửa design.md).
+- **Gỡ demo/smoke module** (`append-a`/`append-b`/`demo-composite`, `background/index.ts` cuối file) — chuyển thành test thật cho `workflow.ts`/`composite-module.ts`. Hiện chúng chạy + `console.log` trong mọi bản build.
+- **`workflowId` dispatch**: implement hoặc xoá hẳn (đang hardcode `kernel.run([], …)`, `workflowId` không được đọc ở đâu).
+- **Xong khi**: `npm test` xanh; service worker khởi động không còn log demo.
+- **Phụ thuộc**: không.
+
+### 11.2 Phase 1 — Tách `download-engine.ts` (1.355 dòng)
+
+- **→ `shared/`** (kèm test): bookkeeping thứ tự pool, chunk/range math, backoff policy, shape checkpoint, `fileNameFromUrl`, `byteRangeToHeader`, `ivForSegment`.
+- **→ feature**: 3 job kind (VOD pool / live loop / turbo range) + `produceOutput`. Tách `runJob` (~300 dòng, ≥6 closure chung mutable state) thành `SegmentPipeline` + `JobControl` + output.
+- **`utils/` giữ lại mechanism thuần**: `opfs-store`, `blob-store`, `offscreen-manager`, `main-world/*`, `dnr-network-rules`, `webrequest-media-observer`, `debugger-network-interceptor` (3 cái sau đã tự khai "no domain knowledge", đúng chỗ).
+- **Xong khi**: không file nào trong `utils/` import `shared/media-manifest-parser`; `utils/` ≲ 1.900 dòng (hiện 3.284).
+- **Phụ thuộc**: Phase 0 (cần vitest để test phần vừa tách ra).
+
+### 11.3 Phase 2 — `synapseApi` + scope permission ← KEYSTONE
+
+- **`src/kernel/synapse-api.ts`**: interface + `Scope`. 3 ràng buộc cứng (async-only / không nhận function / không trả object có method) — chi tiết ở skill `userscript-api`.
+- **3 transport**: in-process (background) / `rpc-client.ts` (dom) / shim (uploaded). Thiếu method ở 1 transport = phá contract, không phải "gap".
+- **`rpc-handler.ts` enforce theo scope** (vị trí enforce hiện tại đã đúng: background re-check, không tin shim).
+- **Shim**: `globalThis.synapseApi`, **bỏ hẳn `bus`**. Sửa `const __SYNAPSE_MODULE_ID__` ở top-level (nghi trùng khai báo khi có script thứ 2 — bọc IIFE).
+- **`needs: Capability[]` → `scopes: Scope[]`**, kèm migration cho grant đã lưu trong `chrome.storage`.
+- **Consent UI** viết lại theo scope; **`docs/types/synapse-userscript.d.ts`** sinh từ cùng interface; **`docs/user-scripts.md`** viết lại với ví dụ chạy được.
+
+**Nguyên tắc nền: phân quyền theo MỤC ĐÍCH/TÀI NGUYÊN, không theo cơ chế truyền tin.** Script khai nó cần *làm gì* (`media.download`), không phải nó cần *đường ống nào* (`bus`). Engine chỉ mở đúng cổng API đó. Bốn ràng buộc bắt buộc đi kèm — không phải tuỳ chọn thiết kế:
+
+- **(A) `storage.rw` phải namespace theo script.** Key thật `script:<moduleId>:<userKey>`, API không cho thoát khỏi tiền tố. **Điều kiện tiên quyết của cả mô hình** — xem lỗ đang tồn tại ở Open Points; không có nó thì mọi scope khác vô nghĩa vì script tự ghi đè grant của chính mình được.
+- **(B) Scope chạm mạng phải mang chiều tài nguyên (match pattern).** `media.download` trần = "tải bất cứ gì từ bất cứ đâu dưới danh nghĩa extension" (kèm header replay + context của extension). Khai dạng `{ scope: 'media.download', match: ['*://*.example.com/*'] }`; consent string sinh ra có tên miền thật thì user mới trả lời được. Tiền lệ: `@connect` của Tampermonkey — grant là (hành động × miền).
+- **(C) Tách 2 loại scope, hiển thị riêng.** *Enforced* (chỉ làm được qua `synapseApi` → từ chối là chặn thật) vs *Disclosed* (script làm được dù bị từ chối → chỉ là khai báo minh bạch). `page.dom` thuộc loại sau: user script chung DOM với trang, `document.querySelector` chạy với zero permission. Trộn 2 loại vào một danh sách = **consent UI nói dối** người dùng rằng từ chối thì được bảo vệ.
+- **(D) Grant reset khi source đổi.** Hiện an toàn *tình cờ* (mỗi `uploadModule` sinh uuid mới → grant rỗng), đổi lại là tích tụ entry trùng và không có đường "update script". Khi thêm đường update: lưu hash source cạnh grant, hash lệch → grant về rỗng + hỏi lại (đúng hành vi Tampermonkey khi script update). Giữ bất biến hiện có: bundled tự cấp theo `needs` (`chrome-module-registry.ts:151`), uploaded luôn default `[]` (dòng 201) — **không bao giờ** để nhánh auto-grant chạm tới uploaded.
+
+Catalog scope + quy tắc chống sinh sôi (~10 scope là trần, quá đó user bấm Allow hết): xem skill [`userscript-api`](../.claude/skills/userscript-api/SKILL.md).
+
+- **(E) Mọi scope và mọi method khai kèm `description` ngay từ đầu.** Consent UI dù sao cũng bắt buộc phải có mô tả người-đọc-được cho từng scope (ràng buộc C), nên catalog này **chính là** nguồn sinh tài liệu ở Phase 5 (trang Help + `.d.ts` + bundle cho AI). Bỏ qua bây giờ = phải bổ sung mô tả cho ~40 method một lượt về sau. Đây là lý do việc sinh doc gần như miễn phí — dữ liệu vốn đã phải tồn tại.
+- **Chặn thứ tự: Secret Service (Phase 5) KHÔNG được ship trước khi phase này xong.** Hôm nay một script có `cache` đọc được mọi key trong `chrome.storage.local` (xem lỗ bảo mật ở Open Points). Thêm kho secret vào lúc đó là **gom hết API key của user vào đúng một chỗ script đọc được** — biến một lỗ thành thảm hoạ.
+
+- **Xong khi**: upload 2 script cùng lúc cả 2 đều chạy; một script có `storage.rw` KHÔNG đọc/ghi được key ngoài namespace của nó (thử `cache.get('synapse:grants')` phải fail); consent UI tách rõ Enforced/Disclosed; `bus` không còn trên bề mặt user script.
+- **Phụ thuộc**: Phase 0.
+
+### 11.4 Phase 3 — `synapseApi.ui.*` + compositor cho UI nổi (cơ chế A)
+
+Hai script độc lập cùng tiêm UI vào một không gian chung sẽ đè/xoá UI của nhau, tranh diện tích, vỡ layout. **Cùng lỗi gốc với lỗ bảo mật `cache`: định danh do caller cung cấp trong không gian dùng chung.** Hiện `floating-widget.ts` có ĐÚNG lỗ đó — một shadow root dùng chung, một stack toast, một hàng icon, và khoá là `options.id` do caller truyền → script A gọi `dismissFloatingIcon('<id-của-B>')` là xoá được UI của B. Chưa nổ vì mới có 3 consumer builtin do chính ta đặt tên.
+
+**Mô hình: Platform là compositor, script là client.** Script không bao giờ nhận node trong không gian chung — nó xin một *surface*, Core cấp phát và định vị:
+
+- **Định danh do Platform gán.** `moduleId` lấy từ transport, không phải tham số (y hệt luật của ràng buộc (A) ở Phase 2). `ui.toast({id:'x'})` → khoá nội bộ `<moduleId>:x`. API chỉ trả về surface của chính script đó — không có cách nào địa chỉ hoá surface của script khác.
+- **Mỗi script một shadow root riêng**, không dùng chung. Được miễn phí: CSS không rò giữa các script, Core gỡ toàn bộ UI một script bằng một thao tác, id trùng giữa các script vô hại, mỗi surface là một stacking context riêng (z-order do Core quyết, không do ai render trước).
+- **Quota + thứ tự tất định** thay cho "ai render trước thì chiếm": surface thường trực (icon/panel) mặc định 1/script, cap cứng; toast vào hàng đợi có rate-limit, Core hiện tối đa N cùng lúc; thứ tự sắp xếp theo tên script hoặc cấu hình user, **không bao giờ theo thứ tự khởi tạo**.
+- **Vòng đời do Core sở hữu**: surface gắn `(moduleId, tabId, lần load trang)`; deactivate/xoá script hoặc điều hướng → Core gỡ host. Container `pointer-events: none`, children `auto` — một surface trống không được nuốt click của trang hay của surface khác.
+- **Van xả bắt buộc**: toggle "ẩn UI" per-script trong popup, **tách khỏi** deactivate — script hữu ích mà UI phiền thì tắt UI, logic vẫn chạy.
+- **KHÔNG hứa cách ly sự kiện.** Script A gắn `document.addEventListener('click')` là thấy click ở UI của script B, và không cấm được — cùng lý do `page.dom` là Disclosed. Core chỉ đảm bảo sự kiện của compositor không rò và không surface nào che hit-test của surface khác. Ghi đúng như vậy trong docs, đừng hứa quá (lại rơi vào bẫy "consent UI nói dối" ở ràng buộc (C)).
+
+Việc còn lại của phase: viết lại `utils/floating-widget.ts` dùng `adoptedStyleSheets` (một constructed sheet dùng chung), đổi API từ *id-do-caller* sang *surface-per-owner* — 3 consumer builtin sửa theo. `ui.toast`/`ui.icon`/`ui.badge`/`ui.panel` đặt sau scope `ui.render`.
+
+- **Xong khi**: user script mẫu hiện được toast + icon trên trang có header `style-src 'self'`; **script A không gỡ/đè được UI của script B dù cố tình truyền id của B**.
+- **Phụ thuộc**: Phase 2.
+
+### 11.5 Phase 4 — Trục `features/`
+
+Vấn đề đo được: feature media detect→download là **~4.800 dòng, 43% repo, trải 8 thư mục**, không có thư mục của riêng nó.
+
+- `features/{media,http-mock,reader-mode}/`; `background/index.ts` + `content-scripts/index.ts` thành composition root mỏng.
+- **Bắt buộc kèm theo**: quy ước hậu tố `*.background.ts` / `*.content.ts` / `*.offscreen.ts` / `*.page.ts` — bù lại tín hiệu execution-context mà đường dẫn thư mục đang gánh (Offscreen Document chỉ có `chrome.runtime`, xem LESSONS.md). Không có quy ước này thì Phase 4 là bước lùi.
+- Sửa vi phạm biên: `ui/side-panel/main.ts` đang import thẳng `background/modules/network-sniffer/store` — đi qua `listCollection()`/API thay vì import theo tên.
+- **Xong khi**: mỗi feature một thư mục; không UI nào import store nội bộ của module khác; tên feature khớp 1:1 tên scope.
+- **Phụ thuộc**: Phase 1 (engine đã tách) + Phase 2 (đã biết tên scope).
+
+### 11.6 Phase 5 — Mở API surface thật
+
+Đây mới là chỗ "user thực sự viết được automation" — UI không phải nút thắt, bề mặt API mới là.
+
+- Theo từng feature, mỗi cái một scope: `media.read`/`media.download`, `net.mock`/`net.observe`, `page.dom`, `storage.rw`.
+- **`ai.ask` được ĐỊNH NGHĨA LẠI, không phải xoá.** Từ một Port agentic (`AiService`, chưa từng có adapter) thành một **helper mỏng** gọi provider phổ biến (OpenAI, Ollama). Ta **không** viết AI agent — user tự viết, kể cả file agent hướng dẫn AI của họ. 3 bẫy: (i) **đừng trừu tượng hoá provider** — "unified LLM interface" là hố (streaming/tool-calling/vision mỗi hãng một kiểu); mỏng nghĩa là `{provider, model, messages} → text`, ai cần hơn thì dùng `net.request` + `secretRef`; (ii) **streaming không qua được `sendMessage`** — cần `chrome.runtime.connect` (long-lived port), nên **v1 không stream**, ghi rõ trong doc; (iii) **Ollama là localhost, không cần secret nhưng vướng CORS** — request từ background mang origin `chrome-extension://…`, Ollama mặc định có thể từ chối (`OLLAMA_ORIGINS`); ghi vào trang Help, đây sẽ là câu hỏi số 1.
+
+**Secret Service** — điều kiện tiên quyết của AI helper, và **chặn sau Phase 2** (xem §11.3).
+
+Sự thật phải đặt trước: **nếu script đọc được secret thì không có bảo mật nào cả** — script có `fetch` là exfiltrate ngay dòng sau. Một secret store trả plaintext bảo vệ gần như bằng không so với để key thẳng trong source; nó chỉ đổi chỗ cất, không đổi ai đọc được.
+
+- **Reference-only: script không bao giờ nhìn thấy secret.** Nó tham chiếu theo tên, platform tiêm giá trị **tại ranh giới mạng** trong background, script chỉ nhận response: `ai.chat({provider, secretRef:'my-openai-key', messages})`, `net.request({url, headers:{Authorization:{secretRef, format:'Bearer {}'}}})`. **Cùng hình dạng với header replay §7.1** đã có (extension biết header mà trang/script không được thấy, gắn ở tầng mạng) — không phải cơ chế mới.
+- **Secret gắn allowed hosts ngay lúc tạo.** Nếu script tự chọn URL, nó trỏ `net.request` về server của nó kèm `Authorization` là secret bay đi theo đường hợp lệ. `'my-openai-key' → chỉ api.openai.com`. Khớp y hệt ràng buộc (B): grant là (hành động × miền).
+- **Ba luật dạng "không có"**: KHÔNG tồn tại scope `secrets.read` (không có scope thì không cấp nhầm được — chỉ có `secrets.use`); KHÔNG có API tạo/sửa/xoá (quản lý secret là **UI-only** ở Dashboard, script không tự mồi được); KHÔNG có API liệt kê (tên secret cũng là thông tin — script **khai trước** ref nó cần, platform trả lời có/không).
+- **Lưu trữ: plaintext at-rest, bảo vệ bằng access control — và NÓI THẲNG điều đó trong trang Help.** Mã hoá at-rest với key cất ngay cạnh là *theater* (extension đọc được key thì kẻ đọc được profile cũng vậy). Passphrase → derive key → `chrome.storage.session` là bảo vệ thật trước trộm disk/profile nhưng phải mở khoá mỗi session và giết use case chạy nền — để opt-in sau, không phải v1. Toàn bộ permission model dựng trên "không nói dối user"; phá lệ ở đây là hỏng cả hệ thống niềm tin.
+- **Lợi ích kéo theo: script chia sẻ được by construction.** Script chia sẻ chỉ chứa `secretRef` — một cái **tên**, không phải giá trị. Người nhận tự tạo secret của họ. Vì script khai trước ref cần dùng, lúc cài hiện prompt đúng kiểu consent: *"Script này cần secret `my-openai-key` dùng cho api.openai.com"*.
+
+**Trang Help trong extension + bundle context cho AI** — user chủ yếu sẽ vibe-code, nên tài liệu là tính năng, không phải phụ lục.
+
+- **Hai khán giả, hai format.** Người đọc trong browser cần điều hướng/ví dụ/tiết lộ dần; LLM cần **đầy đủ, tự chứa, ít token, một file phẳng**, ghét nav chrome và tham chiếu ngầm kiểu "xem mục 3". Đây là 2 output khác nhau, không phải một trang có nút Download.
+- **Một nguồn → 3 output, để không drift.** Doc viết tay sẽ lệch khỏi `synapseApi` trong vài tuần; với người đọc là khó chịu, **với AI là tai hoạ** — nó sinh code sai một cách tự tin. Nguồn: catalog `SynapseApi` (có `description` từ ràng buộc (E)) + `docs/user-scripts.md` (concept) + tập con hướng-user của `LESSONS.md`. Output: **(1)** trang Help (HTML), **(2)** `docs/types/synapse-userscript.d.ts`, **(3)** `synapse-ai-context.md` tải về. **Không** sinh file agent — user tự viết theo nhu cầu của họ.
+- **Mục "Những thứ fail im lặng" đặt TRƯỚC API reference trong bundle.** LLM đã biết viết JS; cái nó không biết là cạm bẫy của ta, và nó sẽ tự tin sinh ra `bus.on(handler)` (không còn tồn tại + function không qua clone), `<style>` (bị `style-src` nuốt im lặng), truyền function làm tham số (bị drop, no-op), `chrome.*` trong sandbox iframe (không có). Với context LLM, **ràng buộc phủ định có giá trị trên mỗi token cao hơn liệt kê khẳng định** — và nội dung này chính là `LESSONS.md` đã có sẵn.
+- **Đóng dấu version.** Bundle mang `version` từ `package.json` + ngày sinh. **Bundle cũ tệ hơn không có bundle** — user chạy v0.5 mà AI đọc doc v0.3 thì sinh code sai không ai truy ra được.
+- **Render lúc build, không parse markdown lúc chạy** — trang Help là HTML sinh sẵn; tránh thêm dependency markdown-parser và tránh rắc rối CSP của extension page. Dùng lại pattern "extra HTML entry" trong `vite.config.ts` (dashboard/review/offscreen). **Surface**: đọc sâu → trang Dashboard-type mở bằng `chrome.tabs.create`, không phải popup (theo `ui-surface-placement`); link vào từ popup và từ màn hình grant.
+- **Skills hiện có KHÔNG dùng lại được cho user.** `.claude/skills/*` là skills để **phát triển Synapse** (`sdk-layers`, `kernel-bootstrap` nói về bố cục file nội bộ) — đưa cho user là vô ích, AI sẽ khuyên họ tạo `src/kernel/` trong khi họ chỉ đang viết một file `.js`. Bundle cho user là artifact **mới**, góc nhìn ngược: viết cho người *dùng* API, không phải người *xây* API.
+
+**Mô hình automation nhiều bước — 3 tier, khớp Progressive Complexity (design.md §1).** Bài toán thật của user không phải "dựng đồ thị" mà là *"pipeline có sẵn đúng hình dạng rồi, tôi muốn sửa MỘT bước, và tuỳ site"* — đó là Strategy + URL dispatch, không phải composition đồ thị. Tier 1 (`run()` đơn) đã có.
+
+- **Tier 2 — Hook vào pipeline của platform (mới).** Platform khai các *slot* có tên trong pipeline của chính nó; script đăng ký override khớp theo URL:
+  ```js
+  synapseApi.pipeline.hook('media.preprocess-dom', { match: ['*://example.com/*'], handler: (ctx) => … });
+  ```
+  Handler chạy trong world của script (closure dùng được, nhất quán quyết định §11.0 về vị trí engine). Phân quyền tự nhiên: hook `media.*` đòi scope `media.*`.
+  **Luật xung đột — lần thứ ba cùng một bài học:** 2 script cùng hook 1 slot cho cùng URL → **match cụ thể hơn thắng**; hoà thì theo thứ tự user cấu hình; **không bao giờ theo thứ tự đăng ký**.
+  **Slot đầu tiên nên đặt ở đâu**: chính các Open Point đang bế tắc vì "mỗi site mỗi khác" — `[§7.3-open]` anchor badge MSE/HLS, `[§10.2]` ad-filter live, `[§10.3]` player lấy chunk từ endpoint JSON. Tier 2 biến chúng từ *bug phải vá vô hạn* thành *slot user tự vá cho site của họ*. Đánh đổi đã chấp nhận: chỉ custom được nơi platform đã đặt slot, và slot trở thành API công khai (đổi shape = breaking change).
+- **Tier 3 — Mở `createCompositeModule` cho user script.** Tuyến tính, không nhánh. Gần như miễn phí: [`composite-module.ts`](../src/kernel/composite-module.ts) đã có, `subModules` đã chảy về registry, [`steps-view.ts`](../src/adapters/browser-extension/ui/dashboard/views/steps-view.ts) đã render — chỉ thiếu đường expose qua shim.
+- **Observability (khoảng trống thật, không cần DAG để lấp).** Nâng `steps-view.ts` từ "checkbox bypass" thành "checkbox + trạng thái lần chạy gần nhất + thời lượng + lỗi từng bước". Hiện `onFailure` chỉ `console.error`. Nhỏ, lấy được phần lớn giá trị cảm nhận của một workflow engine. Lưu ý: pipeline tuyến tính visualize được **vì nó là mảng có thứ tự** — thêm nhánh là mất tính chất đó.
+
+- **Xong khi**: viết được một user script thật dùng ≥2 feature mà không phải sửa extension; một script hook được 1 slot chỉ cho 1 site cụ thể; `steps-view` hiện được bước nào lỗi và vì sao; **một script gọi được OpenAI qua `secretRef` mà `synapseApi` không có bất kỳ đường nào trả về giá trị secret** (thử đọc phải fail vì API đó không tồn tại); trang Help mở được offline và `synapse-ai-context.md` tải về mang đúng version.
+- **Phụ thuộc**: Phase 2 (bắt buộc — Secret Service chặn sau namespace storage). Phase 4 làm trước thì gọn hơn.
+
+### 11.7 Phase 6 — Declarative UI engine + component library
+
+- Mở rộng `kernel/ui-schema.ts` sang layout in-page (đừng đẻ DSL thứ 2); engine chạy trong world của script; component library dùng chung một constructed sheet; positioning; storage-bound state qua `storage.rw`.
+- **Xong khi**: một script khai báo được UI mà không gọi `document.createElement`.
+- **Phụ thuộc**: Phase 3 phải có consumer thật trước. **Không bắt đầu nếu Phase 3 chưa chứng minh nhu cầu** — đây là phase đắt nhất (dễ gấp 3–5 lần `kernel/` hiện tại).
+
+### 11.8 Phase 7 — Container sandboxed iframe (cơ chế B) — đắt, làm sau cùng
+
+Mô hình container **hybrid**: cách cấp phát khác nhau tuỳ loại container, vì bản chất tranh chấp khác nhau.
+
+- **UI nổi trên trang** → Shadow DOM + compositor (**cơ chế A**, Phase 3).
+- **Page riêng** → mỗi script một page.
+- **Sidebar** → mỗi script một tab trong panel.
+
+Hai cái sau là **cùng một cơ chế**, chỉ khác chỗ mount. Lý do: script **không chạy được trong extension page** — MV3 CSP chặn `eval`/dynamic `import` ở context đặc quyền, và `chrome.userScripts` chỉ match URL trang web, `chrome-extension://` không nằm trong đó. Đường duy nhất Chrome chấp nhận là **sandboxed iframe** (`manifest.sandbox.pages` + `content_security_policy.sandbox`) — manifest hiện chỉ có `extension_pages`, chưa có entry nào.
+
+| | **A · UI nổi (Shadow DOM)** | **B · Page riêng / Sidebar tab (iframe sandbox)** |
+|---|---|---|
+| Closure | ✅ | ✅ (chạy trong frame của chính nó) |
+| Cách ly | Shadow root — CSS tách, **event vẫn rò** | Document riêng — **CSS + event + JS tách hoàn toàn** |
+| DOM của trang | ✅ trực tiếp | ❌ không có |
+| `chrome.*` | không (RPC qua shim) | không (sandbox = origin `null`) → postMessage lên parent → background |
+| Storage riêng | qua RPC | **bắt buộc** postMessage — sandbox không có IndexedDB/localStorage |
+| Tranh chấp chỗ | cần compositor | tự hết — mỗi frame một không gian |
+
+**Luật rút ra — container quyết định `page.dom` là Enforced hay Disclosed:** ở A script vốn có DOM nên `page.dom` chỉ khai báo được; ở B script KHÔNG có DOM trang, muốn chạm phải đi qua `page.*` API → **`page.dom` thành Enforced thật**. Đây là lý do chọn B cho mọi script không thực sự cần bám vào trang, không phải tác dụng phụ.
+
+Việc phải làm:
+- **Script hai nửa.** Script muốn *panel UI + thao tác trang* có nửa UI trong iframe, nửa automation trên trang — hai context không chia sẻ gì. Script khai `container: 'float' | 'panel' | 'page'`; cần cả hai thì khai **2 entry point**, platform nối bằng channel **scoped theo `moduleId`** (lại đúng luật: định danh do platform gán).
+- **Sidebar tab không được nở vô hạn**: chỉ script thực sự yêu cầu panel trên trang hiện tại mới có tab; có overflow; **thứ tự tab vẫn phải tất định** — nếu không thì race condition chỉ chuyển từ "tranh chỗ" sang "nhảy thứ tự tab".
+- Hạ tầng: manifest sandbox entry, postMessage RPC bridge (sandbox không có `chrome.*` nên **toàn bộ** API phải relay), tab bar UI, vòng đời iframe per script.
+- **Xong khi**: một script chạy trong sidebar tab của nó, thao tác được trang qua `page.*` API, và **bị chặn thật** khi `page.dom` không được cấp.
+- **Phụ thuộc**: Phase 3 (cơ chế A) phải xong và có consumer thật trước — cái rẻ phải chứng minh nhu cầu trước khi làm cái đắt.
+
+### 11.9 Thứ tự & cách vào việc
+
+`0 → 1 → 2 → 3 → 4 → 5 → 6 → 7`.
+
+Phase 0 và 1 **độc lập hoàn toàn với phần pivot** — bắt đầu được ngay, không cần chốt thêm gì. Phase 2 là keystone, mọi phase sau phụ thuộc nó. Mỗi phase có "Xong khi" riêng nên dừng giữa chừng ở ranh giới phase là an toàn.
+
+---
+
 ## Khu vực Open Points
 
 Mọi việc chưa xong, chưa chốt hướng, hoặc chưa verify — gom theo khu vực. Đọc trước khi bắt việc mới trong khu vực tương ứng.
 
 ### Chưa implement / chưa chọn hướng
 
+- **[§11] Toàn bộ pivot Userscript Platform** — xem §11 ở trên (đã chốt hướng, chia 7 phase, mỗi phase có "Xong khi" riêng). Ba lỗi đã xác định qua đọc code, cố ý KHÔNG vá lẻ mà để Phase 2 dọn một lượt: `synapse.bus.on()` gãy câm lặng (handler là function, không qua structured clone — `rpc-client.ts` đã biết và cố tình không proxy `bus`, nhưng shim vẫn expose); `needs: ['net'|'dom']` là no-op (có trong `Capability`, không có service trong `ModuleContext.services`); `ai.*` throw vì `background/index.ts` chưa wire factory.
+- **[§11] Không có test nào trong repo** — Phase 0 mở màn bằng vitest cho `src/shared/`. Đây là điều kiện tiên quyết của Phase 1 (tách `download-engine.ts` mà không có lưới an toàn là liều).
+- **[§11.6 Tier 4] Workflow engine kiểu DAG (Prefect-like: node tuỳ ý, phân nhánh, loop tường minh, visual editor) — ĐÃ CÂN NHẮC, HOÃN.** Không vào plan. Lý do: (a) trong pipeline tuần tự mà mỗi bước là hàm JS, phân nhánh là `if` và loop là `for` **bên trong** một bước — DAG tường minh chỉ đáng khi có thứ *tiêu thụ* cấu trúc đó (scheduler phân tán — không cần; visualizer — đã có `steps-view` cho pipeline tuyến tính); (b) 5/6 value prop của Prefect không áp dụng (song song hoá: engine tự pool bên trong rồi; retry: đã có per-segment; cron: không phải use case; resume: đã có nhưng theo từng feature ở §8.12) — chỉ **observability** là khoảng trống thật, và Tier 3 lấp được mà không cần DAG; (c) **mâu thuẫn kiến trúc**: node ở context khác nhau biến mọi cạnh thành ranh giới `structured-clone`, trong khi pipeline đang chạy tốt nhất (`reader-mode-converter`) truyền một **`Document` sống** qua cả 4 bước — thứ đó không thể qua ranh giới; nó chạy được CHỈ VÌ cả 4 bước cùng world. **Điều kiện vào lại**: có ≥2 ca thật mà `if`/`for` bên trong một bước không diễn đạt nổi, VÀ các bước đó cùng context (hoặc dữ liệu giữa chúng đã là handle chứ không phải giá trị sống).
 - **[§7.3-open] Anchor badge cho MSE/HLS player vẫn KHÔNG hoạt động ổn định, sau 3 vòng vá dựa trên đọc code (§7.3(a-hls) bug i/ii/iii) — user xác nhận vấn đề gốc VẪN CÒN Y NGUYÊN.** Side Panel (qua `webRequest`, độc lập với DOM/MSE correlation) vẫn phát hiện + tải được đúng — chỉ riêng badge neo vào `<video>` là sai/thiếu. 3 bug đã vá (race `MEDIA_ATTACHED`, thiếu rescan-channel, latch `fired` một-lần) đều hợp lý khi đọc code nhưng KHÔNG giải quyết được triệu chứng thật → khả năng cao còn nguyên nhân khác chưa xác định, hoặc site cụ thể user test không đi qua nhánh `window.Hls` như đã tưởng (dù `window.Hls` xác nhận có tồn tại — có thể trang dùng ĐA instance Hls, hoặc 1 instance khác không phải cái điều khiển badge đang thấy, hoặc badge bị một scan SAU đó ghi đè/xoá bởi tín hiệu khác). **Việc tiếp theo bắt buộc phải có debug trực tiếp trên trang thật** (console.log tạm trong `hls-global-hook.ts`/`dom-media-observer.ts`, hoặc đơn giản hơn: kiểm tra `el.getAttribute('data-synapse-hls-url')` trực tiếp trên phần tử `<video>` qua DevTools của TRANG đó) trước khi vá thêm bất kỳ giả thuyết nào nữa — dừng đoán mò dựa thuần trên đọc code. Đường tổng quát hơn (né toàn bộ lớp correlation-đoán-mò này) vẫn là **§7.3(b)/§10.3 hook `SourceBuffer.appendBuffer`** — bắt trực tiếp byte đã phát thay vì đoán URL nào khớp phần tử nào.
 - **[§10.2] Ad-filter cho stream trực tiếp — làm SAU 10.1.** Cố ý chưa lọc (cần case thật để hoàn thiện logic bắt link trước). Đã biết: 3 nguồn phát hiện bất đồng (webRequest thấy `initiator` thật của iframe quảng cáo, MAIN-world/DOM chỉ thấy `pageUrl` trang chủ → cùng 1 stream lọt/bị chặn tuỳ nguồn nào bắt trước — không nhất quán, không phải bug); không thêm domain sạch (vd `sacdnssedge`) vào denylist — cần tín hiệu khác (initiator frame, quan hệ với VAST/VPAID đã thấy trên trang).
 - **[§10.3] Media MSE không lộ manifest — lớp URL chưa từng bắt được** (player tự viết lấy chunk từ endpoint JSON thường, không phải `.m3u8`/`.mpd`; magic-bytes không nhận `moof`/`styp` fMP4 media segment — chỉ có `ftyp` init segment; `probedMagicByteOrigins` đánh dấu vĩnh viễn bất kể kết quả, dễ "đốt" origin oan). Sửa nhanh chưa làm: (i) chỉ đánh dấu probe khi thật sự vô ích/cap theo số lần; (ii) thêm `styp`/`moof` vào magic-bytes như kind mới. Đường tổng quát thật sự là **§7.3(b) hook `SourceBuffer.appendBuffer`** — mệnh đề cũ "chưa gặp ca thật nào bắt buộc" nay đã sai, đây chính là ca đó (đánh đổi cũ vẫn đúng: chỉ lấy phần đã phát, không nhanh hơn real-time, tốn kênh structured-clone, cần remux nếu nhiều SourceBuffer).
@@ -170,13 +345,19 @@ Mọi việc chưa xong, chưa chốt hướng, hoặc chưa verify — gom theo
 
 ### Rủi ro/quyết định mở
 
+- **[BẢO MẬT — lỗ ĐANG TỒN TẠI, không phải việc tương lai] `cache` là đường leo thang đặc quyền.** Ba mảnh ghép: `storage.ts:6` lưu grant ở key `'synapse:grants'` trong `chrome.storage.local`; `services/cache.ts` là `chrome.storage.local` **trần, không namespace**; `rpc-handler.ts:60` truyền thẳng `req.args` vào service. Hệ quả: một user script chỉ cần được cấp `cache` là chạy được `synapse.cache.set('synapse:grants', {'<id-của-nó>': ['ai','cache','bus','net','dom']})` → **tự cấp mọi capability, gồm `bus`** → `bus.emit('<module-id>', …)` điều khiển mọi module builtin. Kèm theo: `cache.get('synapse:uploaded')` đọc được source của mọi script khác; `cache.set('synapse:activation', …)` bật/tắt module tuỳ ý. Rủi ro thực tế hôm nay còn thấp (script là do chính user viết), **nhưng §11 đã chốt là script sẽ được chia sẻ giữa người dùng → threat model đã đổi.** Vá tại §11.3 Phase 2 ràng buộc (A): namespace `script:<moduleId>:<userKey>`. Nếu vì lý do nào đó Phase 2 bị hoãn lâu, vá tạm rẻ nhất là chặn danh sách tiền tố `synapse:` ngay trong `rpc-handler.ts` trước khi gọi service.
+
 - **[§1/§9.1] Đóng popup giữa chừng lúc crawl mất kết quả — đã vá bằng hướng §9.1** (trigger dời hẳn khỏi Popup vào icon nổi trên trang; Popup không còn tham gia vòng đời crawl chút nào, không có gì để "đóng giữa chừng" nữa). Rủi ro còn lại chưa verify: xem mục dưới.
 - **[§6.4]** Side Panel do Chrome quản lý per-window (không phải per-tab) — hành vi khi đổi tab/window trong cùng cửa sổ chưa kiểm tra kỹ ngoài việc filter theo origin.
 - **[§8.6 note]** 7.1 (header replay) và 8.2 (Turbo Range) đều phát request từ context extension → cùng câu hỏi "DNR có áp lên request của chính extension không" — đã verify qua 7.1, dùng chung kết luận cho 8.2.
 - **[§8.11]** Lỗi gốc (`chrome.downloads`/`storage`/`declarativeNetRequest` đều `undefined` trong Offscreen Document) đã xác nhận bằng browser thật; **bản vá relay 3 kênh mới (query-replay-headers/sync-header-replay-rule/describe-header-replay/trigger-download) CHƯA được re-verify bằng browser thật** — cần xác nhận không bị listener khác giành response, và header replay thật sự hoạt động (không chỉ hết bị nuốt lỗi im lặng) trên site hotlink-protect thật.
 - **[§8.12]** Checkpoint không có giới hạn tuổi (chưa quyết có cần TTL không). Gap phát hiện thêm khi implement (chưa xử lý): một checkpoint mà `DetectedMedia` entry gốc đã bị dismiss/evict (cap `MAX_DETECTED_ITEMS=200`, hoặc user tự xoá) không còn bề mặt UI nào để resume HAY dọn nó — Side Panel chỉ match checkpoint theo `item.id` của entry đang hiển thị, nên checkpoint này (và file OPFS mà sweep tiếp tục spare vì nó) sống mãi trong storage cho tới khi không còn gì kích hoạt việc dọn.
 
-### Chưa verify bằng browser thật (agent không có môi trường trình duyệt)
+### Chưa verify bằng browser thật
+
+**Cập nhật 2026-07-30 — agent GIỜ chạy được Chrome thật.** Playwright (`playwright-core` + `channel:'chrome'`, dùng Chrome đã cài, không cần tải browser) chạy được. Giới hạn: Chrome 150 **không còn honor `--load-extension`** (kể cả kèm `--disable-features=DisableLoadExtensionCommandLineSwitch`), nên không load được extension thật. Cách vòng qua đã dùng thành công: CDP `Page.createIsolatedWorld` + `Runtime.evaluate` — đúng primitive Chrome dùng để hiện thực content script, đủ trung thực để test hành vi DOM/CSP ở ISOLATED world (đã tái hiện chính xác bug `<style>`/CSP của §4.2). **Không** thay thế được test cần `chrome.*` API thật (messaging, storage, DNR, offscreen) — những mục dưới đây vẫn cần user.
+
+- **[§11 Phase 2]** Upload 2 user script cùng lúc: nghi `const __SYNAPSE_MODULE_ID__` ở top-level shim bị trùng khai báo (mọi script chia sẻ một USER_SCRIPT world — chính doc comment của shim ghi "not per-script sub-isolation within that world") → script thứ 2 `SyntaxError`. Nếu đúng thì **hiện chỉ dùng được 1 user script**, và Phase 2 phải được ưu tiên lên trước Phase 1. Cách thử: upload 2 file `.js` bất kỳ, mở console của USER_SCRIPT world.
 
 Baseline: engine tải (§8.1–8.5) và Side Panel (§6) đã qua **nhiều vòng test thật của user** (đó là cách §6.6–6.7, §8.6–8.11 được phát hiện) — phần lớn rủi ro runtime ban đầu coi như đã đóng cho luồng chính (HLS pool+AES-128+remux+Pause/Resume/Cancel, header replay §7.1, VanJS render §8.9 — cả hai **đã xác nhận bằng browser thật**). Danh sách dưới đây là phần **CHƯA từng được user xác nhận**, hoặc bản vá mới nhất chưa re-test sau khi sửa:
 

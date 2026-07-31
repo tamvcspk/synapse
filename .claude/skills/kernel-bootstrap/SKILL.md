@@ -22,8 +22,15 @@ This platform-agnostic Core is what docs/design.md §1 calls **Hexagonal Archite
 + `Module` contract is the Core, `AiService`/`CacheService`/`BusService` are the Ports, and the
 `chrome.*`-backed factories below are the (only) Adapter. `RuntimeEnv` (in `module.ts`) has
 reserved values (`'vscode' | 'electron' | 'node'`) for future Adapters — **do not implement
-anything for them**, they exist only so the Environment Guard can reject a mismatched Module
-cleanly. See docs/design.md §8 for the (unbuilt) roadmap.
+anything for them**.
+
+**A second Adapter has been formally ruled out (docs/ROADMAP.md §11).** An audit found ~0% of the
+browser-extension Adapter could ever port: every feature depends on `chrome.webRequest`, DNR, CDP,
+`chrome.userScripts`, Offscreen Documents, or a real web page. Synapse's domain *is* the browser.
+Hexagonal is retained here for **testability and dependency discipline** — keeping `kernel/` and
+`shared/` provably free of `chrome.*` — **not** for portability; don't justify a design choice by
+appealing to a future Adapter. §11 Phase 0 collapses `RuntimeEnv` to a single value and removes the
+Environment Guard from the hot path; until that ships, the code below is still current.
 
 ## Guard
 
