@@ -1,14 +1,19 @@
-import type { DownloadJobCheckpoint } from '../../../shared/download-engine-protocol';
+import type { DownloadJobCheckpoint } from '../../../../../shared/download-engine-protocol';
 
 /**
  * docs/ROADMAP.md §8.12 — plain `chrome.storage.local` CRUD for `DownloadJobCheckpoint`, one entry
- * per `jobId`. Unlike header-replay-rules.ts/download-engine.ts's other background-relayed helpers,
- * this file is used from BOTH sides directly, never through a message relay for the read side:
- * Side Panel is a privileged extension page with its own `chrome.storage` access (same as its
- * existing direct `listDetectedMedia()`/turbo-toggle reads), so it calls `listDownloadJobCheckpoints`
- * here itself. Only the Offscreen Document (utils/download-engine.ts) can't touch `chrome.storage`
- * directly (docs/ROADMAP.md §8.11) — it reaches the save/remove functions here via a
- * background/index.ts relay instead, same pattern as header-replay-rules.ts.
+ * per `jobId`. Unlike the engine's other background-relayed helpers
+ * (./background-relay.offscreen.ts, utils/header-replay-rules.ts), this file is used from BOTH sides
+ * directly, never through a message relay for the read side: Side Panel is a privileged extension
+ * page with its own `chrome.storage` access (same as its existing direct
+ * `listDetectedMedia()`/turbo-toggle reads), so it calls `listDownloadJobCheckpoints` here itself.
+ * Only the Offscreen Document can't touch `chrome.storage` directly (docs/ROADMAP.md §8.11) — it
+ * reaches the save/remove functions here via a background/index.ts relay instead, same pattern as
+ * utils/header-replay-rules.ts.
+ *
+ * NO `.offscreen.ts`/`.background.ts` suffix on purpose (docs/ROADMAP.md §11.5's convention): this
+ * is the one file in this folder that genuinely runs in more than one context, and the suffix is
+ * meant to warn about a context's limits, not to decorate every file in a folder.
  */
 
 const STORAGE_KEY = 'network-sniffer:downloadJobs';

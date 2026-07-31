@@ -1,7 +1,7 @@
 /**
  * docs/ROADMAP.md §8.1/§8.2 — type-only contract between whichever UI surface starts a download
  * (Side Panel, Dashboard's smart-download) and the engine that actually runs it
- * (utils/download-engine.ts, hosted in the singleton Offscreen Document). Global SDK (§9): no
+ * (features/media/download/, hosted in the singleton Offscreen Document). Global SDK (§9): no
  * chrome.* here, just types, so both privileged UI pages and the offscreen page import the exact
  * same shape.
  *
@@ -18,7 +18,7 @@
  * one fetch per worker/chunk can still be genuinely in flight when PAUSE arrives and will still run
  * to completion (and still get written), so reporting `'paused'` immediately would be a lie the UI
  * has no way to tell apart from the truth. The engine only emits `'paused'` once every in-flight
- * fetch has actually settled (see utils/download-engine.ts's `noteFetchSettled`). */
+ * fetch has actually settled (see features/media/download/job-control.offscreen.ts's `noteFetchSettled`). */
 export type DownloadEnginePhase = 'segments' | 'chunks' | 'remux' | 'pausing' | 'paused' | 'done' | 'error' | 'cancelled';
 
 export interface DownloadEngineCommand {
@@ -51,12 +51,12 @@ export interface DownloadEngineCommand {
 /**
  * docs/ROADMAP.md §8.12 — enough state to safely CONTINUE an interrupted HLS job, persisted
  * periodically (coalesced, not per-segment) to `chrome.storage.local` via
- * utils/download-job-checkpoints.ts. Deliberately does NOT carry the segment URL list itself — a
+ * features/media/download/checkpoints.ts. Deliberately does NOT carry the segment URL list itself — a
  * resume always refetches+reparses the manifest fresh (docs/ROADMAP.md §7.4's existing
  * refresh-on-401/403 logic, reused) since a signed-URL segment list can rot between sessions.
  * HLS-only: §8.2's turbo (multi-connection Range) jobs have no natural small checkpoint (a handful
  * of huge chunks, no per-chunk "already durably written" boundary worth persisting) and are not
- * checkpointed at all — see download-engine.ts's `runJob` for where this is written.
+ * checkpointed at all — see features/media/download/segment-pipeline.offscreen.ts for where this is written.
  */
 export interface DownloadJobCheckpoint {
   jobId: string;
@@ -88,7 +88,7 @@ export interface DownloadJobCheckpoint {
  * command landed twice. The in-memory `jobs` Map guard in `handleEngineCommand`/`startJob` happened
  * to swallow the duplicate `START` cleanly, but the double-send is real ambient noise that isn't
  * safe to rely on being harmless for every op forever (confirmed as the trigger for a real OPFS race
- * — see download-engine.ts's `createOpfsRun` running twice for the same tick). This distinct type is
+ * — see the engine's `createOpfsRun` running twice for the same tick). This distinct type is
  * ONLY ever sent by background's relay and ONLY ever listened for by the offscreen document
  * (ui/offscreen/main.ts) — the offscreen page no longer listens for the client-facing
  * `synapse:download-engine-command` type at all, so it structurally cannot receive the original

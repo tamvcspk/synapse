@@ -1,12 +1,12 @@
 /**
  * OPFS-backed sequential file staging for the download engine's segment download (docs/ROADMAP.md
- * #8.5, ported into utils/download-engine.ts by §8.1) — replaces per-segment IndexedDB records
+ * #8.5, ported into the download engine by §8.1, split into features/media/download/ by §11.2) — replaces per-segment IndexedDB records
  * (blob-store.ts) with ONE file per run, written via `FileSystemWritableFileStream`.
  * `ffmpeg.writeFile`/MEMFS is still a real wasm-heap ceiling on its own (that part isn't fixable
  * from the staging side), but staging here removes the other half: no N-record IndexedDB roundtrip,
  * and the finished `File` is file-backed — `URL.createObjectURL`/`ffmpeg.mount('WORKERFS', ...)` on
  * it load nothing into RAM up front. That's what makes the "concatenated TS is already a playable
- * file" fast path in download-engine.ts viable for multi-GB streams. `navigator.storage.
+ * file" fast path in features/media/download/output.offscreen.ts viable for multi-GB streams. `navigator.storage.
  * getDirectory()` works identically whether the caller is a Tab (the old `ui/merge`) or an Offscreen
  * Document (§8.1's replacement) — this module needed no changes when the engine moved.
  *
@@ -73,7 +73,7 @@ export interface OpfsRun {
    * `createWritable({keepExistingData: true})` so writing can continue exactly where it left off —
    * `write()`'s explicit `position` argument (never relying on the stream's own internal cursor)
    * means a freshly reopened stream continues correctly regardless. Only call this occasionally
-   * (see download-engine.ts's checkpoint cadence): `keepExistingData: true` re-copies the file's
+   * (see features/media/download/segment-pipeline.offscreen.ts's checkpoint cadence): `keepExistingData: true` re-copies the file's
    * ENTIRE existing content into a new swap file, so this is O(current file size), not O(1) — cheap
    * for a small file, real cost for a multi-hundred-MB one. Rethrows on failure — the caller must
    * treat a failed commit as "this checkpoint round didn't happen," not silently pretend it did.
@@ -185,7 +185,7 @@ export async function removeOpfsRun(runId: string): Promise<void> {
  * `opfsRunId`s, gathered by the caller BEFORE calling this — see ui/offscreen/main.ts) is the
  * exclusion list; everything else is still swept exactly as before. A checkpoint whose file turns
  * out unusable at actual resume time (missing, or smaller than the checkpoint claims) is cleaned up
- * by the resume path itself (utils/download-engine.ts), not here — this sweep only ever decides
+ * by the resume path itself (features/media/download/engine.offscreen.ts), not here — this sweep only ever decides
  * "keep or delete," never validates.
  */
 export async function sweepStaleOpfsRuns(keepRunIds: ReadonlySet<string> = new Set()): Promise<void> {

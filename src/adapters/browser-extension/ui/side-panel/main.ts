@@ -9,7 +9,7 @@ import { downloadReviewZip } from '../review-zip';
 import { listenForActionProgress } from '../action-progress';
 import { deleteBlob } from '../../utils/blob-store';
 import type { DownloadEngineCommand, DownloadEngineEvent, DownloadEnginePhase, DownloadJobCheckpoint } from '../../../../shared/download-engine-protocol';
-import { listDownloadJobCheckpoints } from '../../utils/download-job-checkpoints';
+import { listDownloadJobCheckpoints } from '../../features/media/download/checkpoints';
 import { describeResolution } from '../../../../shared/resolution-label';
 import downloadIconUrl from '../../../../assets/icon/download.svg';
 
@@ -190,7 +190,7 @@ function handleDownload(item: DetectedMedia): void {
  * triggered automatically, only by the user clicking the "Resume" row `renderItem` shows in place
  * of the normal Download button whenever a checkpoint exists for this entry. The engine itself
  * re-validates the checkpoint against the real state of the manifest and the partial file on disk
- * before trusting it (utils/download-engine.ts's `resumeJobFromCheckpoint`) — a failed resume just
+ * before trusting it (features/media/download/engine.offscreen.ts's `resumeJobFromCheckpoint`) — a failed resume just
  * reports an error and clears the checkpoint, same terminal-phase handling as any other job. */
 function handleResume(item: DetectedMedia, checkpoint: DownloadJobCheckpoint): void {
   if (activeDownloads.has(item.id)) return;

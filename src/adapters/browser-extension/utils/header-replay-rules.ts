@@ -101,7 +101,7 @@ const lastSyncedByHost = new Map<string, { ruleId: number; headerNames: string[]
  * doc comment). Read-only and best-effort — never throws, so a caller can log it from an error path
  * without risking a second failure on top of the first. */
 /** Exported by name (not just inferred from `describeHeaderReplay`'s return type) so
- * `utils/download-engine.ts` can type a background-relayed response with this same shape without
+ * the download engine (features/media/download/) can type a background-relayed response with this same shape without
  * importing `describeHeaderReplay` itself — that function calls `chrome.declarativeNetRequest`
  * directly, which is unavailable inside the Offscreen Document the engine runs in (docs/ROADMAP.md
  * §8.11); only `background/index.ts` ever calls this function now. */
@@ -183,7 +183,7 @@ function ruleIdFor(host: string, tabIds: number[]): number {
  * `tabIds` defaults to `[TAB_ID_NONE]` (-1), which matches only requests originating from no tab at
  * all — correct for the background service worker's own `fetch()` (network-sniffer's
  * `inspectStreamEntry`) and, since docs/ROADMAP.md §8.1, ALSO correct for the download engine
- * (utils/download-engine.ts): it now runs in a singleton Offscreen Document rather than a Tab, and
+ * (features/media/download/): it now runs in a singleton Offscreen Document rather than a Tab, and
  * an offscreen document's own fetches carry no tabId either, so it uses this same default. This
  * default was WRONG, silently as a 403, for the download engine's PREVIOUS home: an extension page
  * actually rendered in a Tab (the old `ui/merge`) issues its `fetch()` calls with that tab's own

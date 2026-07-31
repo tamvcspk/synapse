@@ -8,7 +8,7 @@ import { SIDE_PANEL_PATH } from '../ui/side-panel/side-panel-path';
 import { ensureOffscreenDocument } from '../utils/offscreen-manager';
 import { describeHeaderReplay, syncHeaderReplayRule } from '../utils/header-replay-rules';
 import { listDetectedMedia } from './modules/network-sniffer/store';
-import { listDownloadJobCheckpoints, saveDownloadJobCheckpoint, removeDownloadJobCheckpoint } from '../utils/download-job-checkpoints';
+import { listDownloadJobCheckpoints, saveDownloadJobCheckpoint, removeDownloadJobCheckpoint } from '../features/media/download/checkpoints';
 import type { DownloadEngineCommand, DownloadEngineRelayedCommand, DownloadJobCheckpoint } from '../../../shared/download-engine-protocol';
 import { chromeRuntimeBus } from './services/bus';
 import { chromeStorageCache } from './services/cache';
@@ -76,7 +76,7 @@ chrome.runtime.onMessage.addListener((message: DownloadEngineCommand | undefined
 /**
  * docs/ROADMAP.md §8.11 — bugfix: Offscreen Documents can use ONLY `chrome.runtime` (confirmed
  * against Chrome's own docs after a real download hit `chrome.downloads.download()` throwing
- * "Cannot read properties of undefined" from inside `utils/download-engine.ts`). `chrome.storage`,
+ * "Cannot read properties of undefined" from inside the download engine). `chrome.storage`,
  * `chrome.declarativeNetRequest`, and `chrome.downloads` are all unavailable there — the first two
  * failed SILENTLY (swallowed by a `.catch()`), quietly breaking §7.1's header replay for every
  * download since the engine moved into the Offscreen Document; only `chrome.downloads` crashed
@@ -123,7 +123,7 @@ chrome.runtime.onMessage.addListener((message: { type?: string; url?: string; fi
 });
 
 /**
- * docs/ROADMAP.md §8.12 — the Offscreen Document (utils/download-engine.ts) can't touch
+ * docs/ROADMAP.md §8.12 — the Offscreen Document (features/media/download/) can't touch
  * `chrome.storage` directly (§8.11), so its periodic checkpoint writes/deletes relay through here,
  * same shape as §7.1/§8.11's other request/response relays. The READ side (`listDownloadJobCheckpoints`)
  * is deliberately NOT relayed here for the Side Panel's own use — Side Panel is a privileged

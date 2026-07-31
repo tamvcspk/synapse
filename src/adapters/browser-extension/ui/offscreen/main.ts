@@ -1,5 +1,5 @@
 import type { DownloadEngineRelayedCommand, DownloadJobCheckpoint } from '../../../../shared/download-engine-protocol';
-import { handleEngineCommand } from '../../utils/download-engine';
+import { handleEngineCommand } from '../../features/media/download/engine.offscreen';
 import { sweepStaleOpfsRuns } from '../../utils/opfs-store';
 
 /**
