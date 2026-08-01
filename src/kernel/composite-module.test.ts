@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createCompositeModule } from './composite-module';
 import type { Module, ModuleContext, ModuleFailure } from './module';
+import { ServiceInjector } from './service-injector';
 
 /**
  * Replaces the `demo-composite` smoke test that used to run inside the background service worker on
@@ -13,7 +14,10 @@ const append = (letter: string): Module<string, string> => ({
   async run(input) { return `${input} ${letter}`; },
 });
 
-const emptyCtx: ModuleContext = { services: {} };
+/** `api` (docs/ROADMAP.md §11.3) is built by the Adapter; a Kernel test has no host for it, and
+ * `ServiceInjector`'s own stub is the honest stand-in — every method rejects rather than
+ * silently resolving `undefined`. */
+const emptyCtx: ModuleContext = new ServiceInjector({}).resolve();
 
 describe('createCompositeModule — the composed Module’s own shape', () => {
   it('declares the union of its sub-modules’ needs', () => {
@@ -63,7 +67,10 @@ describe('createCompositeModule — run()', () => {
     const seen: ModuleContext[] = [];
     const spy: Module = { id: 'spy', async run(input, ctx) { seen.push(ctx); return input; } };
     const composite = createCompositeModule({ id: 'c', subModules: [spy, spy] });
-    const ctx: ModuleContext = { services: { cache: { async get() { return undefined; }, async set() {} } } };
+    const ctx: ModuleContext = {
+      ...emptyCtx,
+      services: { cache: { async get() { return undefined; }, async set() {} } },
+    };
 
     await composite.run('x', ctx);
     expect(seen).toEqual([ctx, ctx]);

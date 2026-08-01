@@ -57,6 +57,16 @@ body {
   padding: 0.25rem 0.6rem;
 }
 
+/* Scope consent (docs/ROADMAP.md §11.3 constraint C) — the Disclosed list must not read as an
+   equal peer of the Enforced one; denying it protects nobody, and the styling says so. */
+.scope-disclosed {
+  color: var(--pico-muted-color);
+}
+
+.scope-tag {
+  color: var(--pico-muted-color);
+}
+
 .form-actions {
   display: flex;
   justify-content: flex-end;

@@ -1,8 +1,8 @@
-import type { Capability } from '../../../../kernel/module';
 import type { RegistryEntry } from '../../../../kernel/module-registry';
+import type { SynapseScopeGrant } from '../../../../kernel/synapse-api';
 import { renderListView, type ListViewProps } from './views/list-view';
 import { renderActionResultView } from './views/action-result-view';
-import { renderCapabilityConsentView } from './views/capability-consent-view';
+import { renderScopeConsentView } from './views/scope-consent-view';
 import { renderBusyView } from './views/busy-view';
 
 /**
@@ -16,7 +16,10 @@ import { renderBusyView } from './views/busy-view';
 export type View =
   | { kind: 'list' }
   | { kind: 'action-result'; title: string; content: string; isError: boolean }
-  | { kind: 'capability-consent'; moduleId: string; capabilities: Capability[]; intent: 'toggle' | 'grant' }
+  /** docs/ROADMAP.md §11.3 — scope consent, replacing the old capability consent. `scopes` is what
+   * still needs approving (not everything the Module declared), and the view splits it into
+   * Enforced vs Disclosed itself. */
+  | { kind: 'scope-consent'; moduleId: string; moduleLabel?: string; scopes: SynapseScopeGrant[]; intent: 'toggle' | 'grant' }
   /** Shown immediately on any action trigger (docs/ROADMAP.md #1) — most actions resolve in a
    * second or two and this just flashes briefly, but a long-running one (Crawl & Convert Site)
    * updates `message` with progress pings so there's a clear signal to wait rather than click
@@ -72,8 +75,8 @@ export async function render(
     return;
   }
 
-  // view.kind === 'capability-consent'
-  renderCapabilityConsentView(root, view, {
+  // view.kind === 'scope-consent'
+  renderScopeConsentView(root, view, {
     onApprove: handlers.onConsentApprove,
     onDeny: handlers.onConsentDeny,
   });

@@ -1,5 +1,6 @@
 import van from 'vanjs-core';
 import type { RegistryEntry } from '../../../../../kernel/module-registry';
+import { ungrantedScopes } from '../../../../../kernel/scopes';
 
 const { div, nav, ul, li, strong, button, span, input } = van.tags;
 
@@ -84,9 +85,9 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
       callbacks.onOpenModule(entry, entry.uiSchema?.kind === 'action' ? entry.uiSchema.actions[0]?.id : undefined);
   }
 
-  // An uploaded module's needs[] is only known after its first run (see chrome-module-registry.ts) —
-  // it can be active with capabilities the RPC handler is still rejecting until explicitly granted.
-  const ungranted = entry.needs.filter((n) => !entry.grantedCapabilities.includes(n));
+  // An uploaded module's scopes[] is only known after its first run (see chrome-module-registry.ts) —
+  // it can be active with scopes the RPC handler is still rejecting until explicitly granted.
+  const ungranted = ungrantedScopes(entry.scopes, entry.grantedScopes);
 
   // Composite Module (docs/ROADMAP.md #3) — a text button (not another icon; this popup is a small
   // fixed-width window, and "Steps" reads clearer than an ambiguous glyph) opening the Dashboard's
@@ -102,7 +103,7 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
     label,
     entry.status !== 'ok' ? span({ class: 'reason', title: entry.reason ?? '' }, 'invalid') : null,
     entry.status === 'ok' && ungranted.length > 0
-      ? button({ title: `Requests: ${ungranted.join(', ')}`, onclick: () => callbacks.onGrant(entry) }, 'Grant')
+      ? button({ title: `Requests: ${ungranted.map((g) => g.scope).join(', ')}`, onclick: () => callbacks.onGrant(entry) }, 'Grant')
       : null,
     // Action button(s) + toggle grouped together, visually adjacent, separate from label/reason/grant.
     div(

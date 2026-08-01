@@ -1,5 +1,5 @@
 import { registerDomModule } from './relay';
-import { buildDomModuleServices } from './rpc-client';
+import { buildDomModuleApi } from './rpc-client';
 import { BUNDLED_MODULES } from '../module-registry/bundled-modules';
 import { isModuleActive } from '../module-registry/storage';
 import { installStorageToMainWorldRelay } from '../utils/main-world/storage-relay';
@@ -65,7 +65,12 @@ createMainWorldChannel<{ url: string }>(MAIN_WORLD_REPORT_CHANNEL_ID).onUpdate((
   })();
 });
 
-const domModules = BUNDLED_MODULES.filter((mod) => mod.needs?.includes('dom'));
+// Every BUNDLED_MODULE is a dom Module by construction — bundled-modules.ts globs
+// `content-scripts/modules/**` and nothing else. The old `needs?.includes('dom')` filter here was
+// redundant with that, and `'dom'` is gone as a Capability anyway (docs/ROADMAP.md §11.3: it
+// resolved to no service, so declaring it was a silent no-op; what a script can do to the page is
+// now the `page.dom` *scope*, which is Disclosed rather than injected).
+const domModules = BUNDLED_MODULES;
 
 for (const mod of domModules) {
   registerDomModule(mod);
@@ -83,7 +88,7 @@ for (const mod of domModules.filter((mod) => !AUTORUN_EXCLUDED.has(mod.id))) {
   void (async () => {
     if (!(await isModuleActive(mod.id))) return;
     try {
-      await mod.run(undefined, { services: buildDomModuleServices(mod.id, mod.needs) });
+      await mod.run(undefined, { services: {}, api: buildDomModuleApi(mod.id) });
     } catch (err) {
       console.error(`Synapse: module "${mod.id}" failed on auto-run`, err);
     }
@@ -104,7 +109,7 @@ async function runReaderModeJob(mod: (typeof domModules)[number], actionId: 'con
   if (readerModeJobRunning) return;
   readerModeJobRunning = true;
   try {
-    const result = await mod.run({ action: actionId }, { services: buildDomModuleServices(mod.id, mod.needs) });
+    const result = await mod.run({ action: actionId }, { services: {}, api: buildDomModuleApi(mod.id) });
     chrome.runtime.sendMessage({ type: 'synapse:reader-mode-result', data: result }).catch(() => {});
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

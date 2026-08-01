@@ -1,6 +1,6 @@
 ---
 name: module-registry
-description: Explain, extend, or wire into Synapse's Module Registry layer — bundled-module auto-discovery, runtime-uploaded modules via chrome.userScripts (Tampermonkey-style), the RPC bridge that lets uploaded code reach Kernel Services, capability consent, and the popup UI. Matches docs/design.md §3.D. Use when the user wants activate/deactivate for modules, module uploads, a popup for managing modules, or asks how the existing registry/upload feature works.
+description: Explain, extend, or wire into Synapse's Module Registry layer — bundled-module auto-discovery, runtime-uploaded modules via chrome.userScripts (Tampermonkey-style), the RPC bridge that lets uploaded code reach synapseApi, scope consent, and the popup UI. Matches docs/design.md §3.D. Use when the user wants activate/deactivate for modules, module uploads, a popup for managing modules, or asks how the existing registry/upload feature works.
 ---
 
 # Module Registry (Dynamic Modules)
@@ -19,27 +19,40 @@ only touch what the user specifically asked for (e.g. "add a new registry method
 rewriting `chrome-module-registry.ts`). Only build this layer from scratch if the folder is
 genuinely missing and the user has asked for activate/deactivate, uploads, or a popup.
 
-## Direction of travel (docs/ROADMAP.md §11, planned)
+## Permission model — replaced in §11.3, already shipped
 
-The registry survives §11 largely intact, but its **permission model does not**. `grantCapabilities`
-over `Capability = 'net'|'ai'|'cache'|'bus'|'dom'` is being replaced by per-script **scope** grants
-(`media.download`, `net.mock`, …) — because `bus` is a god-capability (it reaches every bundled
-Module's own listener, so granting it grants everything) and `net`/`dom` resolve to no service at
-all. Read `userscript-api` before touching grants, consent UI, or `rpc-handler.ts`. The enforcement
-*location* is unchanged and correct: background re-checks every call; the shim is never trusted.
+The registry survived §11 largely intact; its **permission model did not**. `grantCapabilities` over
+`Capability = 'net'|'ai'|'cache'|'bus'|'dom'` is gone, replaced by `grantScopes` over per-script
+**scope** grants (`SynapseScopeGrant = { scope, match? }`). Read `userscript-api` before touching
+grants, consent UI, or `rpc-handler.ts`. The enforcement *location* was always correct and is
+unchanged: background re-checks every call; the shim is never trusted.
 
-Known bugs in the current bridge, fixed by §11 Phase 2 — don't "fix" them piecemeal first:
-`synapse.bus.on()` silently no-ops (its handler argument can't survive structured clone), and the
-shim's top-level `const __SYNAPSE_MODULE_ID__` is suspected to collide when a second script is
-uploaded into the same USER_SCRIPT world.
+What that means concretely, since a lot of older wording elsewhere assumes otherwise:
+
+- `Module.needs` still exists but is **only** Service injection (`'ai'|'cache'|'bus'`). Permission
+  is `Module.scopes`. `'net'`/`'dom'` were deleted — they resolved to no Service, so declaring them
+  was a silent no-op.
+- `RegistryEntry` carries `scopes` + `grantedScopes`, not `needs` + `grantedCapabilities`.
+- Bundled grants are **derived from `Module.scopes` on read and never persisted**; only uploaded
+  scripts have a stored record, `{ scopes, sourceHash }`, and it only counts if the hash still
+  matches the registered source.
+- Two bugs that were listed here as "fix in Phase 2" are fixed: `synapse.bus.on()` is gone with the
+  whole `bus` surface (its handler could never survive structured clone), and the shim's top-level
+  `const` collision was **confirmed real** — every registered script shares one USER_SCRIPT world,
+  so the second script on a page died with a redeclaration `SyntaxError`. The shim now wraps
+  everything, user source included, in one synchronous IIFE.
+- Same root cause, found right after: the API must reach a script as **`ctx.api`, never a global**.
+  One world = one `globalThis.synapseApi` binding, so the last script evaluated owned it and every
+  other script's calls went out under *that* script's `moduleId` and grants. The name now holds a
+  stub that rejects with an explanation.
 
 ## The pieces
 
 **Core (`src/kernel/`, zero `chrome.*` imports):**
 - `module-registry.ts` — the `ModuleRegistryService` Port: `RegistryEntry { id, label?, source:
-  'bundled'|'uploaded', needs, active, status: 'ok'|'invalid', reason?, grantedCapabilities,
+  'bundled'|'uploaded', scopes, active, status: 'ok'|'invalid', reason?, grantedScopes,
   uiSchema? }`, and the service interface (`list`, `activate`, `deactivate`, `uploadModule`,
-  `grantCapabilities`, `refresh`). (`supportedEnvs`/`envSupported`/`'env-mismatch'` were removed
+  `grantScopes`, `refresh`). (`supportedEnvs`/`envSupported`/`'env-mismatch'` were removed
   with the Environment Guard — docs/design.md §8.)
 - `ui-schema.ts` — the Declarative UI Schema a `Module` optionally self-declares (`Module.uiSchema`,
   mirrored onto `RegistryEntry.uiSchema`): `UISchema = UICollectionSchema | UIActionSchema`,
@@ -55,10 +68,13 @@ uploaded into the same USER_SCRIPT world.
   **this is the fix for a real boundary violation the popup→Dashboard split introduced once**, so
   don't reintroduce a per-id branch here when adding a new Collection-schema Module.
 - `manifest-validator.ts` — hand-rolled shape check (no schema lib — the input is `unknown` that
-  never passed through TypeScript) for `id`/`needs` on an uploaded module's self-reported manifest.
-  Unknown fields (including a `supportedEnvs` left over in an older script) are ignored, not
-  rejected.
+  never passed through TypeScript) for `id`/`scopes` on an uploaded module's self-reported manifest.
+  Unknown fields (including a `needs` or `supportedEnvs` left over in an older script) are ignored,
+  not rejected — but an unknown *scope name* is a hard error, since a permission that silently
+  resolves to nothing is the exact failure this model replaced.
 - `rpc.ts` — message contracts only (`RpcRequest`, `RpcResponse`, `ManifestReport`), no transport.
+- `synapse-api.ts` — the public contract (type-only, import-free; see `userscript-api`).
+- `scopes.ts` — the scope catalog + `API_METHODS`, which is what `rpc-handler.ts` routes against.
 - `workflow.ts` — `Workflow { id, steps: string[] }` + `resolveWorkflowSteps(workflow, lookup)`.
   This is the *only* thing that should ever determine chained execution order — never glob/registry
   iteration order (see below).
@@ -71,16 +87,21 @@ uploaded into the same USER_SCRIPT world.
   entries from **both** `bundled-modules.ts` (`dom` Modules) and `background-modules.ts`
   (browser-specific non-`dom` Modules, e.g. `http-error-mocker`) — a Module needs a `RegistryEntry`
   from either source for the popup's Slide Toggle/Gear icon to apply to it at all — merged with
-  uploaded entries; bundled Modules auto-grant their declared `needs[]` (trusted, build-time code)
-  and carry over `mod.uiSchema` verbatim; uploaded Modules start with no grants and no `uiSchema`
-  support (not built — their manifest isn't known until first run). `ui/module-data-sources.ts`
+  uploaded entries; bundled Modules' grants are derived from their declared `scopes` (trusted,
+  build-time code — derived on read, never persisted) and carry over `mod.uiSchema` verbatim;
+  uploaded Modules start with no grants and no `uiSchema` support (not built — their manifest isn't known until first run). `ui/module-data-sources.ts`
   (below) auto-discovers a Module's `listCollection` off these same two glob-based arrays —
   don't build a third parallel registry for that; reuse `BUNDLED_MODULES`/`BACKGROUND_MODULES`.
-- `user-script-shim.ts` — wraps uploaded source with a header (defines `globalThis.synapse.
-  {ai,cache,bus}` proxies that relay via `chrome.runtime.sendMessage`) and a trailer (reads
-  `globalThis.__synapseModule`, reports it, auto-runs once, registers a dispatcher).
-- `rpc-handler.ts` — background-side authority. Re-checks every `synapse:rpc` call against
-  persisted activation + grant state before forwarding to the real Service. **The shim is never
+- `user-script-shim.ts` — wraps uploaded source in ONE synchronous IIFE containing a header
+  (builds a per-script API proxy relaying via `chrome.runtime.sendMessage`) and a trailer (reads
+  `globalThis.__synapseModule`, reports it, auto-runs it once with that proxy as `ctx.api`,
+  registers a dispatcher). Both the IIFE and the absence of a `synapseApi` global are load-bearing,
+  not style — see the permission-model section above.
+- `rpc-handler.ts` — background-side authority. Resolves `(namespace, method)` against
+  `scopes.ts`'s `API_METHODS` (fail-closed: anything uncatalogued is rejected) and re-checks every
+  `synapse:rpc` call against persisted activation + the approved scope grant before it reaches an
+  implementation. It never forwards raw args into a key/value service — that was the shape of the
+  privilege-escalation hole §11.3 closed. **The shim is never
   trusted to self-limit — this file is the actual enforcement point.** It's source-agnostic: the
   same handler serves both the uploaded-module shim and the bundled-dom-module RPC client below,
   since both send the same `RpcRequest` shape keyed by `moduleId`.
@@ -90,15 +111,15 @@ uploaded into the same USER_SCRIPT world.
   can restart at any time — same constraint as `kernel-bootstrap`).
 
 **Content-script RPC client (`src/adapters/browser-extension/content-scripts/rpc-client.ts`):**
-Bundled `dom` Modules get real `ai`/`cache` services, not an empty `ModuleContext` — `relay.ts`
-calls `buildDomModuleServices(mod.id, mod.needs)` and passes the result into `mod.run()`. This
-mirrors `user-script-shim.ts`'s RPC pattern (same `RpcRequest`/`RpcResponse` contracts, same
-`rpc-handler.ts` on the other end) so a bundled dom Module and an uploaded module get equivalent
-treatment instead of the bundled path being a dead end. **`bus` is deliberately not proxied here**
-— it's pub/sub, and a handler function can't cross `chrome.runtime.sendMessage`'s structured-clone
-boundary. A dom Module that truly needs `bus` still has to hand-roll its own messaging inside
-`run()` (see `kernel-bootstrap`'s note on this) — don't try to add a generic `bus.on` proxy without
-first deciding how a remote handler registration would actually be delivered.
+Bundled `dom` Modules get `ctx.api` — the same `SynapseApi` an uploaded script gets as a global —
+via `buildDomModuleApi(mod.id)`, called from `relay.ts` and `content-scripts/index.ts`. It uses the
+same `RpcRequest`/`RpcResponse` contracts and the same `rpc-handler.ts` on the other end, so a
+bundled dom Module and an uploaded script get equivalent treatment instead of the bundled path
+being a dead end. Kernel Services (`ai`/`cache`/`bus`) are **not** proxied here at all: they're
+background-only DI, and a dom Module's `ctx.services` is empty. If a dom Module ever needs pub/sub
+it hand-rolls its own messaging inside `run()` — a handler function can't cross
+`chrome.runtime.sendMessage`'s structured-clone boundary, so don't add a generic `on()` proxy
+without first deciding how a remote handler registration would actually be delivered.
 
 **Popup permission banner:** `background/index.ts` persists the outcome of
 `chrome.userScripts.configureWorld(...)` via `storage.ts` (not just `console.warn`), and
@@ -115,7 +136,7 @@ top-level Adapter folders; that would hide the shared-code relationship.
 **Popup (`ui/popup/`):** one popup page, no separate settings window — but internally a small
 view-router, not a single static list. `main.ts` (bootstrap + module-level state `entries`/`view`
 + all handler functions — business logic, "what happens on each user action"), `router.ts` (the
-`View` union — `list` | `action-result` | `capability-consent` — plus the `render()` dispatch
+`View` union — `list` | `action-result` | `busy` | `scope-consent` — plus the `render()` dispatch
 function: "given state, what's on screen"), `views/*.ts` (one file per view, each exporting
 `render<Name>View(root, props, callbacks): void` — plain callbacks, no Promises). Talks to
 `ChromeModuleRegistryService` directly — popup has full extension API access, so registry
@@ -160,14 +181,15 @@ style for its own add/edit form.)
   `chrome.userScripts.register()` needs an id before the code has ever run; the uploaded script's
   own `__synapseModule.id` is only known after its first execution. Never repurpose the
   self-declared id as a routing/storage key — it's `RegistryEntry.label` only, informational.
-- **`rpc-handler.ts` is the only place that grants capability access.** Don't add a shortcut in the
-  shim or anywhere else that lets an uploaded Module reach a Service without going through
-  `chrome.runtime.sendMessage` → the handler's activation+grant check.
-- **Capability consent is gated on Service access, not on script execution.** A registered
-  `chrome.userScripts` entry always runs (it has ordinary page/DOM access the moment it's
-  registered — same as any userscript manager). The grant only controls whether its `synapse.*`
-  calls succeed. Don't try to block execution pending consent; that's not how `chrome.userScripts`
-  works and isn't what was built here.
+- **`rpc-handler.ts` is the only place that authorizes a `synapseApi` call.** Don't add a shortcut
+  in the shim or anywhere else that lets an uploaded Module reach an implementation without going
+  through `chrome.runtime.sendMessage` → the handler's activation + scope check.
+- **Consent gates the API, not script execution.** A registered `chrome.userScripts` entry always
+  runs (it has ordinary page/DOM access the moment it's registered — same as any userscript
+  manager). The grant only controls whether its `synapseApi.*` calls succeed. Don't try to block
+  execution pending consent; that's not how `chrome.userScripts` works and isn't what was built
+  here. This is exactly why `page.dom` is classified **Disclosed** rather than Enforced — see
+  `userscript-api`.
 - **Discovery order ≠ execution order.** `bundled-modules.ts`'s glob iteration is meaningless for
   sequencing. If the user wants Modules chained in a specific order, that's a `Workflow` (explicit
   `steps: string[]`), resolved via `resolveWorkflowSteps` and passed to `Kernel.run()` — never
@@ -210,13 +232,13 @@ style for its own add/edit form.)
   branch there or import the Module's storage file from the UI layer — that's the exact boundary
   violation this pattern replaced (a popup/Dashboard-layer file used to import
   `http-error-mocker`'s `mock-config-store.ts` directly).
-- **New capability surfaced to uploaded scripts** (beyond `ai`/`cache`/`bus`): extend
-  `RpcRequest.service`'s union in `kernel/rpc.ts`, add the proxy in `user-script-shim.ts`'s header,
-  and add the corresponding check in `rpc-handler.ts` — all three, or the bridge silently no-ops.
-- Authoring docs for people writing uploaded scripts live in `docs/user-scripts.md` +
-  `docs/types/synapse-userscript.d.ts` (outside `src/`, excluded from the build by
-  `tsconfig.json`'s `"include": ["src"]"`) — update both if the `synapse.*`/`__synapseModule`
-  surface changes.
+- **New method surfaced to uploaded scripts**: follow `userscript-api`'s "Adding a method"
+  checklist — the short version is that `kernel/scopes.ts`'s `API_METHODS` is what `rpc-handler.ts`
+  routes against, so a method missing there is rejected no matter how many other places implement
+  it, and a method missing from `user-script-shim.ts` or `rpc-client.ts` breaks transport parity.
+- Authoring docs for people writing uploaded scripts live in `docs/user-scripts.md` (hand-written
+  concepts) + `docs/types/synapse-userscript.d.ts` (**generated** — `npm test -- -u`; both are
+  outside `src/` and excluded from the build by `tsconfig.json`'s `"include": ["src"]`).
 
 ## See also
 

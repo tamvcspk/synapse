@@ -69,7 +69,7 @@ under one of those skills) are about to implement against a named third-party de
 
 - This produces static files, not a running Module. If the project's Kernel exists
   (see the `kernel-bootstrap` skill) and the user wants this wired in as a Synapse Module, wrap the
-  same fetch/chunk logic in a `Module` with `needs: ['net']` per `docs/design.md` — but don't
+  same fetch/chunk logic in a `Module` per `docs/design.md` — but don't
   require the Kernel to exist just to run a sync. Synapse itself is a browser extension (no Node
   runtime), but this skill runs via your own WebFetch/Write tools, not inside the extension, so it
   works regardless.

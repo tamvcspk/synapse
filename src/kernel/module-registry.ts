@@ -1,4 +1,4 @@
-import type { Capability } from './module';
+import type { SynapseScopeGrant } from './synapse-api';
 import type { UISchema } from './ui-schema';
 
 export type ModuleSource = 'bundled' | 'uploaded';
@@ -16,11 +16,17 @@ export interface RegistryEntry {
    * description channel today, unlike `label`'s ManifestReport `__synapseModule.id`). */
   description?: string;
   source: ModuleSource;
-  needs: Capability[];
+  /** Permissions this Module asks for (docs/ROADMAP.md §11.3). A *request* — for an uploaded
+   * script it's whatever the script declared, which is why it's shown, not obeyed. */
+  scopes: SynapseScopeGrant[];
   active: boolean;
   status: ModuleStatus;
   reason?: string;
-  grantedCapabilities: Capability[];
+  /** What the user has actually approved. For `source: 'bundled'` this is derived from the
+   * Module's own declaration at build time and never persisted; for `source: 'uploaded'` it comes
+   * from the stored grant record, and defaults to `[]` — the two paths stay separate so an
+   * auto-grant can never reach an uploaded script (docs/ROADMAP.md §11.3 constraint D). */
+  grantedScopes: SynapseScopeGrant[];
   /** Mirrors Module.uiSchema — presence drives the popup's Gear/Arrow icon (docs/ROADMAP.md #2). */
   uiSchema?: UISchema;
   /** Mirrors Module.subModules (docs/ROADMAP.md #3) — presence drives the popup's per-step
@@ -51,7 +57,10 @@ export interface ModuleRegistryService {
   activate(id: string): Promise<void>;
   deactivate(id: string): Promise<void>;
   uploadModule(source: string): Promise<UploadResult>;
-  grantCapabilities(id: string, capabilities: Capability[]): Promise<void>;
+  /** Records the user's consent. Implementations must refuse ids that aren't uploaded scripts —
+   * a bundled Module's grant is derived from code, and letting it be written would put first-party
+   * permissions in a store scripts might one day reach. */
+  grantScopes(id: string, scopes: SynapseScopeGrant[]): Promise<void>;
   refresh(): Promise<RegistryEntry[]>;
   /** Toggles one sub-module's bypass state on a Composite Module (docs/ROADMAP.md #3). Only
    * meaningful for a `RegistryEntry` whose `subModules` includes `subId`. */

@@ -40,12 +40,20 @@ runtime.
 Check for `src/kernel/` first. If it already exists, stop and ask the user before touching it —
 this skill is for the initial bootstrap, not for re-scaffolding over an existing Kernel.
 
+**In this repo the Kernel exists and has since diverged from the templates below** — they are kept
+as the minimal shape, not as a description of the current code. Two differences that matter if you
+read them for reference: `Capability` is `'ai' | 'cache' | 'bus'` (`'net'`/`'dom'` were removed —
+they injected no Service, so declaring them was a silent no-op), and `ModuleContext` also carries
+`api: SynapseApi`, the public contract (`kernel/synapse-api.ts`, see `userscript-api`), which is
+built per-Module by an `api` factory on the injector. Permission lives on `Module.scopes`, not on
+`needs`.
+
 ## Files to create
 
 ### `src/kernel/module.ts` — the contract every Module implements
 
 ```ts
-export type Capability = 'net' | 'ai' | 'cache' | 'bus' | 'dom';
+export type Capability = 'ai' | 'cache' | 'bus';
 
 export interface ModuleContext {
   services: Partial<{

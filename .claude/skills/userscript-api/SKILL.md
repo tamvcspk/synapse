@@ -13,10 +13,21 @@ an internal detail by comparison — don't invest in making `src/kernel/` reusab
 
 ## Guard — read before writing code
 
-As of docs/ROADMAP.md §11 this is **planned, not built**. What exists today:
-`user-script-shim.ts` builds a `globalThis.synapse = { ai, cache, bus }` with 5 methods, gated by
-5 coarse capabilities. §11 Phase 2 replaces that. Check `src/kernel/synapse-api.ts` — if it doesn't
-exist, you're building Phase 2; if it does, extend it, don't redesign it.
+**Phase 2 is built** (docs/ROADMAP.md §11.3). `src/kernel/synapse-api.ts` (type-only, import-free)
++ `src/kernel/scopes.ts` (the catalog) exist — **extend them, don't redesign**. The v1 surface is
+deliberately small: `storage.rw` (Enforced) plus `page.dom` / `page.fetch` (Disclosed). Everything
+in the Catalog table below that isn't in `SCOPE_CATALOG` is Phase 5's job, not a gap to close on
+sight.
+
+Three things that are settled and should not be relitigated:
+
+- `Module.needs` (`'ai' | 'cache' | 'bus'`) is **build-time DI**; `Module.scopes` is **permission**.
+  They are separate fields on purpose — `bus` must never be a scope, but background Modules
+  genuinely need it injected.
+- Bundled grants are **derived from code on every read, never persisted**. Only uploaded scripts
+  have a stored grant record, and `grantScopes()` refuses any id that isn't an uploaded script.
+- `docs/types/synapse-userscript.d.ts` is **generated** (`kernel/userscript-dts.ts`, asserted by
+  `userscript-dts.test.ts`). Editing it by hand fails the suite; regenerate with `npm test -- -u`.
 
 ## Shape
 
@@ -27,11 +38,13 @@ execution context supplies its own transport:
 |---|---|
 | background Module | in-process — call the service directly |
 | dom Module (content script, ISOLATED) | `chrome.runtime.sendMessage` RPC (`content-scripts/rpc-client.ts`) |
-| uploaded user script (USER_SCRIPT world) | same RPC, injected as a global by the shim |
+| uploaded user script (USER_SCRIPT world) | same RPC, handed to `run()` as `ctx.api` by the shim |
 
-Worlds stay isolated. `synapseApi` is a **facade over messaging**, never a MAIN-world global —
-putting it on the page's `window` would hand every website full access and make the caller
-unidentifiable, which destroys the permission model (see "Never" below).
+Worlds stay isolated. The facade is **always delivered per call as `ctx.api`, never as a global** —
+in any world. On the page's `window` it would hand every website full access; even in the
+USER_SCRIPT world a global has one binding shared by every uploaded script, so the last one loaded
+owns the name and everyone else's calls inherit its identity and grants. Either way the caller stops
+being identifiable, which is the permission model's load-bearing assumption (see "Never" below).
 
 ## Three hard constraints
 
@@ -41,21 +54,21 @@ preferences — violating them produces silent failures, not type errors.
 1. **Every method is `async`.** Including ones that feel synchronous. Background Modules pay an
    `await` for an in-process call; that uniformity is the price of one contract.
 2. **No function-valued parameters, ever.** Functions do not survive structured clone — they arrive
-   as `undefined` and the call silently no-ops. This is exactly how today's `synapse.bus.on()` is
-   broken. Subscriptions must be `onX(handler)` where the handler is registered **locally in the
+   as `undefined` and the call silently no-ops. This is exactly how the retired `synapse.bus.on()`
+   was broken. Subscriptions must be `onX(handler)` where the handler is registered **locally in the
    caller's world** and the transport only pushes serializable events across.
 3. **No methods on returned values.** Return plain data. To model a live thing (a running download),
    return an id and expose sibling methods that take it.
 
 ## Scopes, not capabilities
 
-The old `Capability = 'net'|'ai'|'cache'|'bus'|'dom'` model is being retired because it cannot
+The old `Capability = 'net'|'ai'|'cache'|'bus'|'dom'` model was retired because it could not
 express meaningful consent:
 
 - `bus` is a **god-capability**: `bus.emit(moduleId, payload)` reaches every bundled Module's own
   listener, so granting `bus` grants control of the whole extension. A consent prompt saying
   "allow bus?" is unanswerable.
-- `net` and `dom` resolve to no service at all — declaring them is a silent no-op.
+- `net` and `dom` resolved to no service at all — declaring them was a silent no-op.
 
 **The governing principle: permission by purpose/resource, never by transport mechanism.** A script
 declares *what it wants to do* (`media.download`), not *which pipe it wants* (`bus`). Scopes are
@@ -84,21 +97,30 @@ hosting a script in an iframe whenever it doesn't truly need to attach to the pa
 
 ### Catalog
 
+`src/kernel/scopes.ts`'s `SCOPE_CATALOG` is the authority — this table is the *plan*, and the ✅
+column says how much of it is real. Don't add a planned row on sight; add it when the phase that
+owns the feature behind it arrives, so a scope never ships with nothing to gate.
+
 **Enforced:**
 
-| Scope | Consent line |
-|---|---|
-| `media.read` | See the media detected on this page |
-| `media.download` ×match | Download media from **{domains}** |
-| `net.observe` ×match | See requests this page sends to **{domains}** *(URLs may carry tokens)* |
-| `net.mock` ×match | Block/modify requests to **{domains}** |
-| `storage.rw` | Store this script's own data *(namespaced — cannot read other scripts')* |
-| `ui.render` | Show UI on the page |
-| `ai.ask` | Send data to an AI model |
+| Scope | Consent line | Built |
+|---|---|---|
+| `storage.rw` | Store this script's own data *(namespaced — cannot read other scripts')* | ✅ Phase 2 |
+| `ui.render` | Show UI on the page | Phase 3 |
+| `media.read` | See the media detected on this page | Phase 5 |
+| `media.download` ×match | Download media from **{domains}** | Phase 5 |
+| `net.observe` ×match | See requests this page sends to **{domains}** *(URLs may carry tokens)* | Phase 5 |
+| `net.mock` ×match | Block/modify requests to **{domains}** | Phase 5 |
+| `ai.ask` | Send data to an AI model | Phase 5 |
 
 **Disclosed** *(in the floating container only — Enforced in a sandboxed-iframe container):*
-`page.dom` (read/modify page content), `page.fetch` (make its own network calls, subject to the
-page's CORS).
+`page.dom` (read/modify page content) ✅ and `page.fetch` (make its own network calls, subject to
+the page's CORS) ✅.
+
+Adding an entry means: a row in `SCOPE_CATALOG` (with `consentLine` + `description` +
+`requiresMatch`), its methods in `API_METHODS`, the method on `SynapseApi`, an implementation in
+`synapse-api-host.ts`, and the same method on the shim and `rpc-client.ts`. `npm test -- -u`
+regenerates the published `.d.ts`; nothing else needs touching for docs.
 
 ### Rules
 
@@ -119,21 +141,29 @@ page's CORS).
 ### Storage must be namespaced — non-negotiable
 
 A grantable storage API over unnamespaced `chrome.storage.local` is a **privilege-escalation
-primitive**, because the permission records themselves live in that store. This is a live hole in
-the current code, not a hypothetical (docs/ROADMAP.md Open Points): `cache.set('synapse:grants', …)`
-lets a script grant itself everything. Any storage scope must resolve keys to
-`script:<moduleId>:<userKey>` inside the service, with no way for caller-supplied input to escape
-the prefix. **Never expose a raw key-value store across a permission boundary.**
+primitive**, because the permission records themselves live in that store. This *was* a live hole:
+`cache.set('synapse:grants', …)` let a script grant itself everything. Closed by `script-storage.ts`
+(`script:<moduleId>:<userKey>`, `moduleId` from the transport, prefix prepended so no caller input
+escapes) **and** by `rpc-handler.ts` no longer routing a raw key/value service at all. Keep both:
+either alone would be one refactor away from reopening it. **Never expose a raw key-value store
+across a permission boundary.**
+
+Two implementation details worth not re-deriving: flat prefixed keys beat one nested blob (two
+scripts writing concurrently would read-modify-write over each other, and a service worker can't
+hold a lock across that); and a `moduleId` containing `:` is rejected, otherwise `{a, "b:c"}` and
+`{"a:b", c}` address the same key.
 
 ### Grant lifecycle
 
-- **Grants reset when a script's source changes.** Store a hash of the source alongside the grant;
-  a mismatch clears it and re-prompts (this is what Tampermonkey does on script update). Today this
-  holds only by accident — every `uploadModule` mints a fresh uuid — so it will break the moment a
-  real "update script" path exists.
-- **Bundled modules auto-grant their declared needs** (`chrome-module-registry.ts`) — that's correct
-  for first-party code. **Uploaded modules must always default to `[]`.** Keep those two paths
-  separate; never let the auto-grant branch reach an uploaded module.
+- **Grants reset when a script's source changes** — implemented: the record is
+  `{ scopes, sourceHash }` (SHA-256, `shared/source-hash.ts`), and `getGrantedScopes` returns `[]`
+  on mismatch. Both the RPC handler and the Registry go through that one function so neither can
+  skip the check. A mismatch can't happen yet (every `uploadModule` mints a fresh uuid); it's there
+  so an "update script" path is safe by construction rather than by remembering.
+- **Bundled modules' grants are derived from their own `Module.scopes` on every read, never
+  persisted.** **Uploaded modules always default to `[]`**, and `grantScopes()` refuses any id
+  that isn't in the uploaded map — the auto-grant branch has no *route* to an uploaded module,
+  which is stronger than a convention not to take one.
 
 ## Secrets — reference-only, never readable
 
@@ -225,27 +255,40 @@ LESSONS.md (user-facing subset)   ─┘         ├─► docs/types/synapse-us
 
 ## Adding a method — checklist
 
-1. Interface + scope in `src/kernel/` (pure types).
-2. In-process implementation in the owning `features/<name>/`.
-3. RPC route + **scope check** in `module-registry/rpc-handler.ts`.
+1. Method on the interface in `src/kernel/synapse-api.ts` — **type-only, import-free**: a runtime
+   value or an `import` there breaks the `.d.ts` generator, which copies the file verbatim from its
+   `@userscript-dts:begin` marker.
+2. Entry in `API_METHODS` (and, for a new scope, `SCOPE_CATALOG`) in `src/kernel/scopes.ts`. A
+   method absent from `API_METHODS` is rejected at the boundary — the router is fail-closed.
+3. Implementation in `module-registry/synapse-api-host.ts` (delegating to the owning feature).
+   Enforcement is not written per-method: `rpc-handler.ts` derives it from the catalog.
 4. Expose on the shim (`user-script-shim.ts`) and on the dom-Module builder (`rpc-client.ts`) — a
    method missing from one transport is a contract break, not a gap.
-5. Consent copy for the new scope in the grant UI.
-6. `docs/types/synapse-userscript.d.ts` — generate/extend from the same interface so it can't drift.
-7. `docs/user-scripts.md` — an example that actually runs.
+5. `npm test -- -u` to regenerate `docs/types/synapse-userscript.d.ts`.
+6. `docs/user-scripts.md` — an example that actually runs.
 
-Steps 4–7 are not optional polish. A method reachable from one context but not another, or absent
-from the `.d.ts`, is how a public API rots.
+Consent copy comes free from step 2's `consentLine`; so do the published docs. Steps 4–6 are not
+optional polish: a method reachable from one context but not another, or absent from the `.d.ts`,
+is how a public API rots.
 
 ## Never
 
 - **Never expose `bus` to user scripts.** It defeats scoping entirely.
-- **Never put the facade on MAIN-world `window`.** Page JS would gain the same access, and
-  `moduleId` becomes unforgeable-by-nobody — `sender` identifies a frame, not a script.
+- **Never put the facade on a global — any global, in any world.** On MAIN-world `window`, page JS
+  gains the same access. Even in the USER_SCRIPT world, one binding is shared by every uploaded
+  script, so the last one evaluated owns it and every other script calling through it runs under
+  that script's `moduleId` and grants. `sender` identifies a frame, not a script, so nothing
+  downstream can catch the substitution. Pass it as `ctx.api`; leave a rejecting stub on the old
+  name so pre-existing scripts fail loudly rather than impersonating a neighbour.
 - **Never trust `needs`/scopes self-declared by an uploaded script** as authorization. It's a
   *request*; the grant record in `chrome.storage` is the authority.
 - **Never let an uploaded script's own `__synapseModule.id` become a routing key** — the extension
   assigns the canonical id at upload time, before the script has ever run.
+- **Never emit shim source with anything at top level.** Every registered script shares one
+  `USER_SCRIPT` world per page, so a top-level `const` in the shim makes the *second* script on a
+  page die with a redeclaration `SyntaxError` — the platform ran exactly one user script until this
+  was found. The whole shim, user source included, goes in one **synchronous** IIFE (async would let
+  one script's `globalThis.__synapseModule` snapshot land after another script overwrote it).
 
 ## Audience
 

@@ -17,7 +17,7 @@ export class Kernel {
   async run(modules: Module[], input: unknown, onFailure?: (f: ModuleFailure) => void): Promise<unknown> {
     const [pipelineModules, busModules] = partition(modules, (m) => !m.needs?.includes('bus'));
     for (const mod of busModules) {
-      const ctx = this.injector.resolve(mod.needs);
+      const ctx = this.injector.resolve(mod.needs, mod.id);
       if (ctx.services.bus) this.scheduler.registerOnBus(mod, ctx.services.bus, onFailure);
     }
     return this.scheduler.runPipeline(pipelineModules, input, onFailure);

@@ -1,6 +1,7 @@
 import '@picocss/pico/css/pico.min.css';
 import './popup.css';
 import type { RegistryEntry } from '../../../../kernel/module-registry';
+import { ungrantedScopes } from '../../../../kernel/scopes';
 import { isCollectionSchema } from '../../../../kernel/ui-schema';
 import { ChromeModuleRegistryService } from '../../module-registry/chrome-module-registry';
 import { isUserScriptsPermissionGranted } from '../../module-registry/storage';
@@ -26,7 +27,17 @@ fileInput.addEventListener('change', async () => {
   const file = fileInput.files?.[0];
   fileInput.value = '';
   if (!file) return;
-  await registry.uploadModule(await file.text());
+
+  // `uploadModule`'s result used to be discarded, so a rejected `chrome.userScripts.register()`
+  // (a syntax error in the file, or "Allow User Scripts" not enabled — in which case
+  // `chrome.userScripts` is `undefined` and the property access throws) left the popup looking
+  // exactly like a success: no new row, no message. That is the silent-failure shape this project
+  // keeps paying for; the reason is now shown.
+  const result = await registry.uploadModule(await file.text());
+  if (!result.ok) {
+    navigate({ kind: 'action-result', title: `${file.name} — Upload failed`, content: result.reason ?? 'Unknown error', isError: true });
+    return;
+  }
   await load();
 });
 document.body.append(fileInput);
@@ -134,9 +145,9 @@ async function handleOpenModule(entry: RegistryEntry, actionId?: string): Promis
 }
 
 function handleGrant(entry: RegistryEntry): void {
-  const ungranted = entry.needs.filter((n) => !entry.grantedCapabilities.includes(n));
+  const ungranted = ungrantedScopes(entry.scopes, entry.grantedScopes);
   if (ungranted.length === 0) return;
-  navigate({ kind: 'capability-consent', moduleId: entry.id, capabilities: ungranted, intent: 'grant' });
+  navigate({ kind: 'scope-consent', moduleId: entry.id, ...(entry.label ? { moduleLabel: entry.label } : {}), scopes: ungranted, intent: 'grant' });
 }
 
 function handleToggle(entry: RegistryEntry): void {
@@ -144,19 +155,20 @@ function handleToggle(entry: RegistryEntry): void {
     void registry.deactivate(entry.id).then(load);
     return;
   }
-  if (entry.needs.length > 0) {
-    navigate({ kind: 'capability-consent', moduleId: entry.id, capabilities: entry.needs, intent: 'toggle' });
+  if (entry.scopes.length > 0) {
+    navigate({ kind: 'scope-consent', moduleId: entry.id, ...(entry.label ? { moduleLabel: entry.label } : {}), scopes: entry.scopes, intent: 'toggle' });
     return;
   }
   void registry.activate(entry.id).then(load);
 }
 
 async function handleConsentApprove(): Promise<void> {
-  if (view.kind !== 'capability-consent') return;
-  const { moduleId, capabilities, intent } = view;
+  if (view.kind !== 'scope-consent') return;
+  const { moduleId, scopes, intent } = view;
   const entry = entries.find((e) => e.id === moduleId);
-  const grantedCapabilities = entry?.grantedCapabilities ?? [];
-  await registry.grantCapabilities(moduleId, [...grantedCapabilities, ...capabilities]);
+  // Union with what was already approved — the consent view only ever asks about the delta, so
+  // approving it must not revoke the rest. `grantScopes` ignores bundled ids by design.
+  await registry.grantScopes(moduleId, [...(entry?.grantedScopes ?? []), ...scopes]);
   if (intent === 'toggle') await registry.activate(moduleId);
   view = { kind: 'list' };
   await load();

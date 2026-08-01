@@ -10,6 +10,8 @@ import { describeHeaderReplay, syncHeaderReplayRule } from '../utils/header-repl
 import { listDetectedMedia } from './modules/network-sniffer/store';
 import { listDownloadJobCheckpoints, saveDownloadJobCheckpoint, removeDownloadJobCheckpoint } from '../features/media/download/checkpoints';
 import type { DownloadEngineCommand, DownloadEngineRelayedCommand, DownloadJobCheckpoint } from '../../../shared/download-engine-protocol';
+import { createSynapseApi } from '../module-registry/synapse-api-host';
+import type { TrustedScopeMap } from '../module-registry/rpc-handler';
 import { chromeRuntimeBus } from './services/bus';
 import { chromeStorageCache } from './services/cache';
 // import a concrete ai factory once a Module actually declares it — see kernel-bootstrap skill
@@ -18,10 +20,23 @@ const injector = new ServiceInjector({
   // ai: () => chromeAiAdapter,
   cache: () => chromeStorageCache,
   bus: () => chromeRuntimeBus,
+  api: createSynapseApi,
 });
 const kernel = new Kernel(injector);
 
-registerRpcHandler(injector);
+/**
+ * docs/ROADMAP.md §11.3 — scopes granted to build-time Modules, derived from their own declarations
+ * rather than read from storage, so first-party permissions never sit in a store a script could one
+ * day reach. Only BACKGROUND_MODULES: pulling BUNDLED_MODULES (content-script Modules) in here
+ * would drag Readability/Turndown into the service worker bundle for a lookup, and no bundled dom
+ * Module declares a scope today — when Phase 5 gives one a scope there will be a real caller to
+ * design the lookup around.
+ */
+const trustedScopes: TrustedScopeMap = Object.fromEntries(
+  BACKGROUND_MODULES.filter((mod) => mod.scopes?.length).map((mod) => [mod.id, mod.scopes!]),
+);
+
+registerRpcHandler(trustedScopes);
 
 // Registers every background/modules/*/index.ts Module onto the Bus (needs: ['bus']) or runs it
 // once (pipeline). A bus-only Module never gets an initial call from kernel.run() itself — it's

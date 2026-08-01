@@ -1,5 +1,5 @@
-import type { Capability } from '../../../kernel/module';
 import type { ManifestReport } from '../../../kernel/rpc';
+import type { SynapseScopeGrant } from '../../../kernel/synapse-api';
 
 const KEYS = {
   activation: 'synapse:activation',
@@ -37,13 +37,71 @@ export async function setModuleActive(id: string, active: boolean): Promise<void
   await setStored(KEYS.activation, map);
 }
 
-export async function getGrantsMap(): Promise<Record<string, Capability[]>> {
-  return getStored(KEYS.grants, {});
+/**
+ * What the user approved for one uploaded script, plus the hash of the source they approved it for
+ * (docs/ROADMAP.md §11.3 constraint D). Grants are stored ONLY for uploaded scripts — a bundled
+ * Module's grant is derived from its own build-time `scopes` declaration and never written here,
+ * so no auto-grant branch can reach an uploaded id, and there is nothing first-party in this
+ * record for a future bug to widen.
+ */
+export interface StoredGrantRecord {
+  scopes: SynapseScopeGrant[];
+  /** SHA-256 of the source that was on screen when consent was given. `getGrantedScopes` returns
+   * `[]` when the current source hashes differently, which is Tampermonkey's behaviour on script
+   * update: consent is for a specific piece of code, not for a name. Today every upload mints a
+   * fresh id so a mismatch can't arise yet — this is what makes an update path safe by
+   * construction when one is added, rather than something to remember at that point. */
+  sourceHash: string;
 }
 
-export async function setGrants(id: string, capabilities: Capability[]): Promise<void> {
+/**
+ * Reads the grants map, dropping any record left over from the retired Capability model
+ * (docs/ROADMAP.md §11.3). The legacy shape was `Record<id, ('net'|'ai'|'cache'|'bus'|'dom')[]>`;
+ * those names have no honest translation into scopes — `cache` in particular WAS the escalation
+ * hole — so they are discarded rather than mapped, and the user is asked again. That old map also
+ * held auto-granted bundled entries, which no longer belong in storage at all.
+ */
+export async function getGrantsMap(): Promise<Record<string, StoredGrantRecord>> {
+  const raw = await getStored<Record<string, unknown>>(KEYS.grants, {});
+  const map: Record<string, StoredGrantRecord> = {};
+  let migrated = false;
+
+  for (const [id, value] of Object.entries(raw)) {
+    if (isGrantRecord(value)) {
+      map[id] = value;
+    } else {
+      migrated = true; // legacy Capability[] (or anything unrecognizable) — drop it
+    }
+  }
+
+  if (migrated) await setStored(KEYS.grants, map);
+  return map;
+}
+
+function isGrantRecord(value: unknown): value is StoredGrantRecord {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as { scopes?: unknown; sourceHash?: unknown };
+  return Array.isArray(v.scopes) && typeof v.sourceHash === 'string';
+}
+
+/** The scopes actually in force for an uploaded script: `[]` unless a record exists AND it was
+ * approved for exactly this source. The single read-side authority — `rpc-handler.ts` and the
+ * Registry both go through it so neither can forget the hash check. */
+export async function getGrantedScopes(id: string, sourceHash: string): Promise<SynapseScopeGrant[]> {
+  const record = (await getGrantsMap())[id];
+  if (!record || record.sourceHash !== sourceHash) return [];
+  return record.scopes;
+}
+
+export async function setGrantedScopes(id: string, scopes: SynapseScopeGrant[], sourceHash: string): Promise<void> {
   const map = await getGrantsMap();
-  map[id] = capabilities;
+  map[id] = { scopes, sourceHash };
+  await setStored(KEYS.grants, map);
+}
+
+export async function deleteGrantRecord(id: string): Promise<void> {
+  const map = await getGrantsMap();
+  delete map[id];
   await setStored(KEYS.grants, map);
 }
 

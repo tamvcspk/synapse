@@ -1,8 +1,9 @@
-import { CAPABILITIES, type Capability } from './module';
+import { normalizeScopeGrants } from './scopes';
+import type { SynapseScopeGrant } from './synapse-api';
 
 export interface RawModuleManifest {
   id: string;
-  needs: Capability[];
+  scopes: SynapseScopeGrant[];
 }
 
 export type ManifestValidation =
@@ -14,6 +15,12 @@ export type ManifestValidation =
  * that didn't come through TypeScript/the bundler (e.g. an uploaded user script's declared
  * `__synapseModule`). Cannot check `run` is a function here: function values don't survive
  * chrome.runtime messaging, so that check happens client-side in the user-script shim instead.
+ *
+ * Unknown fields are ignored rather than rejected — `needs` (the retired Capability declaration,
+ * docs/ROADMAP.md §11.3) and `supportedEnvs` (retired in §11.1) both land here for scripts written
+ * against older versions. An unknown *scope*, by contrast, is a hard error: the whole point of
+ * replacing `needs` is that a permission that quietly resolves to nothing is worse than one that
+ * fails loudly.
  */
 export function validateModuleManifestShape(candidate: unknown): ManifestValidation {
   if (typeof candidate !== 'object' || candidate === null) {
@@ -26,12 +33,10 @@ export function validateModuleManifestShape(candidate: unknown): ManifestValidat
     return { valid: false, reason: 'manifest.id must be a non-empty string' };
   }
 
-  const needs = c.needs === undefined ? [] : c.needs;
-  if (!Array.isArray(needs) || !needs.every((n) => CAPABILITIES.includes(n as Capability))) {
-    return { valid: false, reason: 'manifest.needs must be an array of valid capabilities' };
+  const scopes = normalizeScopeGrants(c.scopes);
+  if (!scopes.valid) {
+    return { valid: false, reason: `manifest.scopes: ${scopes.reason}` };
   }
 
-  // A `supportedEnvs` left over in an older uploaded script's manifest is ignored rather than
-  // rejected (docs/ROADMAP.md §11.1 removed the concept) — same posture as any other unknown field.
-  return { valid: true, manifest: { id: c.id, needs: needs as Capability[] } };
+  return { valid: true, manifest: { id: c.id, scopes: scopes.grants } };
 }

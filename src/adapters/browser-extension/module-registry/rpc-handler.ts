@@ -1,22 +1,67 @@
-import type { ServiceInjector } from '../../../kernel/service-injector';
 import type { ManifestReport, RpcRequest, RpcResponse } from '../../../kernel/rpc';
-import { getActivationMap, getGrantsMap, setManifestReport } from './storage';
+import { grantsAllow, scopeForApiMethod } from '../../../kernel/scopes';
+import type { SynapseApi, SynapseScopeGrant } from '../../../kernel/synapse-api';
+import { hashScriptSource } from '../../../shared/source-hash';
+import { getActivationMap, getGrantedScopes, getUploadedSources, setManifestReport } from './storage';
+import { createSynapseApi } from './synapse-api-host';
 
 /**
- * Background-side authority for the userScripts RPC bridge. The shim (user-script-shim.ts)
- * is never trusted to self-limit — every capability call is re-checked here against persisted
- * activation + grant state before it's allowed to reach a real Service.
+ * Background-side authority for the `synapseApi` RPC bridge (docs/ROADMAP.md §11.3). The shim
+ * (user-script-shim.ts) runs in a world the user's own code controls and is never trusted to
+ * self-limit — every call is re-checked here against persisted activation + the scope grant the
+ * user actually approved, for the source they approved it for.
+ *
+ * Two things this refuses to do, both deliberate:
+ *
+ * - **No raw service routing.** Requests name a namespace of `SynapseApi` and are resolved against
+ *   `scopeForApiMethod`; anything not in the catalog is rejected. The old handler forwarded
+ *   `req.args` straight into a Kernel Service, which is how an unnamespaced `cache` turned into
+ *   "write your own grants" (see script-storage.ts).
+ * - **No auto-grant for an id it doesn't recognize as bundled.** An id absent from the uploaded map
+ *   gets `trustedScopes`, which the composition root builds from build-time declarations only.
  */
-export function registerRpcHandler(injector: ServiceInjector): void {
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+
+/** Scopes granted to build-time Modules, derived from their own `Module.scopes` and passed in by
+ * the composition root (background/index.ts). Never read from storage: first-party permissions
+ * must not live in a store that scripts might one day reach. */
+export type TrustedScopeMap = Record<string, SynapseScopeGrant[]>;
+
+export function registerRpcHandler(trustedScopes: TrustedScopeMap = {}): void {
+  const listener = (msg: unknown, _sender: chrome.runtime.MessageSender, sendResponse: (r?: unknown) => void) => {
     if (isManifestReport(msg)) {
       void handleManifestReport(msg);
       return;
     }
     if (!isRpcRequest(msg)) return;
-    handleRpc(msg, injector).then(sendResponse);
+    handleRpc(msg, trustedScopes).then(sendResponse);
     return true;
-  });
+  };
+
+  /**
+   * **Both events, and they are not interchangeable.** Chrome routes messages from a USER_SCRIPT
+   * world to `onUserScriptMessage`, never to `onMessage` — deliberately, so that an extension
+   * cannot accidentally hand user-supplied code the same handlers it wrote for its own content
+   * scripts. Registering only `onMessage` (the obvious thing, and what this file did at first) made
+   * every uploaded script's call fail with Chrome's generic *"Could not establish connection.
+   * Receiving end does not exist."* — which reads like a dead service worker, not like a message
+   * arriving on an event nobody subscribed to. The same miss also swallowed every
+   * `synapse:manifest-report`, so uploaded scripts never reported their `scopes` and the popup had
+   * no Grant button to show: one root cause, two symptoms that look unrelated.
+   *
+   * `onMessage` is still required — it carries the bundled-dom-Module transport
+   * (`content-scripts/rpc-client.ts`), which is an ordinary content script.
+   */
+  // Guarded the same way `background/index.ts` guards `chrome.userScripts` itself: with "Allow User
+  // Scripts" disabled this event may not exist, and an uncaught throw during the service worker's
+  // top-level evaluation discards EVERY listener in the extension, not just this one
+  // (docs/LESSONS.md). A property access is not too small to wrap here.
+  try {
+    chrome.runtime.onUserScriptMessage.addListener(listener);
+  } catch (err) {
+    console.warn('Synapse: chrome.runtime.onUserScriptMessage is unavailable — uploaded user scripts cannot reach the extension until "Allow User Scripts" is enabled in chrome://extensions.', err);
+  }
+
+  chrome.runtime.onMessage.addListener(listener);
 }
 
 function isRpcRequest(msg: unknown): msg is RpcRequest {
@@ -32,33 +77,60 @@ async function handleManifestReport(report: ManifestReport): Promise<void> {
   await setManifestReport(report.moduleId, stored);
 }
 
-async function handleRpc(req: RpcRequest, injector: ServiceInjector): Promise<RpcResponse> {
+/** Hashing every uploaded source on every call would be wasteful, and the service worker's memory
+ * is the right lifetime for the memo: it dies with the worker, so a source edited while the worker
+ * was asleep is re-hashed on the next wake. Keyed by source text, not id — a changed source is a
+ * different entry by construction, which is the only way this can go stale safely. */
+const sourceHashMemo = new Map<string, string>();
+
+async function memoizedSourceHash(source: string): Promise<string> {
+  const cached = sourceHashMemo.get(source);
+  if (cached) return cached;
+  const hash = await hashScriptSource(source);
+  sourceHashMemo.set(source, hash);
+  return hash;
+}
+
+/** What this module is allowed to do, and whether it exists at all. */
+async function resolveGrantedScopes(
+  moduleId: string,
+  trustedScopes: TrustedScopeMap,
+): Promise<SynapseScopeGrant[] | undefined> {
+  const uploaded = await getUploadedSources();
+  const source = uploaded[moduleId];
+  if (source !== undefined) {
+    return getGrantedScopes(moduleId, await memoizedSourceHash(source));
+  }
+  return trustedScopes[moduleId];
+}
+
+async function handleRpc(req: RpcRequest, trustedScopes: TrustedScopeMap): Promise<RpcResponse> {
+  const fail = (error: string): RpcResponse => ({ type: 'synapse:rpc-result', callId: req.callId, error });
+
   try {
-    const [activation, grants] = await Promise.all([getActivationMap(), getGrantsMap()]);
+    const requiredScope = scopeForApiMethod(req.namespace, req.method);
+    if (!requiredScope) {
+      return fail(`Unknown method "${String(req.namespace)}.${req.method}"`);
+    }
 
+    const activation = await getActivationMap();
     if (activation[req.moduleId] === false) {
-      return { type: 'synapse:rpc-result', callId: req.callId, error: `Module "${req.moduleId}" is inactive` };
+      return fail(`Module "${req.moduleId}" is inactive`);
     }
 
-    const granted = grants[req.moduleId] ?? [];
-    if (!granted.includes(req.service)) {
-      return {
-        type: 'synapse:rpc-result',
-        callId: req.callId,
-        error: `Capability "${req.service}" is not granted for module "${req.moduleId}"`,
-      };
+    const granted = await resolveGrantedScopes(req.moduleId, trustedScopes);
+    if (granted === undefined) {
+      return fail(`Unknown module "${req.moduleId}"`);
+    }
+    if (!grantsAllow(granted, requiredScope)) {
+      return fail(`Scope "${requiredScope}" is not granted for module "${req.moduleId}"`);
     }
 
-    const ctx = injector.resolve([req.service]);
-    const service = ctx.services[req.service] as Record<string, (...args: unknown[]) => unknown> | undefined;
-    const method = service?.[req.method];
-    if (typeof method !== 'function') {
-      return { type: 'synapse:rpc-result', callId: req.callId, error: `Unknown method "${req.service}.${req.method}"` };
-    }
-
-    const result = await method(...req.args);
+    const api = createSynapseApi(req.moduleId);
+    const namespace = api[req.namespace] as unknown as Record<string, (...args: unknown[]) => unknown>;
+    const result = await namespace[req.method]!(...req.args);
     return { type: 'synapse:rpc-result', callId: req.callId, result };
   } catch (err) {
-    return { type: 'synapse:rpc-result', callId: req.callId, error: err instanceof Error ? err.message : String(err) };
+    return fail(err instanceof Error ? err.message : String(err));
   }
 }

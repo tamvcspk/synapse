@@ -1,46 +1,47 @@
-import type { Capability, ModuleContext } from '../../../kernel/module';
 import type { RpcRequest, RpcResponse } from '../../../kernel/rpc';
+import type { SynapseApi } from '../../../kernel/synapse-api';
 
 /**
- * Content-script-side counterpart to module-registry/rpc-handler.ts — lets a bundled `dom`
- * Module reach background Kernel Services the same way an uploaded module's shim does
- * (user-script-shim.ts), instead of getting an empty ModuleContext (see relay.ts). 'bus' is
- * intentionally not proxied here: it's pub/sub, and a handler function can't cross
- * chrome.runtime.sendMessage's structured-clone boundary — a dom Module needing `bus` must still
- * hand-roll messaging itself (see the kernel-bootstrap skill's note on this).
+ * Content-script-side transport for `synapseApi` (docs/ROADMAP.md §11.3) — the counterpart to
+ * module-registry/rpc-handler.ts, and the same wire protocol the uploaded-script shim uses
+ * (user-script-shim.ts). A bundled `dom` Module gets this as `ctx.api` (see relay.ts) so all three
+ * transports expose one interface; a method present on one and missing from another is a contract
+ * break, not a gap.
+ *
+ * The old `buildDomModuleServices` this replaces handed back `ai`/`cache` Kernel Services from the
+ * retired Capability model. `bus` was never proxied here for a reason worth keeping in mind when
+ * extending this file: a handler function cannot cross `chrome.runtime.sendMessage`'s
+ * structured-clone boundary, so any future subscription must register its handler locally here and
+ * only push serializable events across.
  */
-const pending = new Map<string, { resolve: (value: unknown) => void; reject: (err: unknown) => void }>();
-
-chrome.runtime.onMessage.addListener((message) => {
-  if (!message || (message as { type?: unknown }).type !== 'synapse:rpc-result') return;
-  const response = message as RpcResponse;
-  const entry = pending.get(response.callId);
-  if (!entry) return;
-  pending.delete(response.callId);
-  if (response.error) entry.reject(new Error(response.error));
-  else entry.resolve(response.result);
-});
-
-function call(moduleId: string, service: 'ai' | 'cache', method: string, args: unknown[]): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const callId = crypto.randomUUID();
-    pending.set(callId, { resolve, reject });
-    const request: RpcRequest = { type: 'synapse:rpc', callId, moduleId, service, method, args };
-    chrome.runtime.sendMessage(request);
-  });
+/**
+ * The reply arrives as `sendMessage`'s own resolved value — `rpc-handler.ts` answers with
+ * `sendResponse()`, which resolves the sender's promise rather than broadcasting anything. This
+ * file used to instead listen for an inbound `'synapse:rpc-result'` message that nothing ever
+ * sends, so every call hung forever, silently, in both transports. Awaiting the promise is the fix.
+ */
+async function call(
+  moduleId: string,
+  namespace: RpcRequest['namespace'],
+  method: string,
+  args: unknown[],
+): Promise<unknown> {
+  const request: RpcRequest = { type: 'synapse:rpc', callId: crypto.randomUUID(), moduleId, namespace, method, args };
+  const response = (await chrome.runtime.sendMessage(request)) as RpcResponse | undefined;
+  if (!response) throw new Error('Synapse: no response from the extension background (was it reloaded?)');
+  if (response.error) throw new Error(response.error);
+  return response.result;
 }
 
-/** Builds ctx.services for a dom Module from its declared `needs`, backed by the RPC bridge. */
-export function buildDomModuleServices(moduleId: string, needs: Capability[] = []): ModuleContext['services'] {
-  const services: ModuleContext['services'] = {};
-  if (needs.includes('ai')) {
-    services.ai = { ask: (input) => call(moduleId, 'ai', 'ask', [input]) };
-  }
-  if (needs.includes('cache')) {
-    services.cache = {
-      get: (key) => call(moduleId, 'cache', 'get', [key]),
-      set: (key, value) => call(moduleId, 'cache', 'set', [key, value]).then(() => undefined),
-    };
-  }
-  return services;
+/** Builds `ctx.api` for a bundled dom Module, backed by the RPC bridge. Calls are still checked
+ * against the Module's granted scopes in background — a content script is not a trust boundary. */
+export function buildDomModuleApi(moduleId: string): SynapseApi {
+  return {
+    storage: {
+      get: (key) => call(moduleId, 'storage', 'get', [key]),
+      set: (key, value) => call(moduleId, 'storage', 'set', [key, value]).then(() => undefined),
+      remove: (key) => call(moduleId, 'storage', 'remove', [key]).then(() => undefined),
+      keys: () => call(moduleId, 'storage', 'keys', []) as Promise<string[]>,
+    },
+  };
 }

@@ -18,7 +18,7 @@ export class Scheduler {
   async runPipeline(modules: Module[], initialInput: unknown, onFailure?: (f: ModuleFailure) => void): Promise<unknown> {
     let value = initialInput;
     for (const mod of modules) {
-      const ctx = this.injector.resolve(mod.needs);
+      const ctx = this.injector.resolve(mod.needs, mod.id);
       try {
         value = await mod.run(value, ctx);
       } catch (err) {
@@ -30,7 +30,7 @@ export class Scheduler {
 
   /** Bus dispatch: modules declaring 'bus' get registered instead of called directly. */
   registerOnBus(mod: Module, bus: { on: Function }, onFailure?: (f: ModuleFailure) => void): void {
-    const ctx = this.injector.resolve(mod.needs);
+    const ctx = this.injector.resolve(mod.needs, mod.id);
     bus.on(mod.id, async (payload: unknown) => {
       try {
         await mod.run(payload, ctx);

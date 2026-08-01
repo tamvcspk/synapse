@@ -79,7 +79,6 @@ export interface ReaderModeResult {
 const LoadDomStep: Module<ReaderPipelineValue | undefined, ReaderPipelineValue> = {
   id: 'reader-mode-converter/load-dom',
   label: 'Load DOM',
-  needs: ['dom'],
   async run(input) {
     if (input) return input; // crawlSite already built this from a fetched+parsed remote page
     const doc = document.cloneNode(true) as Document;
@@ -90,7 +89,6 @@ const LoadDomStep: Module<ReaderPipelineValue | undefined, ReaderPipelineValue> 
 const CleanStep: Module<ReaderPipelineValue, ReaderPipelineValue> = {
   id: 'reader-mode-converter/clean',
   label: 'Clean content (Readability)',
-  needs: ['dom'],
   async run(input) {
     // Custom serializer: returns the article's root Element directly instead of Readability's
     // default (an HTML string) — avoids reparsing a string back into a DOM node just to hand it
@@ -135,7 +133,6 @@ function uniqueFileName(absoluteUrl: string, mimeType: string, seen: Set<string>
 const FetchImagesStep: Module<ReaderPipelineValue, ReaderPipelineValue> = {
   id: 'reader-mode-converter/fetch-images',
   label: 'Fetch images',
-  needs: ['dom'],
   async run(input) {
     const images: FetchedImage[] = [];
     const seenNames = new Set<string>();
@@ -175,7 +172,6 @@ const FetchImagesStep: Module<ReaderPipelineValue, ReaderPipelineValue> = {
 const ConvertMarkdownStep: Module<ReaderPipelineValue, PageConversionResult> = {
   id: 'reader-mode-converter/convert-markdown',
   label: 'Convert to Markdown',
-  needs: ['dom'],
   async run(input) {
     const localPathByUrl = new Map(input.images.map((i) => [i.originalUrl, i.localPath]));
     const markdown = htmlToMarkdown(input.root, {

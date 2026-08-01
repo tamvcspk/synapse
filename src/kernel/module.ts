@@ -1,7 +1,17 @@
+import type { SynapseApi, SynapseScopeGrant } from './synapse-api';
 import type { UISchema } from './ui-schema';
 
-export type Capability = 'net' | 'ai' | 'cache' | 'bus' | 'dom';
-export const CAPABILITIES: Capability[] = ['net', 'ai', 'cache', 'bus', 'dom'];
+/**
+ * Which Kernel Services get injected into a bundled Module's `ctx.services`. This is **dependency
+ * injection for build-time code, not a permission model** — the two used to be the same field
+ * (`needs`) and conflating them is what made the old model unusable (docs/ROADMAP.md §11.3):
+ * `bus` can never be a user-facing permission (`bus.emit(moduleId, …)` reaches every bundled
+ * Module's listener), while `'net'`/`'dom'` resolved to no service at all, so declaring them was a
+ * silent no-op. Permission for anything a *script* can ask for is `Module.scopes`
+ * (`kernel/scopes.ts`); this list is now only the three names that resolve to a real service.
+ */
+export type Capability = 'ai' | 'cache' | 'bus';
+export const CAPABILITIES: Capability[] = ['ai', 'cache', 'bus'];
 
 /**
  * There is no `RuntimeEnv` type here anymore, and no `supportedEnvs` on `Module` (docs/ROADMAP.md
@@ -18,6 +28,14 @@ export interface ModuleContext {
     cache: CacheService;
     bus: BusService;
   }>;
+  /**
+   * The public contract (docs/ROADMAP.md §11.3) — the same `synapseApi` an uploaded user script
+   * gets as a global, handed to bundled Modules here so all three transports (in-process, content
+   * script RPC, user script shim) are one interface. A Module reached through a context with no
+   * API host wired gets a stub whose methods reject with a real error rather than silently
+   * resolving `undefined` (see `service-injector.ts`).
+   */
+  api: SynapseApi;
 }
 
 export interface Module<In = unknown, Out = unknown> {
@@ -32,7 +50,15 @@ export interface Module<In = unknown, Out = unknown> {
    * distinct from `label` (a short name) and from any in-form field `hint` (explains one input,
    * not the whole Module). */
   description?: string;
+  /** Kernel Services to inject — build-time dependency injection, NOT permission. See `Capability`. */
   needs?: Capability[];
+  /**
+   * Permissions this Module asks for on the `synapseApi` surface (docs/ROADMAP.md §11.3). For a
+   * bundled Module this is trusted build-time code and the grant is derived from this declaration,
+   * never persisted; for an uploaded script the equivalent declaration is only a *request* and the
+   * stored grant record is the authority (`module-registry/storage.ts`).
+   */
+  scopes?: SynapseScopeGrant[];
   /** Declarative UI Schema (docs/ROADMAP.md #2) — presence of this field is what makes the
    * popup show a Gear/Arrow icon for this Module; its `kind` decides the icon's behavior. */
   uiSchema?: UISchema;
