@@ -24,6 +24,13 @@
  *   running on the page already shares its DOM, so `document.querySelector` works whether or not
  *   this is granted. It becomes genuinely enforced only for scripts hosted in a sandboxed frame
  *   (docs/ROADMAP.md §11.8), which have no page DOM at all.
+ * - `ui.render` — Show toasts, icons and badges on pages it runs on.
+ *   Draw into Synapse's on-page UI space: toasts, a top-right icon, badges pinned to page
+ *   elements. Disclosed, not enforced, for exactly the reason `page.dom` is: a script that
+ *   shares the page can already append anything it likes to the document, so refusing this
+ *   protects nobody — what the platform adds is placement, quota and teardown, not permission.
+ *   It becomes a real gate for scripts hosted in a sandboxed frame (docs/ROADMAP.md §11.8),
+ *   which have no page DOM to draw on at all.
  * - `page.fetch` — Make its own network requests from the page.
  *   The script calls `fetch`/`XMLHttpRequest` itself, subject to the page's CORS rules.
  *   Disclosed for the same reason as `page.dom` — the script already has these globals. It is
@@ -39,6 +46,18 @@
  *   Delete one key.
  * - `synapseApi.storage.keys(): Promise<string[]>` — requires `storage.rw`.
  *   List every key this script has written, without the internal namespace prefix.
+ * - `synapseApi.ui.toast(options: { id, message, actionLabel?, onAction? }): boolean` — requires `ui.render` (runs in your own world — synchronous).
+ *   Show a card bottom-right; reusing an id updates it in place. Returns false if refused (rate
+ *   limit, quota, or the user muted this script's UI).
+ * - `synapseApi.ui.icon(options: { id, label, title?, onClick }): boolean` — requires `ui.render` (runs in your own world — synchronous).
+ *   Show a persistent round button top-right. Two per script at most.
+ * - `synapseApi.ui.badge(options: { id, target, label, title?, onClick }): boolean` — requires `ui.render` (runs in your own world — synchronous).
+ *   Pin a small button to a page element, following it as the page scrolls and removing it once
+ *   the element leaves the document.
+ * - `synapseApi.ui.dismiss(kind: 'toast' | 'icon' | 'badge', id: string): void` — requires `ui.render` (runs in your own world — synchronous).
+ *   Remove one of your own surfaces. Ids are local to your script.
+ * - `synapseApi.ui.clear(): void` — requires `ui.render` (runs in your own world — synchronous).
+ *   Remove everything this script has drawn.
  */
 
 /**
@@ -47,7 +66,7 @@
  * deliberately absent and can never become a scope: `bus.emit(moduleId, …)` reaches every bundled
  * Module's own listener, which is a god-capability no consent prompt can describe honestly.
  */
-type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch';
+type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch' | 'ui.render';
 
 /**
  * One entry in a script's `scopes` declaration. `match` is the resource dimension: a grant is
@@ -74,6 +93,32 @@ interface SynapseStorageApi {
   keys(): Promise<string[]>;
 }
 
+/**
+ * In-page UI, allocated and positioned by the platform's compositor. Scope: `ui.render`.
+ *
+ * **Synchronous, and closures are welcome** — unlike every other namespace here, this one never
+ * sends a message. The engine runs in your own world (docs/ROADMAP.md §11.0), so `onClick` is a
+ * real function call, not a serialized action id.
+ *
+ * You never receive a node in shared space, and ids are local to your script: `toast({id:'x'})` from
+ * two different scripts creates two different toasts, and there is no way to name — let alone
+ * remove — another script's surface. Every method returns `false` when the call was refused (quota
+ * exhausted or toast rate limit), never a silent no-op. The user hiding this script's UI is not a
+ * refusal: the surface is created and returns `true`, it is simply not displayed until they unhide,
+ * at which point everything drawn in the meantime appears at once.
+ */
+interface SynapseUiApi {
+  /** Card, bottom-right. Reusing an id updates that card in place instead of stacking. */
+  toast(options: { id: string; message: string; actionLabel?: string; onAction?: () => void }): boolean;
+  /** Persistent round button, top-right. Max 2 per script. */
+  icon(options: { id: string; label: string; title?: string; onClick: () => void }): boolean;
+  /** Small button pinned to a page element's corner, following it until it leaves the document. */
+  badge(options: { id: string; target: Element; label: string; title?: string; onClick: () => void }): boolean;
+  dismiss(kind: 'toast' | 'icon' | 'badge', id: string): void;
+  /** Removes everything this script has drawn. */
+  clear(): void;
+}
+
 /** The facade every caller programs against, delivered as `ctx.api`: to bundled Modules from the
  * Kernel, to uploaded user scripts from the shim. One interface, three transports (in-process /
  * content-script RPC / user script shim) — a method reachable from one but not another is a
@@ -81,6 +126,9 @@ interface SynapseStorageApi {
  * world, so a global name has one binding for all of them and could not identify the caller. */
 interface SynapseApi {
   storage: SynapseStorageApi;
+  /** Only usable from code that runs on a page. A background Module gets a stub whose every method
+   * throws with that explanation — there is no DOM in a service worker to render into. */
+  ui: SynapseUiApi;
 }
 
 /** What an uploaded user script assigns to `globalThis.__synapseModule` to declare itself. */

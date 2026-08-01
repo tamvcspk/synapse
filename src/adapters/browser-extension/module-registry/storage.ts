@@ -8,7 +8,11 @@ const KEYS = {
   manifestReports: 'synapse:manifest-reports',
   userScriptsPermission: 'synapse:user-scripts-permission',
   subState: 'synapse:sub-state',
+  uiMuted: 'synapse:ui-muted',
 } as const;
+
+export const ACTIVATION_STORAGE_KEY = KEYS.activation;
+export const UI_MUTED_STORAGE_KEY = KEYS.uiMuted;
 
 export type StoredManifestReport = Omit<ManifestReport, 'type'>;
 
@@ -36,6 +40,36 @@ export async function setModuleActive(id: string, active: boolean): Promise<void
   map[id] = active;
   await setStored(KEYS.activation, map);
 }
+
+/**
+ * The "hide UI" valve (docs/ROADMAP.md §11.4) — deliberately a SEPARATE axis from activation. A
+ * script whose logic is useful but whose on-page UI is in the way should be muteable without being
+ * switched off; collapsing the two would make "make this stop drawing" and "stop running this" the
+ * same button, which is the reason the valve exists at all.
+ *
+ * Absent entry = not muted, so existing installs are unaffected (contrast with the activation
+ * default flip discussed in §12.4, which does change behaviour and needs a migration).
+ */
+export async function getUiMutedMap(): Promise<Record<string, boolean>> {
+  return getStored(KEYS.uiMuted, {});
+}
+
+export async function isUiMuted(id: string): Promise<boolean> {
+  return (await getUiMutedMap())[id] ?? false;
+}
+
+export async function setUiMuted(id: string, muted: boolean): Promise<void> {
+  const map = await getUiMutedMap();
+  map[id] = muted;
+  await setStored(KEYS.uiMuted, map);
+}
+
+// There is deliberately no `isUiVisible()` combining the two flags. It existed briefly and ended up
+// with zero callers, because the flags are enforced at different layers and must stay that way:
+// activation decides whether a Module DRAWS at all, mute decides whether what it drew is DISPLAYED
+// (utils/ui-compositor.ts, via a DOM attribute the USER_SCRIPT world can also read). Collapsing them
+// into one question at the call site is what made the valve one-way — hiding tore the surfaces down
+// and nothing could put an uploaded script's UI back.
 
 /**
  * What the user approved for one uploaded script, plus the hash of the source they approved it for

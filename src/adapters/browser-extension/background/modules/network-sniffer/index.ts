@@ -337,7 +337,7 @@ async function describeTabContext(tabId: number, initiator: string): Promise<{ t
 }
 
 /** Fire-and-forget push to a specific tab telling its top-frame content script new media was
- * found — shows the floating icon (docs/ROADMAP.md §6.1's `showFloatingIcon`), which opens the
+ * found — shows the floating icon (docs/ROADMAP.md §6.1, now utils/ui-compositor.ts's `icon`), which opens the
  * Side Panel on click. docs/ROADMAP.md §6.3 widened this to fire from every `addDetectedMedia`
  * success path (webRequest, report-main-world-media, report-dom-media), not just `webRequest` as
  * before — the floating icon now stands in for what used to be the DOM-detection path's own local
@@ -484,7 +484,7 @@ export const NetworkSnifferModule: Module<CollectionCommand<DetectedMedia> | und
   description: 'Passively detects video/audio/stream URLs requested by pages you visit, and lets you download them.',
   needs: ['bus', 'cache'],
   // docs/ROADMAP.md #4.2 — this Module also pushes an on-page floating widget (utils/
-  // floating-widget.ts) when it detects media, instead of only surfacing results in the Dashboard.
+  // ui-compositor.ts) when it detects media, instead of only surfacing results in the Dashboard.
   uiParadigm: 'float-widget',
   uiSchema: {
     kind: 'collection',

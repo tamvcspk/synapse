@@ -39,6 +39,10 @@ export interface RegistryEntry {
   /** Mirrors Module.uiParadigm (docs/ROADMAP.md §4.2) — presence of `'float-widget'` is what
    * drives the popup's on-page-alerts hint. Absent for a Module that declares no paradigm. */
   uiParadigm?: 'none' | 'dedicated-page' | 'float-widget' | 'action-button';
+  /** The "hide UI" valve (docs/ROADMAP.md §11.4) — a SEPARATE axis from `active`, on purpose: a
+   * Module whose logic is wanted but whose on-page widgets are in the way should be silenceable
+   * without being switched off. Defaults to `false`. */
+  uiHidden: boolean;
 }
 
 export interface UploadResult {
@@ -65,4 +69,7 @@ export interface ModuleRegistryService {
   /** Toggles one sub-module's bypass state on a Composite Module (docs/ROADMAP.md #3). Only
    * meaningful for a `RegistryEntry` whose `subModules` includes `subId`. */
   setSubModuleActive(id: string, subId: string, active: boolean): Promise<void>;
+  /** Hides or restores one Module's in-page UI without touching whether it runs
+   * (docs/ROADMAP.md §11.4). */
+  setUiHidden(id: string, hidden: boolean): Promise<void>;
 }

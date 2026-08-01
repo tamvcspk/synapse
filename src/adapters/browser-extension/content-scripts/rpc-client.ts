@@ -1,5 +1,6 @@
 import type { RpcRequest, RpcResponse } from '../../../kernel/rpc';
 import type { SynapseApi } from '../../../kernel/synapse-api';
+import { createUiSurface } from '../utils/ui-compositor';
 
 /**
  * Content-script-side transport for `synapseApi` (docs/ROADMAP.md §11.3) — the counterpart to
@@ -34,7 +35,12 @@ async function call(
 }
 
 /** Builds `ctx.api` for a bundled dom Module, backed by the RPC bridge. Calls are still checked
- * against the Module's granted scopes in background — a content script is not a trust boundary. */
+ * against the Module's granted scopes in background — a content script is not a trust boundary.
+ *
+ * `ui` is the exception that proves the shape: it does NOT go over the bridge (docs/ROADMAP.md
+ * §11.0 — an engine behind a message boundary cannot take `onClick`), so it is wired straight to the
+ * in-world compositor here, with the same `moduleId` this function was given. Identity still comes
+ * from the caller of THIS function (the composition root), never from the Module's own code. */
 export function buildDomModuleApi(moduleId: string): SynapseApi {
   return {
     storage: {
@@ -43,5 +49,6 @@ export function buildDomModuleApi(moduleId: string): SynapseApi {
       remove: (key) => call(moduleId, 'storage', 'remove', [key]).then(() => undefined),
       keys: () => call(moduleId, 'storage', 'keys', []) as Promise<string[]>,
     },
+    ui: createUiSurface(moduleId),
   };
 }

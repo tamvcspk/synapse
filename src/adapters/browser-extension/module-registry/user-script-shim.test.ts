@@ -1,5 +1,6 @@
 import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
+import { API_METHODS } from '../../../kernel/scopes';
 import { buildShimSource } from './user-script-shim';
 
 /**
@@ -151,6 +152,55 @@ describe('buildShimSource', () => {
     it('rejects rather than hanging when nothing answers at all', async () => {
       const { result } = await runWith(() => undefined);
       expect(result.error).toMatch(/no response from the extension background/);
+    });
+  });
+
+  describe('ui (in-world namespace)', () => {
+    /** Runs one script and hands back the `ctx.api` its `run()` was given. */
+    async function captureApi(moduleId: string, context = sharedRealm()): Promise<any> {
+      vm.runInContext(
+        buildShimSource(
+          moduleId,
+          `globalThis.__synapseModule = { id: ${JSON.stringify(moduleId)}, run: (input, ctx) => { globalThis['captured_' + ${JSON.stringify(moduleId)}] = ctx.api; } };`,
+        ),
+        context,
+      );
+      // run() is invoked from a `.then()`, so it lands one microtask after evaluation.
+      await new Promise((resolve) => setImmediate(resolve));
+      return (context as any)[`captured_${moduleId}`];
+    }
+
+    it('exposes exactly the ui methods the catalog declares in-world', async () => {
+      // The shim writes the DOM half of the compositor a second time (it cannot import the
+      // extension's bundle), so the one thing that can drift is WHICH methods exist. Adding an entry
+      // to API_METHODS and forgetting this file fails here rather than at some user's console.
+      const expected = API_METHODS.filter((m) => m.namespace === 'ui' && m.transport === 'in-world')
+        .map((m) => m.method)
+        .sort();
+      const api = await captureApi('uuid-ui');
+
+      expect(Object.keys(api.ui).sort()).toEqual(expected);
+      expect(expected.length).toBeGreaterThan(0);
+    });
+
+    it('gives two scripts sharing one world two different ui objects', async () => {
+      // The same identity property the storage tests pin: a surface handle is bound to one script,
+      // so neither can address the other's UI even by guessing its ids.
+      const context = sharedRealm();
+      const a = await captureApi('uuid-a', context);
+      const b = await captureApi('uuid-b', context);
+
+      expect(a.ui).not.toBe(b.ui);
+    });
+
+    it('makes the global guard THROW for ui rather than return a promise', async () => {
+      const context = sharedRealm();
+      await captureApi('uuid-a', context);
+      const guard = (context as any).synapseApi;
+
+      // Synchronous methods must fail synchronously: a rejected promise would read as truthy to a
+      // script that checks the return value of toast() before assuming it drew something.
+      expect(() => guard.ui.toast({ id: 'x', message: 'hi' })).toThrow(/not a global/);
     });
   });
 

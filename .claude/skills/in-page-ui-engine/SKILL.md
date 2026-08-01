@@ -1,6 +1,6 @@
 ---
 name: in-page-ui-engine
-description: Build or extend the in-page UI a Module/user script renders onto a host page — the Shadow-DOM host, styling mechanism, reactivity, and the declarative panel schema behind `synapseApi.ui.*`. Use when adding an on-page widget/panel/overlay, writing the component library, or changing utils/floating-widget.ts. For *which* surface a feature belongs on (popup vs dashboard vs in-page vs side panel), use `ui-surface-placement` first.
+description: Build or extend the in-page UI a Module/user script renders onto a host page — the Shadow-DOM host, styling mechanism, reactivity, per-owner surface allocation, and the declarative panel schema behind `synapseApi.ui.*`. Use when adding an on-page widget/panel/overlay, writing the component library, or changing utils/ui-compositor.ts or shared/ui/surface-policy.ts. For *which* surface a feature belongs on (popup vs dashboard vs in-page vs side panel), use `ui-surface-placement` first.
 ---
 
 # In-page UI engine
@@ -10,11 +10,18 @@ to render it once that decision is made.
 
 ## Guard
 
-As of docs/ROADMAP.md §11 the declarative engine is **planned, not built**. What exists:
-`utils/floating-widget.ts` — an imperative Shadow-DOM host with three fixed shapes (toast card,
-anchored badge, floating icon), styled by direct CSSOM assignment. §11 Phase 4 wraps it as
-`synapseApi.ui.*`; Phase 6 adds the declarative layer. Don't build the declarative engine before
-the imperative wrapper has a real consumer.
+**Built (§11 Phase 3):** `utils/ui-compositor.ts` — `createUiSurface(ownerId)` with three fixed
+imperative shapes (toast, anchored badge, floating icon), one constructed stylesheet, per-owner
+quota, and a DOM-expressed hide valve. Exposed as `synapseApi.ui.*`, which is the only
+`transport: 'in-world'` namespace: it takes closures and returns synchronously. Pure decisions live
+in `shared/ui/surface-policy.ts` (the only part testable under `environment: 'node'`).
+
+**Not built:** the declarative engine (§11 Phase 6) and per-owner nested shadow roots. Those two are
+one job — nested roots exist to keep one script's CSS out of another's, and no script supplies CSS
+until the declarative layer does. Don't build either before Phase 3's imperative API has proven the
+demand with real consumers.
+
+`utils/floating-widget.ts` is **gone**. If you find a reference to it, it is stale.
 
 ## Where the engine runs — decided
 
@@ -58,27 +65,41 @@ genuinely need to attach to the page.
 
 Independent scripts sharing one surface will overwrite each other, fight for space, and break
 layout. **Same root cause as the `cache` privilege-escalation hole: caller-supplied identity in a
-shared namespace.** `floating-widget.ts` has exactly that today — one shared shadow root, one toast
-stack, one icon row, keyed by a caller-passed `options.id`, so any caller can `dismiss` another's
-widget.
+shared namespace.** The retired `floating-widget.ts` had exactly that — one shared shadow root, one
+toast stack, one icon row, keyed by a caller-passed `options.id`, so any caller could `dismiss`
+another's widget. Phase 3 replaced it; the lesson is what generalises.
 
 The model: **scripts never receive a node in shared space.** They request a *surface*; Core
 allocates and positions it.
 
-- **Identity is assigned by the Platform, never passed by the caller.** `moduleId` comes from the
-  transport. `ui.toast({id:'x'})` → internal key `<moduleId>:x`. The API only ever returns the
-  caller's own surfaces, so one script cannot address another's.
-- **One shadow root per script**, not one shared. Buys CSS separation between scripts, atomic
-  teardown of a script's whole UI, harmless id collisions, and a per-surface stacking context so
-  z-order is Core's decision rather than "whoever rendered first".
-- **Quota + deterministic order** instead of first-come-first-served: persistent surfaces (icon,
-  panel) default to 1 per script with a hard cap; toasts are queued and rate-limited per script;
-  ordering follows script name or user configuration, **never creation order**.
-- **Core owns lifecycle.** A surface is bound to `(moduleId, tabId, page load)`; deactivating or
-  deleting a script, or navigating, removes its host. Container gets `pointer-events: none` with
-  `auto` on children so an empty surface never eats clicks meant for the page or another surface.
-- **Ship a per-script "hide UI" toggle** separate from deactivate. A useful script with annoying UI
-  should be muteable without being disabled.
+- **Identity is assigned by the Platform, never passed by the caller.** `ownerId` comes from the
+  composition root (a build-time Module id, or the shim's per-script closure constant), so
+  `ui.toast({id:'x'})` becomes the key `<ownerId>:x`. Ask about ownership only through
+  `isKeyOf()` — never rebuild the prefix by hand, because a separator mismatch fails *silently*.
+- **Quota + deterministic order** instead of first-come-first-served: icons 2/script, toasts 3 plus
+  a token bucket, badges 32. A refusal returns `false`; never a silent no-op.
+- **Core owns lifecycle.** Deactivating a script, muting it, or navigating removes its surfaces. The
+  root gets `pointer-events: none` with `auto` on real widgets, so an empty surface never eats
+  clicks meant for the page or another script.
+- **The "hide UI" valve is separate from deactivate** (`synapse:ui-muted`, distinct from
+  `synapse:activation`). A useful script with annoying UI should be muteable without being disabled.
+
+### The constraint that shapes everything: two worlds, no shared JS state
+
+Bundled Modules run in the ISOLATED content-script world; uploaded scripts run in USER_SCRIPT. They
+share **no** registry, counter, or lock — only the document. So anything cross-cutting must be
+expressed in the DOM and re-derived from it:
+
+- The host, zones and stylesheet are shared via `#synapse-ui-root`; whichever world arrives first
+  creates what is missing and the other fills the gap (`data-styled`).
+- **Order comes from sorting owner ids**, never creation order — creation order across two worlds is
+  a race by definition. (Today that means uuid order for uploaded scripts; keying off a stable
+  display name waits on §12.1.)
+- The mute flag lives on a `data-hidden-owners` attribute, because USER_SCRIPT world has no
+  `chrome.storage` and an async lookup would let a script draw before the flag arrived.
+
+Anything you add that two worlds must agree on has to follow the same rule, or it silently becomes
+"whoever ran first wins".
 
 **Do not promise event isolation for container A.** A script can `document.addEventListener('click')`
 and observe clicks in another script's UI; that cannot be prevented, for the same reason `page.dom`

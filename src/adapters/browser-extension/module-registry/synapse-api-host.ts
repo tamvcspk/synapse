@@ -1,4 +1,4 @@
-import type { SynapseApi } from '../../../kernel/synapse-api';
+import type { SynapseApi, SynapseUiApi } from '../../../kernel/synapse-api';
 import { createScriptStorage } from './script-storage';
 
 /**
@@ -18,8 +18,34 @@ import { createScriptStorage } from './script-storage';
  * The namespacing in `script-storage.ts`, by contrast, applies to every caller including bundled
  * Modules — it isn't a permission check, it's what makes the store's keys unforgeable.
  */
+/**
+ * `ui` is the one namespace that is NOT transport-shaped but context-shaped: it renders into the
+ * caller's own DOM, and both callers of `createSynapseApi` (the ServiceInjector factory for
+ * background Modules, and `rpc-handler.ts`) live in the service worker, where there is none.
+ *
+ * A stub that throws with the reason, rather than a no-op or a silently absent namespace: a
+ * background Module reaching for `ctx.api.ui` has a real design error (its UI belongs on a page,
+ * see the `ui-surface-placement` skill), and the failure should say so. Code that DOES run on a page
+ * gets the real compositor from `content-scripts/rpc-client.ts`.
+ *
+ * `rpc-handler.ts` never reaches this: `ui.*` is `transport: 'in-world'`, so `scopeForApiMethod`
+ * refuses to resolve it and the call is rejected at the boundary before an implementation is looked
+ * up at all.
+ */
+function backgroundUiStub(): SynapseUiApi {
+  const unavailable = (): never => {
+    throw new Error(
+      'synapseApi.ui is only available to code running on a page. This Module runs in the ' +
+        'background service worker, which has no DOM — surface it from a content-script Module, or ' +
+        'use the Side Panel / Dashboard instead.',
+    );
+  };
+  return { toast: unavailable, icon: unavailable, badge: unavailable, dismiss: unavailable, clear: unavailable };
+}
+
 export function createSynapseApi(moduleId: string): SynapseApi {
   return {
     storage: createScriptStorage(moduleId),
+    ui: backgroundUiStub(),
   };
 }

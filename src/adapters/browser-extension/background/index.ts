@@ -165,8 +165,8 @@ chrome.runtime.onMessage.addListener((message: { type?: string } | undefined, _s
   return true;
 });
 
-// docs/ROADMAP.md §6.2, generalized §9.1 — a floating icon (utils/floating-widget.ts's
-// showFloatingIcon, wired up in content-scripts/index.ts) can't call chrome.sidePanel itself
+// docs/ROADMAP.md §6.2, generalized §9.1 — a floating icon (utils/ui-compositor.ts's
+// `icon` surface, wired up in content-scripts/index.ts) can't call chrome.sidePanel itself
 // (content scripts don't have that API), so it messages background to open it for its own tab.
 // One shared listener/message for every module with a floating-icon trigger (network-sniffer's
 // media icon, reader-mode-converter's Convert/Crawl icons) — the panel itself is a single page

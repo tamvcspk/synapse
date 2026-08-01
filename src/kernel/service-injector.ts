@@ -49,7 +49,16 @@ export class ServiceInjector {
  * whole point of §11.3 is that permissions and capabilities fail loudly.
  */
 function unavailableSynapseApi(moduleId: string): SynapseApi {
-  const fail = (): Promise<never> =>
-    Promise.reject(new Error(`synapseApi is not available in this context (module "${moduleId}")`));
-  return { storage: { get: fail, set: fail, remove: fail, keys: fail } };
+  const message = `synapseApi is not available in this context (module "${moduleId}")`;
+  const fail = (): Promise<never> => Promise.reject(new Error(message));
+  // `ui` is synchronous (it never crosses a transport — see synapse-api.ts), so its unavailable
+  // form has to THROW rather than reject: returning a rejected promise from a method typed as
+  // returning `boolean` would be a lie the caller could not act on.
+  const failSync = (): never => {
+    throw new Error(message);
+  };
+  return {
+    storage: { get: fail, set: fail, remove: fail, keys: fail },
+    ui: { toast: failSync, icon: failSync, badge: failSync, dismiss: failSync, clear: failSync },
+  };
 }

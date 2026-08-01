@@ -1,3 +1,10 @@
+import {
+  KEY_SEPARATOR,
+  SURFACE_QUOTA,
+  TOAST_BURST,
+  TOAST_REFILL_MS,
+} from '../../../shared/ui/surface-policy';
+
 /**
  * Builds the plain-JS source registered via chrome.userScripts for an uploaded module.
  *
@@ -22,6 +29,203 @@
  * Uploaded scripts declare themselves via `globalThis.__synapseModule = { id, scopes, run }` since
  * there's no ESM import available inside USER_SCRIPT-world code (see docs/user-scripts.md).
  */
+
+/**
+ * `synapseApi.ui` for the USER_SCRIPT world — the one namespace that is NOT sent to the background.
+ *
+ * docs/ROADMAP.md §11.0 settled that the UI engine runs in the same world as the code declaring the
+ * UI, because an engine behind a message boundary cannot accept an `onClick` closure. A user script
+ * cannot import `utils/ui-compositor.ts` (that module lives in the extension's ISOLATED bundle and
+ * there is no ESM in this world), so the DOM half is written out again here.
+ *
+ * **That duplication is deliberate and bounded, and it is bounded on purpose:**
+ * - Every *value* is interpolated from `shared/ui/surface-policy.ts` below, so the quota, the rate
+ *   limit and the key separator cannot drift — only the DOM calls are written twice.
+ * - `user-script-shim.test.ts` asserts this source exposes exactly the `ui` methods `API_METHODS`
+ *   lists as `transport: 'in-world'`, so adding one to the catalog and forgetting it here is a
+ *   failing test rather than a method that silently does not exist for uploaded scripts.
+ * - The *styling* is not duplicated: the content script owns the constructed stylesheet, and this
+ *   code only creates elements carrying the same class names. If it wins the race and builds the
+ *   host first, it deliberately leaves `data-styled` unset so the content script fills it in.
+ */
+function uiSource(): string {
+  return `
+const __SYNAPSE_UI_ROOT_ID = 'synapse-ui-root';
+
+function __synapseUiRoot() {
+  let host = document.getElementById(__SYNAPSE_UI_ROOT_ID);
+  if (!host) {
+    host = document.createElement('div');
+    host.id = __SYNAPSE_UI_ROOT_ID;
+    document.documentElement.appendChild(host);
+    const all = document.querySelectorAll('#' + __SYNAPSE_UI_ROOT_ID);
+    if (all.length > 1 && all[0] !== host) { host.remove(); host = all[0]; }
+  }
+  const root = host.shadowRoot || host.attachShadow({ mode: 'open' });
+  // Styling is the content script's job (it holds the stylesheet). Only the structure is ensured
+  // here, in case a user script draws before the content script has run.
+  for (const zone of ['icons', 'toasts', 'badges']) {
+    if (!root.querySelector('.syn-zone[data-zone="' + zone + '"]')) {
+      const el = document.createElement('div');
+      el.className = 'syn-zone';
+      el.setAttribute('data-zone', zone);
+      root.appendChild(el);
+    }
+  }
+  return root;
+}
+
+function __synapseUiHidden(ownerId) {
+  const raw = document.getElementById(__SYNAPSE_UI_ROOT_ID);
+  const list = raw ? (raw.getAttribute('data-hidden-owners') || '').split(' ') : [];
+  return list.indexOf(ownerId) !== -1;
+}
+
+function __synapseUiOwner(zone, ownerId) {
+  const parent = __synapseUiRoot().querySelector('.syn-zone[data-zone="' + zone + '"]');
+  const existing = parent.querySelector(':scope > [data-owner="' + CSS.escape(ownerId) + '"]');
+  if (existing) return existing;
+  const el = document.createElement('div');
+  el.className = 'syn-owner';
+  el.setAttribute('data-owner', ownerId);
+  // Born hidden if the owner is currently muted — the valve is a display state, not a refusal, so
+  // drawing while muted must produce a surface that simply is not shown yet.
+  if (__synapseUiHidden(ownerId)) el.setAttribute('data-hidden', '');
+  // Sorted insertion, NOT append: order must not depend on which world drew first.
+  const siblings = Array.prototype.map.call(parent.children, function (c) { return c.getAttribute('data-owner') || ''; });
+  let index = siblings.length;
+  for (let i = 0; i < siblings.length; i++) { if (siblings[i] > ownerId) { index = i; break; } }
+  parent.insertBefore(el, parent.children[index] || null);
+  return el;
+}
+
+const __synapseUi = (function (ownerId) {
+  const ZONE = { icon: 'icons', toast: 'toasts', badge: 'badges' };
+  const QUOTA = { icon: ${SURFACE_QUOTA.icon}, toast: ${SURFACE_QUOTA.toast}, badge: ${SURFACE_QUOTA.badge} };
+  const SEP = ${JSON.stringify(KEY_SEPARATOR)};
+  let tokens = ${TOAST_BURST};
+  let tokensAt = Date.now();
+  const badges = new Map();
+  let raf = null;
+
+  function key(id) { return ownerId + SEP + id; }
+  function container(kind) {
+    const root = document.getElementById(__SYNAPSE_UI_ROOT_ID);
+    const shadow = root && root.shadowRoot;
+    return shadow ? shadow.querySelector('.syn-zone[data-zone="' + ZONE[kind] + '"] > [data-owner="' + CSS.escape(ownerId) + '"]') : null;
+  }
+  function existing(kind, id) {
+    const c = container(kind);
+    return c ? c.querySelector('[data-key="' + CSS.escape(key(id)) + '"]') : null;
+  }
+  function acquire(kind, id, build) {
+    const found = existing(kind, id);
+    if (found) return found;
+    const c = container(kind);
+    if (c && c.querySelectorAll('[data-key]').length >= QUOTA[kind]) return null;
+    const el = build();
+    el.setAttribute('data-key', key(id));
+    __synapseUiOwner(ZONE[kind], ownerId).appendChild(el);
+    return el;
+  }
+  function track() {
+    badges.forEach(function (b, k) {
+      if (!b.target.isConnected || !b.el.isConnected) { b.el.remove(); badges.delete(k); return; }
+      const rect = b.target.getBoundingClientRect();
+      const visible = rect.width > 0 && rect.height > 0;
+      b.el.style.display = visible ? '' : 'none';
+      if (visible) { b.el.style.top = (rect.top + 6) + 'px'; b.el.style.left = (rect.left + 6) + 'px'; }
+    });
+    raf = badges.size > 0 ? requestAnimationFrame(track) : null;
+  }
+
+  return {
+    toast: function (options) {
+      const found = existing('toast', options.id);
+      if (!found) {
+        const now = Date.now();
+        tokens = Math.min(${TOAST_BURST}, tokens + Math.max(0, now - tokensAt) / ${TOAST_REFILL_MS});
+        tokensAt = now;
+        if (tokens < 1) return false;
+        tokens -= 1;
+      }
+      const card = found || acquire('toast', options.id, function () {
+        const el = document.createElement('div');
+        el.className = 'syn-toast';
+        const message = document.createElement('span');
+        message.className = 'syn-toast-message';
+        el.appendChild(message);
+        const action = document.createElement('button');
+        action.type = 'button';
+        action.className = 'syn-toast-action';
+        el.appendChild(action);
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'syn-toast-close';
+        close.textContent = '\\u00d7';
+        close.onclick = function () { el.remove(); };
+        el.appendChild(close);
+        return el;
+      });
+      if (!card) return false;
+      card.querySelector('.syn-toast-message').textContent = options.message;
+      const action = card.querySelector('.syn-toast-action');
+      if (options.onAction) {
+        action.textContent = options.actionLabel || 'View';
+        action.style.display = '';
+        action.onclick = options.onAction;
+      } else {
+        action.style.display = 'none';
+        action.onclick = null;
+      }
+      return true;
+    },
+    icon: function (options) {
+      const el = acquire('icon', options.id, function () {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'syn-icon';
+        return b;
+      });
+      if (!el) return false;
+      el.textContent = options.label;
+      if (options.title !== undefined) el.title = options.title;
+      el.onclick = options.onClick;
+      return true;
+    },
+    badge: function (options) {
+      const el = acquire('badge', options.id, function () {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'syn-badge';
+        return b;
+      });
+      if (!el) return false;
+      el.textContent = options.label;
+      el.title = options.title || '';
+      el.onclick = options.onClick;
+      badges.set(key(options.id), { el: el, target: options.target });
+      if (raf === null) raf = requestAnimationFrame(track);
+      return true;
+    },
+    dismiss: function (kind, id) {
+      const el = existing(kind, id);
+      if (el) el.remove();
+      badges.delete(key(id));
+    },
+    clear: function () {
+      ['icons', 'toasts', 'badges'].forEach(function (zone) {
+        const root = document.getElementById(__SYNAPSE_UI_ROOT_ID);
+        const shadow = root && root.shadowRoot;
+        const c = shadow && shadow.querySelector('.syn-zone[data-zone="' + zone + '"] > [data-owner="' + CSS.escape(ownerId) + '"]');
+        if (c) c.remove();
+      });
+      badges.forEach(function (_b, k) { if (k.indexOf(ownerId + SEP) === 0) badges.delete(k); });
+    },
+  };
+})(__SYNAPSE_MODULE_ID__);
+`.trim();
+}
 
 /** Injected before the user's code: the RPC transport plus the `synapseApi` facade. Must stay in
  * sync with `kernel/synapse-api.ts` (the interface) and `kernel/scopes.ts`'s `API_METHODS` (which
@@ -53,6 +257,8 @@ function __synapseCall(namespace, method, args) {
   });
 }
 
+${uiSource()}
+
 const synapseApi = {
   storage: {
     get: function (key) { return __synapseCall('storage', 'get', [key]); },
@@ -60,6 +266,7 @@ const synapseApi = {
     remove: function (key) { return __synapseCall('storage', 'remove', [key]); },
     keys: function () { return __synapseCall('storage', 'keys', []); },
   },
+  ui: __synapseUi,
 };
 
 // This object is per-script (it closes over __SYNAPSE_MODULE_ID__) and is handed to run() as
@@ -76,12 +283,29 @@ if (!globalThis.synapseApi) {
       'run(input, ctx).'
     ));
   };
+  // ui's methods are synchronous, so the guard has to THROW rather than return a rejected promise —
+  // a script testing the return value of synapseApi.ui.toast(...) in an if would otherwise get a
+  // truthy Promise and carry on believing it had drawn something.
+  const __synapseWrongHandleSync = function () {
+    throw new Error(
+      'synapseApi is not a global. Several user scripts share one USER_SCRIPT world, so a global ' +
+      'cannot identify which script is calling — use the ctx.api argument passed to your ' +
+      'run(input, ctx).'
+    );
+  };
   globalThis.synapseApi = {
     storage: {
       get: __synapseWrongHandle,
       set: __synapseWrongHandle,
       remove: __synapseWrongHandle,
       keys: __synapseWrongHandle,
+    },
+    ui: {
+      toast: __synapseWrongHandleSync,
+      icon: __synapseWrongHandleSync,
+      badge: __synapseWrongHandleSync,
+      dismiss: __synapseWrongHandleSync,
+      clear: __synapseWrongHandleSync,
     },
   };
 }

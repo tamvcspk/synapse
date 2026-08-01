@@ -1,6 +1,6 @@
 import { classifyMediaUrl } from '../../../shared/media-url-matcher';
 import { createMainWorldChannel } from '../utils/main-world/event-channel';
-import { showAnchoredBadge } from '../utils/floating-widget';
+import { createUiSurface } from '../utils/ui-compositor';
 import {
   MAIN_WORLD_REPORT_CHANNEL_ID,
   MAIN_WORLD_CORRELATION_CHANNEL_ID,
@@ -17,7 +17,7 @@ import {
  * hasn't been played/requested yet (lazy players, `preload="none"`).
  *
  * docs/ROADMAP.md #4.2 — also shows a small download badge anchored to each detected element's
- * corner (utils/floating-widget.ts's showAnchoredBadge), purely locally: this content script
+ * corner (utils/ui-compositor.ts's `badge`), purely locally: this content script
  * already holds the actual DOM element and its resolved URL, so there's no need for a background
  * round trip just to decide "show a widget here" the way the webRequest-only path needs (that path
  * has no DOM visibility at all — see network-sniffer/index.ts's notifyTabMediaFound, which is the
@@ -103,11 +103,17 @@ function collectCandidates(): CandidateMedia[] {
   return candidates;
 }
 
+// One surface for this owner (docs/ROADMAP.md §11.4). The id is the Module's, supplied here at the
+// composition point — never passed in by whatever calls showBadges — so nothing downstream can
+// address another owner's UI. Badge ids are local to this surface, hence the bare `url`: two owners
+// badging the same URL get two distinct keys.
+const ui = createUiSurface('network-sniffer');
+
 function showBadges(candidates: CandidateMedia[]): void {
   for (const { element, url, correlated } of candidates) {
     if (!correlated && !classifyMediaUrl(url)) continue;
-    showAnchoredBadge({
-      id: `network-sniffer:${url}`,
+    ui.badge({
+      id: url,
       target: element,
       label: '⬇',
       ...(correlated ? { title: "Best-effort match — this player streams via a technique we can't inspect directly" } : {}),

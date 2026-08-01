@@ -62,7 +62,10 @@ function scopeReference(): string {
 
   lines.push(' * ## Methods', ' *');
   for (const method of API_METHODS) {
-    lines.push(` * - \`synapseApi.${method.namespace}.${method.signature}\` — requires \`${method.scope}\`.`);
+    // Whether a call leaves the page matters to an author: in-world methods are synchronous and
+    // take callbacks, RPC ones are async and drop every function they are handed.
+    const note = method.transport === 'in-world' ? ' (runs in your own world — synchronous)' : '';
+    lines.push(` * - \`synapseApi.${method.namespace}.${method.signature}\` — requires \`${method.scope}\`${note}.`);
     for (const line of wrap(method.description, 92)) lines.push(` *   ${line}`);
   }
   lines.push(' */');

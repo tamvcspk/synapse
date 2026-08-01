@@ -1,10 +1,11 @@
 import { registerDomModule } from './relay';
 import { buildDomModuleApi } from './rpc-client';
 import { BUNDLED_MODULES } from '../module-registry/bundled-modules';
-import { isModuleActive } from '../module-registry/storage';
+import { getUiMutedMap, isModuleActive } from '../module-registry/storage';
 import { installStorageToMainWorldRelay } from '../utils/main-world/storage-relay';
 import { createMainWorldChannel } from '../utils/main-world/event-channel';
-import { showFloatingIcon } from '../utils/floating-widget';
+import { createUiSurface, installUiStyles, setOwnerUiHidden } from '../utils/ui-compositor';
+import { onUiVisibilityChanged } from '../module-registry/ui-visibility';
 import { MOCK_CONFIG_CHANNEL_ID, MOCK_CONFIG_STORAGE_KEY } from '../background/modules/http-error-mocker/constants';
 import { MAIN_WORLD_REPORT_CHANNEL_ID } from '../background/modules/network-sniffer/constants';
 
@@ -23,12 +24,38 @@ installStorageToMainWorldRelay(MOCK_CONFIG_STORAGE_KEY, MOCK_CONFIG_CHANNEL_ID);
 // toast, for network-sniffer's push (background/modules/network-sniffer/index.ts's
 // notifyTabMediaFound). Registered here (not frame-media-observer.ts) for the same top-frame-only
 // reason as registerDomModule above: showing one icon per page, not one per iframe. No
-// count/message — see showFloatingIcon's doc comment for why. Click messages background to open
+// count/message — see the `icon` doc comment in ui-compositor.ts for why. Click messages background to open
 // the Side Panel (synapse:open-side-panel, background/index.ts) rather than a real
 // `chrome.sidePanel` call — content scripts don't have that API at all.
+//
+// docs/ROADMAP.md §11.4 — each owner gets its OWN surface, constructed here (the composition root)
+// from a build-time Module id. That id is the only identity the compositor trusts; nothing below
+// can name another owner's surface, which is what the old shared `showFloatingIcon(id)` allowed.
+const snifferUi = createUiSurface('network-sniffer');
+const readerUi = createUiSurface('reader-mode-converter');
+
+// UNCONDITIONAL, and it must stay that way. This content script is the only party that holds the
+// compositor's stylesheet, and uploaded scripts (USER_SCRIPT world) rely on it having been
+// installed. Making it conditional on any bundled Module actually drawing — which is what the code
+// did implicitly before — leaves every uploaded script's UI unstyled on the many pages where no
+// bundled Module has anything to show. See installUiStyles' doc comment.
+installUiStyles();
+
+// Seed the hide flags into the DOM as early as possible. The USER_SCRIPT world cannot read
+// `chrome.storage` at all, so this content script is the only party that can publish them — and it
+// has to happen without waiting for a change event, or a muted script would draw normally on every
+// fresh page load. The read is async, so a surface created in the meantime can slip through; that
+// is why `setOwnerUiHidden` also marks containers that already exist, making the late arrival
+// self-healing rather than permanent.
+void (async () => {
+  for (const [id, muted] of Object.entries(await getUiMutedMap())) {
+    if (muted) setOwnerUiHidden(id, true);
+  }
+})();
+
 function showNetworkSnifferIcon(): void {
-  showFloatingIcon({
-    id: 'network-sniffer',
+  snifferUi.icon({
+    id: 'open-panel',
     label: '⬇',
     title: 'Media detected on this page — click to view',
     onClick: () => {
@@ -96,8 +123,8 @@ for (const mod of domModules.filter((mod) => !AUTORUN_EXCLUDED.has(mod.id))) {
 }
 
 // docs/ROADMAP.md §9.1 — Reader Mode Converter's trigger: two floating icons (top-right, stacked
-// alongside network-sniffer's via the same utils/floating-widget.ts, distinct ids so they don't
-// collide), always shown while the module is active (unlike network-sniffer's icon, there's no
+// alongside network-sniffer's in the same compositor zone — different OWNERS now, so ids cannot
+// collide at all), always shown while the module is active (unlike network-sniffer's icon, there's no
 // "detected" event to gate on here — "can I convert this page" is always true). Replaces the old
 // Popup action-button trigger entirely (docs/ROADMAP.md §9.1's evaluation: a Popup-triggered crawl
 // can outlive the popup and also backgrounds the very tab doing the crawling). Runs `run()`
@@ -130,14 +157,16 @@ function showReaderModeIcons(): void {
     void runReaderModeJob(mod, actionId);
   };
 
-  showFloatingIcon({
-    id: 'reader-mode-convert',
+  // Two icons is exactly the compositor's per-owner icon quota (shared/ui/surface-policy.ts) — the
+  // cap was set to 2 BECAUSE of this consumer, not the other way round.
+  readerUi.icon({
+    id: 'convert',
     label: '📄',
     title: 'Convert this page to Markdown',
     onClick: trigger('convert-page'),
   });
-  showFloatingIcon({
-    id: 'reader-mode-crawl',
+  readerUi.icon({
+    id: 'crawl',
     label: '🕸️',
     title: 'Crawl & convert this whole site',
     onClick: trigger('crawl-site'),
@@ -147,3 +176,25 @@ function showReaderModeIcons(): void {
 void (async () => {
   if (await isModuleActive('reader-mode-converter')) showReaderModeIcons();
 })();
+
+// docs/ROADMAP.md §11.4 — Core owns the surface lifecycle, so switching a Module off (or muting just
+// its UI) has to take the UI down on pages that are ALREADY open, not only on the next load. Both
+// signals arrive on the same storage change, so they are handled in one place: mute is the valve
+// that leaves the Module running, deactivate stops it entirely.
+onUiVisibilityChanged((moduleId, visible) => {
+  // `setOwnerUiHidden`, not a bare `destroyUiSurface`: the flag has to be written to the DOM or it
+  // never reaches the USER_SCRIPT world, which has no `chrome.storage` to read it from. Tearing the
+  // surfaces down without recording the flag looked like it worked only because the uploaded
+  // scripts in the test fixture had already finished drawing — their next `ui.toast()` would have
+  // returned `true` and drawn again, valve or no valve.
+  setOwnerUiHidden(moduleId, !visible);
+  if (!visible) return;
+
+  // Un-hiding needs no redraw — the surfaces were never destroyed, only hidden — so this call is
+  // purely for the case where the page loaded while the Module was hidden and its icons were
+  // therefore never drawn at all. `icon()` returns the existing element when there is one, so
+  // running it again costs nothing. network-sniffer is deliberately absent: its icon means "media
+  // was found here", and conjuring one on unmute would assert something untrue until the next
+  // detection.
+  if (moduleId === 'reader-mode-converter') showReaderModeIcons();
+});

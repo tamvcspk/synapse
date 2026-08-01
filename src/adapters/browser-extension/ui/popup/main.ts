@@ -60,6 +60,7 @@ function navigate(next: View): void {
 
 const handlers: RouterHandlers = {
   onToggle: handleToggle,
+  onToggleUi: handleToggleUi,
   onGrant: handleGrant,
   onUpload: () => fileInput.click(),
   onRefresh: handleRefresh,
@@ -160,6 +161,12 @@ function handleToggle(entry: RegistryEntry): void {
     return;
   }
   void registry.activate(entry.id).then(load);
+}
+
+/** The "hide UI" valve (docs/ROADMAP.md §11.4) — separate from the on/off switch above on purpose:
+ * this leaves the Module running and only takes its on-page widgets away. */
+function handleToggleUi(entry: RegistryEntry): void {
+  void registry.setUiHidden(entry.id, !entry.uiHidden).then(load);
 }
 
 async function handleConsentApprove(): Promise<void> {

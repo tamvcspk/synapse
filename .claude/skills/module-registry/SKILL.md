@@ -46,6 +46,31 @@ What that means concretely, since a lot of older wording elsewhere assumes other
   other script's calls went out under *that* script's `moduleId` and grants. The name now holds a
   stub that rejects with an explanation.
 
+## Direction of travel — §12 Script Studio (planned, not built)
+
+The registry's *permission* model is settled (above). Its **lifecycle** model is not, and
+docs/ROADMAP.md §12 is where that plan lives. Read it before touching upload, the popup list, or
+anything that stores per-script state — several things below are known-incomplete on purpose:
+
+- An uploaded script has **no name of its own** until its first run reports one, so the popup shows
+  a raw uuid. §12.1 adds a `synapse:script-meta` record (file name + user-set label) and one
+  `resolveScriptLabel()` used everywhere — don't invent a second fallback chain locally.
+- There is **no delete path** (`deleteUploadedSource`/`clearScriptStorage` exist with no caller).
+  §12.1 makes one `deleteScript(id)` that clears all seven stores; a partial delete leaves ghosts.
+- Editing happens in a **Dashboard "Studio" tab**, never the popup, and a save re-registers the
+  script and re-hashes it. One subtlety worth not re-deriving: an edit made *in that editor* keeps
+  the existing grant (the user has reviewed the code by construction) — every other kind of source
+  change still resets it.
+- Steps: a plain script is normalized to a **one-step pipeline**, never a separate kind. **Source
+  code is the single source of truth for structure** — which steps exist and in what order. The UI
+  owns only enable/disable (`subState`), and its job for structure is *navigation*: clicking a step
+  opens the editor at that step's definition. Do not add a persisted order override; an earlier
+  draft did, and the four-branch merge rule it needed existed purely to reconcile a second source
+  of truth that shouldn't exist.
+- Bundled Modules stay listed but become **read-only with a Clone action**, and default to
+  inactive. Clone produces a new script **from a template**, never a copy of the bundled Module's
+  own source — see §12.4 for why, and for the migration trap in flipping that activation default.
+
 ## The pieces
 
 **Core (`src/kernel/`, zero `chrome.*` imports):**

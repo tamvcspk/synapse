@@ -10,13 +10,20 @@
  * a runtime value here would land in that generated file and break it — scope *data* (descriptions,
  * enforcement class) therefore lives in `scopes.ts`, which imports from here, never the reverse.
  *
- * Three hard constraints on every method, all consequences of `chrome.runtime.sendMessage`'s
- * structured-clone boundary — violating them produces silent no-ops, not type errors:
+ * Three hard constraints on every method that CROSSES the transport (`transport: 'rpc'` in
+ * `scopes.ts`), all consequences of `chrome.runtime.sendMessage`'s structured-clone boundary —
+ * violating them produces silent no-ops, not type errors:
  *   1. Every method is `async`, including ones that feel synchronous.
  *   2. No function-valued parameters, ever (they arrive as `undefined`). Subscriptions must
  *      register their handler locally in the caller's own world.
  *   3. No methods on returned values — return plain data; model a live thing as an id plus
  *      sibling methods that take it.
+ *
+ * `ui` is the deliberate exception and the only one: it is `transport: 'in-world'`, implemented in
+ * the caller's own world with no message ever sent, so it takes closures (`onClick`) and returns
+ * synchronously. That exemption is not a shortcut — it is the entire reason docs/ROADMAP.md §11.0
+ * placed the UI engine in the script's world rather than in Core. Adding a method here that touches
+ * the network, storage, or anything privileged means `rpc`, and the three rules above apply again.
  */
 
 /* @userscript-dts:begin — everything below is copied verbatim into the published .d.ts */
@@ -27,7 +34,7 @@
  * deliberately absent and can never become a scope: `bus.emit(moduleId, …)` reaches every bundled
  * Module's own listener, which is a god-capability no consent prompt can describe honestly.
  */
-export type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch';
+export type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch' | 'ui.render';
 
 /**
  * One entry in a script's `scopes` declaration. `match` is the resource dimension: a grant is
@@ -54,6 +61,32 @@ export interface SynapseStorageApi {
   keys(): Promise<string[]>;
 }
 
+/**
+ * In-page UI, allocated and positioned by the platform's compositor. Scope: `ui.render`.
+ *
+ * **Synchronous, and closures are welcome** — unlike every other namespace here, this one never
+ * sends a message. The engine runs in your own world (docs/ROADMAP.md §11.0), so `onClick` is a
+ * real function call, not a serialized action id.
+ *
+ * You never receive a node in shared space, and ids are local to your script: `toast({id:'x'})` from
+ * two different scripts creates two different toasts, and there is no way to name — let alone
+ * remove — another script's surface. Every method returns `false` when the call was refused (quota
+ * exhausted or toast rate limit), never a silent no-op. The user hiding this script's UI is not a
+ * refusal: the surface is created and returns `true`, it is simply not displayed until they unhide,
+ * at which point everything drawn in the meantime appears at once.
+ */
+export interface SynapseUiApi {
+  /** Card, bottom-right. Reusing an id updates that card in place instead of stacking. */
+  toast(options: { id: string; message: string; actionLabel?: string; onAction?: () => void }): boolean;
+  /** Persistent round button, top-right. Max 2 per script. */
+  icon(options: { id: string; label: string; title?: string; onClick: () => void }): boolean;
+  /** Small button pinned to a page element's corner, following it until it leaves the document. */
+  badge(options: { id: string; target: Element; label: string; title?: string; onClick: () => void }): boolean;
+  dismiss(kind: 'toast' | 'icon' | 'badge', id: string): void;
+  /** Removes everything this script has drawn. */
+  clear(): void;
+}
+
 /** The facade every caller programs against, delivered as `ctx.api`: to bundled Modules from the
  * Kernel, to uploaded user scripts from the shim. One interface, three transports (in-process /
  * content-script RPC / user script shim) — a method reachable from one but not another is a
@@ -61,6 +94,9 @@ export interface SynapseStorageApi {
  * world, so a global name has one binding for all of them and could not identify the caller. */
 export interface SynapseApi {
   storage: SynapseStorageApi;
+  /** Only usable from code that runs on a page. A background Module gets a stub whose every method
+   * throws with that explanation — there is no DOM in a service worker to render into. */
+  ui: SynapseUiApi;
 }
 
 /** What an uploaded user script assigns to `globalThis.__synapseModule` to declare itself. */

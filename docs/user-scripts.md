@@ -105,6 +105,34 @@ script's data, and you cannot reach the extension's own records — every key yo
 inside your namespace, so `storage.get('synapse:grants')` reads *your* `'synapse:grants'` key
 (almost certainly `undefined`) and never the extension's.
 
+### On-page UI is yours alone
+
+`ui.render` gives you toasts, up to two icons in the shared top-right column, and badges pinned to
+page elements:
+
+```js
+ctx.api.ui.icon({ id: 'go', label: '⚡', title: 'Run it', onClick: () => doSomething() });
+ctx.api.ui.toast({ id: 'done', message: 'Finished', actionLabel: 'Undo', onAction: () => undo() });
+```
+
+Three things behave differently here from every other namespace, all for the same reason — **`ui`
+runs inside your own world and sends no message**:
+
+- **The methods are synchronous.** No `await`. They return `true`, or `false` when the call was
+  refused (over quota, or toasting too fast). A `false` is never a silent no-op — check it if it
+  matters. Note that the user hiding your UI from the popup is *not* a refusal: the surface is
+  still created and returns `true`, it simply is not displayed until they unhide it, at which point
+  everything you drew in the meantime appears.
+- **Callbacks work.** `onClick` is a real closure, unlike anywhere else in `synapseApi`, where a
+  function argument would be dropped crossing to the background.
+- **Ids are local to your script.** Two scripts can both use `id: 'main'` without colliding, and
+  passing another script's id to `dismiss()` does nothing at all — the platform namespaces every id
+  by the script that supplied it, so a surface belonging to someone else is not addressable.
+
+`ui.render` is *disclosed*, not enforced: a script that shares the page can already append whatever
+it likes to the DOM, so denying it would protect nobody. What the platform actually adds is
+placement, quota, teardown, and styling that survives a strict `style-src` CSP.
+
 ## Identity
 
 `chrome.userScripts.register()` needs a script id *before* your code has ever run, so the extension

@@ -6,6 +6,9 @@ const { div, nav, ul, li, strong, button, span, input } = van.tags;
 
 export interface ListViewCallbacks {
   onToggle(entry: RegistryEntry): void;
+  /** The "hide UI" valve (docs/ROADMAP.md §11.4) — hides the Module's on-page widgets while leaving
+   * it running. Distinct from `onToggle`, which stops the Module entirely. */
+  onToggleUi(entry: RegistryEntry): void;
   onGrant(entry: RegistryEntry): void;
   onUpload(): void;
   onRefresh(): void;
@@ -52,6 +55,31 @@ export function renderListView(
       ),
     ),
     ul({ class: 'module-list' }, ...entries.map((entry) => renderModuleRow(entry, callbacks))),
+  );
+}
+
+/**
+ * The "hide UI" valve (docs/ROADMAP.md §11.4), shown only for Modules that actually draw on the
+ * page — a row that never renders anything would just be one more control to read past, and this
+ * popup is a small fixed-width window.
+ *
+ * Two ways to qualify, because the two kinds of Module declare it differently: a bundled Module says
+ * so with `uiParadigm: 'float-widget'`, an uploaded script by requesting the `ui.render` scope.
+ */
+function uiValveButton(entry: RegistryEntry, callbacks: ListViewCallbacks): HTMLElement | null {
+  const drawsOnPage =
+    entry.uiParadigm === 'float-widget' || entry.scopes.some((grant) => grant.scope === 'ui.render');
+  if (!drawsOnPage || entry.status !== 'ok') return null;
+
+  return button(
+    {
+      class: 'ui-valve' + (entry.uiHidden ? ' off' : ''),
+      title: entry.uiHidden
+        ? 'On-page UI hidden — the module still runs. Click to show it again.'
+        : 'Hide this module’s on-page UI (it keeps running)',
+      onclick: () => callbacks.onToggleUi(entry),
+    },
+    entry.uiHidden ? '🙈' : '👁',
   );
 }
 
@@ -110,6 +138,7 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
       { class: 'row-actions' },
       stepsBtn,
       ...renderActionButtons(entry, callbacks),
+      uiValveButton(entry, callbacks),
       input({
         type: 'checkbox',
         role: 'switch',

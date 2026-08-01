@@ -31,6 +31,7 @@ export type View =
  * including per-view read-side data fetching (list() calls), never writes. */
 export interface RouterHandlers {
   onToggle(entry: RegistryEntry): void;
+  onToggleUi(entry: RegistryEntry): void;
   onGrant(entry: RegistryEntry): void;
   onUpload(): void;
   onRefresh(): void;
@@ -54,6 +55,7 @@ export async function render(
       entries,
       {
         onToggle: handlers.onToggle,
+        onToggleUi: handlers.onToggleUi,
         onGrant: handlers.onGrant,
         onUpload: handlers.onUpload,
         onRefresh: handlers.onRefresh,

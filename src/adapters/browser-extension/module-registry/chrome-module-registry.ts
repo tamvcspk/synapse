@@ -13,6 +13,8 @@ import {
   getUploadedSources,
   setGrantedScopes,
   setModuleActive,
+  getUiMutedMap,
+  setUiMuted as persistUiMuted,
   setSubModuleActive as persistSubModuleActive,
   setUploadedSource,
   type StoredGrantRecord,
@@ -92,6 +94,15 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     await persistSubModuleActive(id, subId, active);
   }
 
+  /**
+   * The "hide UI" valve (docs/ROADMAP.md §11.4). Deliberately does NOT touch activation or ping the
+   * Module: the point is that its logic keeps running. Open pages pick the change up through
+   * `ui-visibility.ts`'s storage listener, so nothing needs to be re-registered here.
+   */
+  async setUiHidden(id: string, hidden: boolean): Promise<void> {
+    await persistUiMuted(id, hidden);
+  }
+
   async uploadModule(source: string): Promise<UploadResult> {
     const id = crypto.randomUUID();
     try {
@@ -108,16 +119,17 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
   }
 
   private async buildEntries(): Promise<RegistryEntry[]> {
-    const [activation, grants, uploaded, reports, subStates] = await Promise.all([
+    const [activation, grants, uploaded, reports, subStates, uiMuted] = await Promise.all([
       getActivationMap(),
       getGrantsMap(),
       getUploadedSources(),
       getManifestReports(),
       getSubStateMap(),
+      getUiMutedMap(),
     ]);
 
-    const bundled = this.buildBundledEntries(activation, subStates);
-    const uploadedEntries = await this.buildUploadedEntries(uploaded, reports, activation, grants);
+    const bundled = this.buildBundledEntries(activation, subStates, uiMuted);
+    const uploadedEntries = await this.buildUploadedEntries(uploaded, reports, activation, grants, uiMuted);
     const entries = [...bundled, ...uploadedEntries];
 
     const idCounts = new Map<string, number>();
@@ -135,6 +147,7 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
   private buildBundledEntries(
     activation: Record<string, boolean>,
     subStates: Record<string, Record<string, boolean>>,
+    uiMuted: Record<string, boolean>,
   ): RegistryEntry[] {
     const entries: RegistryEntry[] = [];
     // Merges dom Modules (bundled-modules.ts) with browser-specific non-dom Modules
@@ -154,6 +167,7 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
         active: activation[mod.id] ?? true,
         status: 'ok',
         grantedScopes: scopes,
+        uiHidden: uiMuted[mod.id] ?? false,
       };
       if (mod.uiSchema) entry.uiSchema = mod.uiSchema;
       if (mod.uiParadigm) entry.uiParadigm = mod.uiParadigm;
@@ -174,10 +188,11 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     reports: Record<string, StoredManifestReport>,
     activation: Record<string, boolean>,
     grants: Record<string, StoredGrantRecord>,
+    uiMuted: Record<string, boolean>,
   ): Promise<RegistryEntry[]> {
     return Promise.all(
       Object.keys(uploaded).map((id) =>
-        this.buildUploadedEntry(id, uploaded[id]!, reports[id], activation, grants),
+        this.buildUploadedEntry(id, uploaded[id]!, reports[id], activation, grants, uiMuted),
       ),
     );
   }
@@ -188,6 +203,7 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     report: StoredManifestReport | undefined,
     activation: Record<string, boolean>,
     grants: Record<string, StoredGrantRecord>,
+    uiMuted: Record<string, boolean>,
   ): Promise<RegistryEntry> {
     // Same hash check the RPC handler enforces (storage.ts's getGrantedScopes): a grant approved
     // for different source code counts as no grant, so the UI shows what will actually happen.
@@ -195,23 +211,24 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     const grantedScopes =
       record && record.sourceHash === (await hashScriptSource(source)) ? record.scopes : [];
     const active = activation[id] ?? true;
+    const uiHidden = uiMuted[id] ?? false;
 
     // No report yet (script hasn't run on a matching page since upload) — optimistic 'ok',
     // graceful-fail layer 2/3 (run-time + shape) resolve once a report arrives.
     if (!report) {
-      return { id, source: 'uploaded', scopes: [], active, status: 'ok', grantedScopes };
+      return { id, source: 'uploaded', scopes: [], active, status: 'ok', grantedScopes, uiHidden };
     }
 
     if (report.runError) {
-      return { id, source: 'uploaded', scopes: [], active, status: 'invalid', reason: report.runError, grantedScopes };
+      return { id, source: 'uploaded', scopes: [], active, status: 'invalid', reason: report.runError, grantedScopes, uiHidden };
     }
     if (!report.hasRun) {
-      return { id, source: 'uploaded', scopes: [], active, status: 'invalid', reason: 'globalThis.__synapseModule.run is not a function', grantedScopes };
+      return { id, source: 'uploaded', scopes: [], active, status: 'invalid', reason: 'globalThis.__synapseModule.run is not a function', grantedScopes, uiHidden };
     }
 
     const shapeCheck = validateModuleManifestShape({ id, scopes: report.scopes });
     if (!shapeCheck.valid) {
-      return { id, source: 'uploaded', scopes: [], active, status: 'invalid', reason: shapeCheck.reason, grantedScopes };
+      return { id, source: 'uploaded', scopes: [], active, status: 'invalid', reason: shapeCheck.reason, grantedScopes, uiHidden };
     }
 
     const entry: RegistryEntry = {
@@ -221,6 +238,7 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
       active,
       status: 'ok',
       grantedScopes,
+      uiHidden,
     };
     if (typeof report.id === 'string' && report.id.length > 0) entry.label = report.id;
 

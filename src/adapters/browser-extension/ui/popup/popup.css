@@ -51,6 +51,19 @@ body {
   gap: 0.4rem;
 }
 
+/* The "hide UI" valve (docs/ROADMAP.md §11.4). Muted rather than removed when off: the module is
+   still running, and the row should say so at a glance instead of looking switched off. */
+.ui-valve {
+  background: none;
+  border: none;
+  filter: grayscale(1);
+  opacity: 0.75;
+}
+
+.ui-valve.off {
+  opacity: 0.4;
+}
+
 .row-actions button,
 .module-gear {
   width: auto;

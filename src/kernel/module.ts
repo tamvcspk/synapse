@@ -73,7 +73,7 @@ export interface Module<In = unknown, Out = unknown> {
   /**
    * On-page UI paradigm this Module opts into, beyond the default "no on-page UI, everything
    * lives in the Dashboard/popup" (docs/ROADMAP.md §4.2). `'float-widget'` is the only paradigm
-   * with a real implementation today (utils/floating-widget.ts + network-sniffer's push) —
+   * with a real implementation today (utils/ui-compositor.ts + network-sniffer's push) —
    * `'action-button'` is a reserved value for a still-deferred paradigm, not yet usable. Absent
    * (or `'none'`) means the Module has no on-page presence, only Registry-driven UI.
    */

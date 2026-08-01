@@ -60,6 +60,19 @@ export const SCOPE_CATALOG: Record<SynapseScope, ScopeDefinition> = {
       '(docs/ROADMAP.md §11.8), which have no page DOM at all.',
     requiresMatch: false,
   },
+  'ui.render': {
+    scope: 'ui.render',
+    enforcement: 'disclosed',
+    consentLine: 'Show toasts, icons and badges on pages it runs on',
+    description:
+      "Draw into Synapse's on-page UI space: toasts, a top-right icon, badges pinned to page " +
+      'elements. Disclosed, not enforced, for exactly the reason `page.dom` is: a script that shares ' +
+      'the page can already append anything it likes to the document, so refusing this protects ' +
+      'nobody — what the platform adds is placement, quota and teardown, not permission. It becomes ' +
+      'a real gate for scripts hosted in a sandboxed frame (docs/ROADMAP.md §11.8), which have no ' +
+      'page DOM to draw on at all.',
+    requiresMatch: false,
+  },
   'page.fetch': {
     scope: 'page.fetch',
     enforcement: 'disclosed',
@@ -85,6 +98,18 @@ export interface ApiMethodDefinition {
   scope: SynapseScope;
   signature: string;
   description: string;
+  /**
+   * How the call reaches its implementation.
+   *
+   * - `'rpc'` — crosses `chrome.runtime.sendMessage` into the background, where the grant is
+   *   re-checked. Subject to all three structured-clone rules in `synapse-api.ts`.
+   * - `'in-world'` — implemented inside the caller's own world; no message is ever sent, so there is
+   *   no boundary to enforce at and closures are usable. `scopeForApiMethod` deliberately does not
+   *   resolve these, which means `rpc-handler.ts` rejects an RPC naming one instead of finding some
+   *   background implementation to run: a namespace can be in-world OR privileged, never quietly
+   *   both.
+   */
+  transport: 'rpc' | 'in-world';
 }
 
 export const API_METHODS: ApiMethodDefinition[] = [
@@ -94,6 +119,7 @@ export const API_METHODS: ApiMethodDefinition[] = [
     scope: 'storage.rw',
     signature: 'get(key: string): Promise<unknown>',
     description: "Read one of this script's own keys. Resolves to `undefined` when unset.",
+    transport: 'rpc',
   },
   {
     namespace: 'storage',
@@ -101,6 +127,7 @@ export const API_METHODS: ApiMethodDefinition[] = [
     scope: 'storage.rw',
     signature: 'set(key: string, value: unknown): Promise<void>',
     description: 'Write one key. The value must survive structured clone (no functions, no DOM nodes).',
+    transport: 'rpc',
   },
   {
     namespace: 'storage',
@@ -108,6 +135,7 @@ export const API_METHODS: ApiMethodDefinition[] = [
     scope: 'storage.rw',
     signature: 'remove(key: string): Promise<void>',
     description: 'Delete one key.',
+    transport: 'rpc',
   },
   {
     namespace: 'storage',
@@ -115,6 +143,51 @@ export const API_METHODS: ApiMethodDefinition[] = [
     scope: 'storage.rw',
     signature: 'keys(): Promise<string[]>',
     description: 'List every key this script has written, without the internal namespace prefix.',
+    transport: 'rpc',
+  },
+  {
+    namespace: 'ui',
+    method: 'toast',
+    scope: 'ui.render',
+    signature: 'toast(options: { id, message, actionLabel?, onAction? }): boolean',
+    description:
+      'Show a card bottom-right; reusing an id updates it in place. Returns false if refused ' +
+      '(rate limit, quota, or the user muted this script\'s UI).',
+    transport: 'in-world',
+  },
+  {
+    namespace: 'ui',
+    method: 'icon',
+    scope: 'ui.render',
+    signature: 'icon(options: { id, label, title?, onClick }): boolean',
+    description: 'Show a persistent round button top-right. Two per script at most.',
+    transport: 'in-world',
+  },
+  {
+    namespace: 'ui',
+    method: 'badge',
+    scope: 'ui.render',
+    signature: 'badge(options: { id, target, label, title?, onClick }): boolean',
+    description:
+      'Pin a small button to a page element, following it as the page scrolls and removing it ' +
+      'once the element leaves the document.',
+    transport: 'in-world',
+  },
+  {
+    namespace: 'ui',
+    method: 'dismiss',
+    scope: 'ui.render',
+    signature: "dismiss(kind: 'toast' | 'icon' | 'badge', id: string): void",
+    description: 'Remove one of your own surfaces. Ids are local to your script.',
+    transport: 'in-world',
+  },
+  {
+    namespace: 'ui',
+    method: 'clear',
+    scope: 'ui.render',
+    signature: 'clear(): void',
+    description: 'Remove everything this script has drawn.',
+    transport: 'in-world',
   },
 ];
 
@@ -122,9 +195,15 @@ export function isSynapseScope(value: unknown): value is SynapseScope {
   return typeof value === 'string' && value in SCOPE_CATALOG;
 }
 
-/** Required scope for an RPC call, or `undefined` if no such method exists (⇒ reject the call). */
+/**
+ * Required scope for an RPC call, or `undefined` if no such *RPC* method exists (⇒ reject).
+ *
+ * In-world methods resolve to `undefined` on purpose: they have no background implementation, so an
+ * inbound RPC naming one is either a stale script or someone probing, and both deserve the same
+ * fail-closed answer as a method that does not exist.
+ */
 export function scopeForApiMethod(namespace: string, method: string): SynapseScope | undefined {
-  return API_METHODS.find((m) => m.namespace === namespace && m.method === method)?.scope;
+  return API_METHODS.find((m) => m.namespace === namespace && m.method === method && m.transport === 'rpc')?.scope;
 }
 
 export type ScopeGrantValidation =
