@@ -1,8 +1,8 @@
-import { classifyMediaUrl } from '../../../../../shared/media-url-matcher';
-import { createMainWorldChannel } from '../../../utils/main-world/event-channel';
-import { installNetworkInterceptor, type InterceptDecision } from '../../../utils/main-world/network-interceptor';
-import { installMediaSourceInterceptor } from '../../../utils/main-world/media-source-interceptor';
-import { installHlsGlobalHook } from '../../../utils/main-world/hls-global-hook';
+import { classifyMediaUrl } from '../../../../shared/media-url-matcher';
+import { createMainWorldChannel } from '../../utils/main-world/event-channel';
+import { installNetworkInterceptor, type InterceptDecision } from '../../utils/main-world/network-interceptor';
+import { installMediaSourceInterceptor } from './media-source-interceptor.page';
+import { installHlsGlobalHook } from './hls-global-hook.page';
 import {
   MAIN_WORLD_REPORT_CHANNEL_ID,
   MAIN_WORLD_CORRELATION_CHANNEL_ID,
@@ -14,7 +14,7 @@ import {
  * MAIN-world composition root for network-sniffer's third detection source (docs/ROADMAP.md #4.1)
  * — owned by the Module (colocated in its folder) even though it's a separate build entry, per the
  * main-world-interceptor skill. Zero chrome.* here — dynamically registered by
- * background/modules/network-sniffer/index.ts via utils/main-world-injector.ts, built via the
+ * features/media/network-sniffer.background.ts via utils/main-world-injector.ts, built via the
  * `?script&iife` resource import (see that skill for why `&module` breaks silently).
  *
  * Observe-only: `evaluate` always returns `{ intercept: false }`, never modifying a request — the
@@ -34,7 +34,7 @@ import {
  * docs/ROADMAP.md #7.3 adds two more MAIN-world hooks alongside the fetch/XHR one above, both purely
  * for CORRELATION (which `<video>`/`<audio>` element a blob:-sourced MSE player's manifest URL
  * belongs to) — they don't detect any URL the fetch/XHR hook wouldn't already see and report, they
- * only make the badge-anchoring in dom-media-observer.ts precise per-element instead of a single
+ * only make the badge-anchoring in dom-media-observer.content.ts precise per-element instead of a single
  * page-global guess: `installMediaSourceInterceptor` (generic, works for any MSE player) and
  * `installHlsGlobalHook` (narrower, exact, only fires when the page exposes `window.Hls`).
  */
@@ -42,7 +42,7 @@ const reportChannel = createMainWorldChannel<{ url: string }>(MAIN_WORLD_REPORT_
 // docs/ROADMAP.md #7.3(a)
 const correlationChannel = createMainWorldChannel<{ blobUrl: string; url: string }>(MAIN_WORLD_CORRELATION_CHANNEL_ID);
 // docs/ROADMAP.md §7.3(a-hls) bugfix — see constants.ts's doc comment: the attribute write alone
-// doesn't trigger dom-media-observer.ts's rescan, this explicit signal does.
+// doesn't trigger dom-media-observer.content.ts's rescan, this explicit signal does.
 const hlsCorrelationChannel = createMainWorldChannel<Record<string, never>>(MAIN_WORLD_HLS_CORRELATION_CHANNEL_ID);
 
 // docs/ROADMAP.md #7.3(a) — a short ring buffer of recently classified media/manifest URLs, keyed

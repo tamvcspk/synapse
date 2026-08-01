@@ -1,5 +1,5 @@
-import type { CacheService, Module } from '../../../../../kernel/module';
-import type { CollectionCommand } from '../../../../../kernel/ui-schema';
+import type { CacheService, Module } from '../../../../kernel/module';
+import type { CollectionCommand } from '../../../../kernel/ui-schema';
 import {
   ACTIONS,
   HTTP_METHODS,
@@ -12,39 +12,39 @@ import {
   matchMockConfig,
   validateMockConfig,
   type MockConfig,
-} from '../../../../../shared/http-mock';
-import type { InterceptRequest } from '../../../utils/main-world/network-interceptor';
+} from '../../../../shared/http-mock';
+import type { InterceptRequest } from '../../utils/main-world/network-interceptor';
 import {
   ensureDebuggerInterceptor,
   teardownDebuggerInterceptor,
   type DebuggerInterceptDecision,
-} from '../../../utils/debugger-network-interceptor';
-import { clearDnrRules, syncDnrRules, type DnrRuleSpec } from '../../../utils/dnr-network-rules';
-import { bytesToBase64, deleteBlob, getBlob } from '../../../utils/blob-store';
-import { isModuleActive } from '../../../module-registry/storage';
+} from './debugger-network-interceptor.background';
+import { clearDnrRules, syncDnrRules, type DnrRuleSpec } from '../../utils/dnr-network-rules';
+import { bytesToBase64, deleteBlob, getBlob } from '../../utils/blob-store';
+import { isModuleActive } from '../../module-registry/storage';
 import {
   isMainWorldScriptRegistered,
   registerMainWorldScript,
   unregisterMainWorldScript,
-} from '../../../utils/main-world-injector';
+} from '../../utils/main-world-injector';
 // `&iife`, not `&module` — `?script&module` leaves the file as a raw ES module chunk (real `import`
 // statements to shared chunks like http-mock.ts/event-channel.ts), which chrome.scripting always
 // injects as a classic script; a classic script containing `import` throws a SyntaxError before a
 // single line runs. `&iife` routes through crxjs's dedicated IIFE bundler, which inlines every
 // dependency into one self-contained file with zero `import` statements — the only variant that
 // actually executes when injected via chrome.scripting.registerContentScripts.
-import payloadPath from './main-world-payload?script&iife';
+import payloadPath from './main-world-payload.page?script&iife';
 import { MAIN_WORLD_SCRIPT_ID } from './constants';
-import { getMockConfigs, setMockConfigs } from './mock-config-store';
-import { MOCK_FILES } from './mock-files';
+import { getMockConfigs, setMockConfigs } from './mock-config-store.background';
+import { MOCK_FILES } from './mock-files.background';
 
 const REWRITE_URL_SUGGESTIONS = MOCK_FILES.map((f) => ({ label: f.fileName, value: f.url }));
 
 /**
  * Background Module (docs/design.md §3.B, "browser-specific non-dom Modules" — see
- * main-world-interceptor skill for why this lives under background/modules/, not src/modules/).
+ * main-world-interceptor skill for why this lives under features/http-mock/ (docs/ROADMAP.md §11.5), not src/modules/).
  * Sole business authority for MockConfig: validates, persists (via the 'cache' capability, see
- * mock-config-store.ts), and decides whether the MAIN-world interceptor should be registered.
+ * mock-config-store.background.ts), and decides whether the MAIN-world interceptor should be registered.
  * Delivered via the real Bus (needs: ['bus']) — see background/index.ts for the wiring and the
  * startup 'sync' emit.
  */
@@ -113,7 +113,20 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
         fileNameKey: 'fakeResponseFileName',
         showWhen: { field: 'action', equals: ['fake-response'] },
       },
-      { key: 'delayMs', label: 'Delay (ms)', type: 'number', showWhen: { field: 'action', equals: ['fake-response'] } },
+      {
+        key: 'delayMs',
+        label: 'Delay (ms)',
+        type: 'number',
+        // mechanism: 'dnr' is purely declarative — Chrome's own engine evaluates the rule, there's
+        // no per-request JS callback to run a setTimeout in (see this file's own header comment on
+        // `syncRegistration`) — a `delayMs` set on a dnr rule was silently never honored (same "no
+        // no-op left silent" bar §11.3 enforces for scopes/capabilities). Hidden entirely for it
+        // rather than shown-but-ignored, same treatment fakeStatus already gets just above.
+        showWhen: [
+          { field: 'action', equals: ['fake-response'] },
+          { field: 'mechanism', equals: ['main-world', 'debugger'] },
+        ],
+      },
       {
         key: 'responseHeaders',
         label: 'Custom response headers',
@@ -202,7 +215,7 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
   },
   // Read-side counterpart to the CollectionCommand write path below — lets the Dashboard's generic
   // Management View (docs/ROADMAP.md #2.5) read this Module's data without importing
-  // mock-config-store.ts directly (see kernel/module.ts's listCollection doc comment).
+  // mock-config-store.background.ts directly (see kernel/module.ts's listCollection doc comment).
   listCollection: async () => (await getMockConfigs()) as unknown as Record<string, unknown>[],
   async run(command, ctx) {
     // Module-level Slide Toggle gate — mirrors relay.ts's dom-module active check. Inactive means

@@ -4,8 +4,8 @@ import { BACKGROUND_MODULES } from '../module-registry/background-modules';
 
 export interface ModuleDataSource {
   list(): Promise<Record<string, unknown>[]>;
-  upsert(item: Record<string, unknown>): void;
-  delete(id: string): void;
+  upsert(item: Record<string, unknown>): Promise<void>;
+  delete(id: string): Promise<void>;
 }
 
 /** Wire format for a `'trigger'`-kind `UIRowAction` (kernel/ui-schema.ts, docs/ROADMAP.md #5.1) —
@@ -20,9 +20,20 @@ export function emitRowActionTrigger(moduleId: string, op: string, id: string): 
  * Wire format matching background/services/bus.ts (`{event, payload}` over
  * chrome.runtime.sendMessage) — generic across any collection-schema Module, so a new one never
  * needs its own bus-client file the way http-error-mocker used to (mock-config-bus-client.ts).
+ *
+ * Awaits a real response now (docs/ROADMAP.md §11.5) — this used to be pure fire-and-forget, so a
+ * rule a Module's own `run()` rejected (e.g. shared/http-mock.ts's `validateMockConfig` throwing on
+ * `action:'block'` + `mechanism:'main-world'`) vanished into the service worker's own console; the
+ * Dashboard had already navigated back to the list by the time anything could have told it
+ * differently. `chromeRuntimeBus.on`'s handler now threads its outcome back through `sendResponse`
+ * — `{ok:false, error}` here becomes a real thrown Error the caller (item-form-view.ts, via
+ * getModuleDataSource's upsert/delete below) can catch and show, instead of a silent no-op.
  */
-function emitCollectionCommand(moduleId: string, command: CollectionCommand): void {
-  chrome.runtime.sendMessage({ event: moduleId, payload: command });
+async function emitCollectionCommand(moduleId: string, command: CollectionCommand): Promise<void> {
+  const response = (await chrome.runtime.sendMessage({ event: moduleId, payload: command })) as
+    | { ok: boolean; error?: string }
+    | undefined;
+  if (response?.ok === false) throw new Error(response.error ?? 'The module rejected this change.');
 }
 
 /**
@@ -31,8 +42,9 @@ function emitCollectionCommand(moduleId: string, command: CollectionCommand): vo
  * (the same glob-based registries `chrome-module-registry.ts` builds `RegistryEntry`s from), never
  * a hardcoded per-id branch importing a specific module's storage file. A Module opts in purely by
  * declaring `listCollection` on itself (kernel/module.ts) — nothing in this Adapter needs editing
- * to add a new one. The write path (upsert/delete) was already generic via `CollectionCommand`;
- * this only fixes the read path's boundary violation.
+ * to add a new one. The write path (upsert/delete) was already generic via `CollectionCommand`,
+ * and now (docs/ROADMAP.md §11.5) actually surfaces a rejection back to the caller instead of
+ * being fire-and-forget — see `emitCollectionCommand`'s doc comment.
  */
 export function getModuleDataSource(id: string): ModuleDataSource | undefined {
   const mod = [...BUNDLED_MODULES, ...BACKGROUND_MODULES].find((m) => m.id === id);

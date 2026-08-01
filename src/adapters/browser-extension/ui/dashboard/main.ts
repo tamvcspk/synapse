@@ -108,12 +108,22 @@ function render(): void {
     const callbacks: Parameters<typeof renderManagementView>[4] = {
       onAdd: () => navigate({ kind: 'item-form' }),
       onEdit: (item) => navigate({ kind: 'item-form', itemId: String(item[idField]) }),
-      onDelete: (item) => activeDataSource.delete(String(item[idField])),
+      // ManagementViewCallbacks' onDelete/onToggleActive predate the write path returning a real
+      // Promise (docs/ROADMAP.md §11.5) and still type as `void` — a rejection here has no form
+      // context to show it inline in (unlike onSave above), so it's at least logged instead of
+      // becoming a silent, uncaught rejection in the console.
+      onDelete: (item) => {
+        void activeDataSource.delete(String(item[idField])).catch((err: unknown) => console.error('Synapse: delete failed', err));
+      },
       onTrigger: (op, item) => emitRowActionTrigger(activeEntry.id, op, String(item[idField])),
     };
     if (activeSchema.activeField) {
       const activeField = activeSchema.activeField;
-      callbacks.onToggleActive = (item) => activeDataSource.upsert({ ...item, [activeField]: !item[activeField] });
+      callbacks.onToggleActive = (item) => {
+        void activeDataSource
+          .upsert({ ...item, [activeField]: !item[activeField] })
+          .catch((err: unknown) => console.error('Synapse: toggle active failed', err));
+      };
     }
     renderManagementView(root, activeEntry, activeSchema, items, callbacks);
     return;
@@ -124,8 +134,12 @@ function render(): void {
     ? items.find((i) => String(i[idField]) === currentView.itemId)
     : undefined;
   renderItemFormView(root, activeSchema, existing, {
-    onSave: (item) => {
-      activeDataSource.upsert(item);
+    // Navigates only after upsert() actually resolves (docs/ROADMAP.md §11.5) — a rejection (the
+    // Module's own validation, e.g. shared/http-mock.ts's validateMockConfig, threw) propagates
+    // out of this async function, which item-form-view.ts's Save handler catches and displays
+    // instead of navigating away as if nothing had gone wrong.
+    onSave: async (item) => {
+      await activeDataSource.upsert(item);
       navigate({ kind: 'management' });
     },
     onCancel: () => navigate({ kind: 'management' }),

@@ -101,14 +101,27 @@ function patchFetch(evaluate: EvaluateRequest): void {
     if (decision.intercept === 'rewrite') {
       const { overrides } = decision;
       const rewriteBody = resolveRewriteBody(overrides);
-      return originalFetch(overrides.url ?? url, {
-        ...init,
+      const effectiveMethod = (overrides.method ?? method).toUpperCase();
+      // A rewrite that makes the effective method GET/HEAD must never carry the ORIGINAL request's
+      // body through — `fetch()` throws synchronously ("Request with GET/HEAD method cannot have
+      // body") the moment it sees both, even though nothing here ever asked for a body on the
+      // rewritten request. This was reachable any time a rewrite-request rule changed a POST's
+      // method without ALSO setting a new rewriteBody to override/clear the old one. `body` is
+      // therefore OMITTED entirely (not set to `undefined`) rather than spread from `init` — this
+      // file's `exactOptionalPropertyTypes` doesn't allow an explicit `undefined` value for it.
+      const { body: _originalBody, ...initWithoutBody } = init ?? {};
+      const nextInit: RequestInit = {
+        ...initWithoutBody,
         ...(overrides.method !== undefined ? { method: overrides.method } : {}),
         ...(overrides.headers !== undefined
           ? { headers: { ...(init?.headers as Record<string, string> | undefined), ...overrides.headers } }
           : {}),
-        ...(rewriteBody !== undefined ? { body: rewriteBody } : {}),
-      });
+      };
+      if (effectiveMethod !== 'GET' && effectiveMethod !== 'HEAD') {
+        if (rewriteBody !== undefined) nextInit.body = rewriteBody;
+        else if (_originalBody !== undefined) nextInit.body = _originalBody;
+      }
+      return originalFetch(overrides.url ?? url, nextInit);
     }
 
     const { response } = decision;
@@ -188,7 +201,18 @@ function patchXhr(evaluate: EvaluateRequest): void {
         }
       }
       const rewriteBody = resolveRewriteBody(overrides);
-      originalSend.call(this, rewriteBody !== undefined ? (rewriteBody as XMLHttpRequestBodyInit) : body);
+      // Effective method already reached the real XHR object via open()'s own rewrite (above) — the
+      // XHR spec silently drops a body for GET/HEAD rather than throwing (unlike fetch()'s hard
+      // error, see patchFetch's rewrite branch), but stripping it here too avoids relying on that
+      // per-browser leniency and keeps both patches' behavior for this case identical.
+      const effectiveMethod = (meta?.openDecision.intercept === 'rewrite' ? meta.openDecision.overrides.method : undefined) ?? meta?.method ?? 'GET';
+      const sendBody =
+        effectiveMethod.toUpperCase() === 'GET' || effectiveMethod.toUpperCase() === 'HEAD'
+          ? null
+          : rewriteBody !== undefined
+            ? (rewriteBody as XMLHttpRequestBodyInit)
+            : body;
+      originalSend.call(this, sendBody);
       return;
     }
 

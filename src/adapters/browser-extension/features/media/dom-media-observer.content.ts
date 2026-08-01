@@ -1,12 +1,12 @@
-import { classifyMediaUrl } from '../../../shared/media-url-matcher';
-import { createMainWorldChannel } from '../utils/main-world/event-channel';
-import { createUiSurface } from '../utils/ui-compositor';
+import { classifyMediaUrl } from '../../../../shared/media-url-matcher';
+import { createMainWorldChannel } from '../../utils/main-world/event-channel';
+import { createUiSurface } from '../../utils/ui-compositor';
 import {
   MAIN_WORLD_REPORT_CHANNEL_ID,
   MAIN_WORLD_CORRELATION_CHANNEL_ID,
   MAIN_WORLD_HLS_CORRELATION_CHANNEL_ID,
   HLS_CORRELATION_ATTRIBUTE,
-} from '../background/modules/network-sniffer/constants';
+} from './constants';
 
 /**
  * Content-script infra (ISOLATED world) for network-sniffer's Phase 1 enhancement
@@ -20,7 +20,7 @@ import {
  * corner (utils/ui-compositor.ts's `badge`), purely locally: this content script
  * already holds the actual DOM element and its resolved URL, so there's no need for a background
  * round trip just to decide "show a widget here" the way the webRequest-only path needs (that path
- * has no DOM visibility at all — see network-sniffer/index.ts's notifyTabMediaFound, which is the
+ * has no DOM visibility at all — see network-sniffer.background.ts's notifyTabMediaFound, which is the
  * *only* remaining source of the page-corner toast now that DOM-visible media gets its own badge).
  *
  * docs/ROADMAP.md #4.1 — `blob:`-sourced MSE video (hls.js/dash.js-style players, `classifyMediaUrl`
@@ -34,9 +34,9 @@ import {
  * docs/ROADMAP.md #7.3 — three correlation signals, checked in precision order in
  * `collectCandidates()` below (was a single page-global heuristic before this, which a page with
  * multiple simultaneous MSE players would mis-anchor): (1) `HLS_CORRELATION_ATTRIBUTE`, set directly
- * on the exact element by hls-global-hook.ts's `MANIFEST_LOADED` handler — an exact pairing, no
+ * on the exact element by hls-global-hook.page.ts's `MANIFEST_LOADED` handler — an exact pairing, no
  * guessing; (2) `blobUrlCorrelation`, a `blob: URL -> manifest URL` map fed by
- * media-source-interceptor.ts's generic MediaSource hook — an exact match on the blob: URL itself,
+ * media-source-interceptor.page.ts's generic MediaSource hook — an exact match on the blob: URL itself,
  * though the manifest URL side is still a time-window guess (see that file's doc comment); (3)
  * `playCorrelatedUrl`, populated only when a SPECIFIC element's own `'play'` event fires — the last
  * resort, for a blob: element neither of the above could place, now scoped to the element that
@@ -142,7 +142,7 @@ function scanNow(): void {
   const candidates = collectCandidates();
   showBadges(candidates);
   // Correlated candidates aren't real DOM-resolved detections — already persisted once via
-  // network-sniffer/index.ts's report-main-world-media handling, don't double-report them here.
+  // network-sniffer.background.ts's report-main-world-media handling, don't double-report them here.
   report(candidates.filter((c) => !c.correlated).map((c) => c.url));
 }
 
@@ -166,7 +166,7 @@ export function installDomMediaObserver(): void {
     scanNow();
   });
 
-  // docs/ROADMAP.md §7.3(a-hls) bugfix — hls-global-hook.ts's exact-match signal sets
+  // docs/ROADMAP.md §7.3(a-hls) bugfix — hls-global-hook.page.ts's exact-match signal sets
   // HLS_CORRELATION_ATTRIBUTE directly on the DOM, which the MutationObserver below can't see (it's
   // scoped to attributeFilter: ['src'], not this custom attribute) — this explicit signal is what
   // actually triggers the rescan that picks the attribute back up. Empty payload, re-reads the

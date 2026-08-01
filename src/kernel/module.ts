@@ -100,7 +100,14 @@ export interface CacheService {
 
 export interface BusService {
   emit(event: string, payload: unknown): void;
-  on(event: string, handler: (payload: unknown) => void): void;
+  /** A handler MAY return a Promise — the transport (e.g. chromeRuntimeBus) awaits it and threads
+   * the outcome back to `chrome.runtime.sendMessage`'s own caller (`sendResponse`/its returned
+   * Promise), so a caller that cares whether its message actually succeeded (docs/ROADMAP.md
+   * §11.5's `CollectionCommand` write path, previously fire-and-forget with no way to see a
+   * `validateMockConfig` rejection) can `await` it. A handler that returns `void` keeps today's
+   * fire-and-forget behavior — nothing about existing bus.on(id, (payload) => {...}) callers
+   * changes. */
+  on(event: string, handler: (payload: unknown) => void | Promise<unknown>): void;
 }
 
 /** Reported by the Scheduler when a Module's run() throws, instead of crashing the pipeline/bus. */

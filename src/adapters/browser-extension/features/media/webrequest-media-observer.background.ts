@@ -1,7 +1,7 @@
 /**
  * Generic background-only network *observation* mechanism built on chrome.webRequest (Environment
  * SDK — see the sdk-layers skill's mechanism-vs-policy rule; docs/ROADMAP.md #4). Unlike
- * debugger-network-interceptor.ts/dnr-network-rules.ts (which intercept/modify requests),
+ * debugger-network-interceptor.background.ts/dnr-network-rules.ts (which intercept/modify requests),
  * chrome.webRequest.onHeadersReceived here is read-only — this file has zero opinion on what
  * counts as "media", it just reports every observed request's URL/resourceType/Content-Type to the
  * caller's `onDetected` callback.

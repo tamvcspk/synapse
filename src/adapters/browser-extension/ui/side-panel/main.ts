@@ -1,7 +1,7 @@
 import '@picocss/pico/css/pico.min.css';
 import './side-panel.css';
 import van from 'vanjs-core';
-import { collapseVariantShadowedEntries, listDetectedMedia, type DetectedMedia } from '../../background/modules/network-sniffer/store';
+import { collapseVariantShadowedEntries, listDetectedMedia, type DetectedMedia } from '../../features/media/store';
 import { DASHBOARD_PATH } from '../dashboard/dashboard-path';
 import { REVIEW_PATH } from '../review-path';
 import { isReviewData, publishReviewSession, storeReviewFiles, type ReviewPayload } from '../review-handoff';

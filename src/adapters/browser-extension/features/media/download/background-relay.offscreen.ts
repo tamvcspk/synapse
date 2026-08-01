@@ -1,5 +1,5 @@
 import type { DownloadJobCheckpoint } from '../../../../../shared/download-engine-protocol';
-import type { DescribeHeaderReplayResult } from '../../../utils/header-replay-rules';
+import type { DescribeHeaderReplayResult } from '../header-replay-rules';
 import { debugLog } from './engine-events.offscreen';
 
 /**

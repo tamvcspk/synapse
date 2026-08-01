@@ -1,7 +1,7 @@
 /**
  * Generic background-only network rule sync built on chrome.declarativeNetRequest (Environment
  * SDK — see the sdk-layers skill's mechanism-vs-policy rule; docs/ROADMAP.md #2.6). Unlike
- * utils/main-world/network-interceptor.ts and utils/debugger-network-interceptor.ts (both of which
+ * utils/main-world/network-interceptor.ts and utils/debugger-network-interceptor.background.ts (both of which
  * evaluate a per-request JS callback live), this mechanism is purely declarative: Chrome's own
  * network stack evaluates the rules natively, so there's no callback here at all — this file's only
  * job is translating the caller's desired rule set into `chrome.declarativeNetRequest.updateDynamicRules()`
@@ -9,7 +9,7 @@
  *
  * No domain knowledge here — `DnrRuleSpec` is a generic shape (url-match regex + method + one of
  * block/redirect/headers-only), not a MockConfig. Each business composition root
- * (http-error-mocker/index.ts, background/modules/iframe-unsandbox/index.ts) decides what a rule
+ * (http-error-mocker.background.ts, features/media/iframe-unsandbox.background.ts) decides what a rule
  * means; this file only knows how to turn that decision into real DNR rules.
  *
  * Real limits of the underlying API worth knowing when reading this file: RE2 (which
@@ -95,14 +95,25 @@ function ownerOffset(ownerId: string): number {
  * range, so a caller id always maps to the same DNR rule ids across syncs for that owner —
  * `updateDynamicRules` needs stable ids to replace a rule in place rather than accumulate stale
  * duplicates. Two ids landing on the same hash (within one owner) would collide; astronomically
- * unlikely for the handful of rules a personal tool like this manages, not defended against further. */
+ * unlikely for the handful of rules a personal tool like this manages, not defended against further.
+ *
+ * **Bug fixed here, found via real-browser testing**: `base`'s modulus used to be `RANGE_SIZE - 4`,
+ * but `primary`/`headers` are `base*2+2`/`base*2+3` — the `*2` doubling was never accounted for, so
+ * for roughly HALF of all randomly-generated ids (measured: 50.0% over 100k trials), `primary` or
+ * `headers` landed at `offset + RANGE_SIZE` or beyond — past THIS owner's own range and into the
+ * next owner's (or beyond the last owner's range entirely). `syncDnrRules`/`clearDnrRules`'s cleanup
+ * filter (`rule.id < offset + RANGE_SIZE`) then never matched that id again, on ANY future sync —
+ * an orphaned dynamic rule no amount of deleting/re-editing its MockConfig could ever remove, which
+ * is exactly what "removing the rule doesn't stop it from affecting requests" looks like from the
+ * outside. `base`'s modulus must itself be at most half of what's available (minus the +2/+3
+ * headroom) so the `*2` below can never cross the boundary. */
 function ruleIdsFor(ownerId: string, id: string): { primary: number; headers: number } {
   let hash = 0x811c9dc5;
   for (let i = 0; i < id.length; i++) {
     hash ^= id.charCodeAt(i);
     hash = Math.imul(hash, 0x01000193);
   }
-  const base = (hash >>> 1) % (RANGE_SIZE - 4); // keep *2+2/+3 within this owner's range
+  const base = (hash >>> 1) % Math.floor((RANGE_SIZE - 3) / 2); // keep *2+2/+3 within this owner's range
   const offset = ownerOffset(ownerId);
   return { primary: offset + base * 2 + 2, headers: offset + base * 2 + 3 }; // +2 sidesteps id 0/1 edge cases
 }
@@ -200,9 +211,22 @@ export async function syncDnrRules(ownerId: string, specs: DnrRuleSpec[]): Promi
   try {
     await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
   } catch (err) {
-    // A malformed rule (e.g. a data: URL Chrome rejects, an invalid regexFilter) shouldn't crash
-    // the whole sync — graceful-fail, matching the Scheduler's philosophy for a single bad Module.
-    console.error('Synapse: chrome.declarativeNetRequest.updateDynamicRules failed', err);
+    // `updateDynamicRules` is documented as ATOMIC: if Chrome rejects even ONE entry in `addRules`
+    // (oversized `redirect.url` data: URI, invalid regexFilter, etc.), it rolls back the WHOLE call
+    // — including `removeRuleIds`. Without the retry below, a config a user just deleted/deactivated
+    // stays live in Chrome's real ruleset for as long as ANY other config in this same owner's set
+    // is malformed, which looks exactly like "removing the rule did nothing" (real bug report: a
+    // deleted rule kept affecting requests, and a rewrite rule that replaced a fake-response rule
+    // for the same endpoint kept behaving like the old, supposedly-gone fake-response one). Retrying
+    // with ONLY the removals decouples "deletion must always take effect" from "addition might
+    // fail" — matching the Scheduler's per-item graceful-fail philosophy instead of an all-or-nothing
+    // batch.
+    console.error('Synapse: chrome.declarativeNetRequest.updateDynamicRules failed — retrying with removals only so stale/deleted rules do not linger', err);
+    try {
+      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds });
+    } catch (err2) {
+      console.error('Synapse: chrome.declarativeNetRequest.updateDynamicRules (removal-only retry) also failed', err2);
+    }
   }
 }
 

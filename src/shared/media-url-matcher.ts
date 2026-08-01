@@ -3,7 +3,7 @@
  * survive being imported anywhere, including a MAIN-world payload.
  *
  * Policy half of the Network Sniffer's mechanism/policy split (docs/ROADMAP.md #4) — the mechanism
- * (utils/webrequest-media-observer.ts) knows nothing about what counts as "media", it just reports
+ * (utils/webrequest-media-observer.background.ts) knows nothing about what counts as "media", it just reports
  * every observed request URL to this matcher.
  */
 
@@ -48,7 +48,7 @@ export function classifyMediaUrl(url: string): MediaKind | undefined {
 // servers use for HLS .ts segments, not something worth surfacing on its own (docs/ROADMAP.md #4).
 const SEGMENT_MIME_TYPES = ['video/mp2t'];
 // `audio/mpegurl` confirmed in the wild (Google Cloud Storage serving a plain .m3u8 with no
-// HLS-specific Content-Type override) — `classifyDetection` (network-sniffer/index.ts) no longer
+// HLS-specific Content-Type override) — `classifyDetection` (network-sniffer.background.ts) no longer
 // depends on this list alone for `.m3u8`/`.mpd` (it trusts the URL extension unconditionally for
 // those), but this function should still classify the MIME type correctly on its own terms.
 const STREAM_MIME_TYPES = ['application/vnd.apple.mpegurl', 'application/x-mpegurl', 'application/dash+xml', 'audio/mpegurl'];

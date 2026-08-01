@@ -1,11 +1,11 @@
-import type { CacheService } from '../../../../../kernel/module';
-import { chromeStorageCache } from '../../services/cache';
+import type { CacheService } from '../../../../kernel/module';
+import { chromeStorageCache } from '../../background/services/cache';
 
 export interface DetectedMedia {
   id: string;
   url: string;
   kind: 'video' | 'audio' | 'stream';
-  /** The page the request was seen on (webrequest-media-observer.ts's `initiator`) — absent for
+  /** The page the request was seen on (webrequest-media-observer.background.ts's `initiator`) — absent for
    * requests Chrome doesn't attribute to a page origin. */
   pageUrl?: string;
   /** ISO timestamp — display-only, not used for ordering (storage array order is insertion order). */
@@ -69,7 +69,7 @@ const MAX_DETECTED_ITEMS = 200;
 
 /**
  * CacheService-backed CRUD for DetectedMedia — module-owned persistence, routed through the
- * Kernel's 'cache' capability, same shape as http-error-mocker/mock-config-store.ts.
+ * Kernel's 'cache' capability, same shape as http-error-mocker/mock-config-store.background.ts.
  * listCollection() has no ctx (kernel/module.ts), so it defaults to the same chromeStorageCache
  * singleton the ServiceInjector itself resolves to.
  */

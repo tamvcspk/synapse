@@ -4,9 +4,9 @@ import {
   getAction,
   matchMockConfig,
   type MockConfig,
-} from '../../../../../shared/http-mock';
-import { createMainWorldChannel } from '../../../utils/main-world/event-channel';
-import { installNetworkInterceptor, type InterceptDecision } from '../../../utils/main-world/network-interceptor';
+} from '../../../../shared/http-mock';
+import { createMainWorldChannel } from '../../utils/main-world/event-channel';
+import { installNetworkInterceptor, type InterceptDecision } from '../../utils/main-world/network-interceptor';
 import { MOCK_CONFIG_CHANNEL_ID } from './constants';
 
 /**
@@ -14,7 +14,7 @@ import { MOCK_CONFIG_CHANNEL_ID } from './constants';
  * folder) even though it's a separate build entry, per the main-world-interceptor skill. This is
  * where business logic (matchMockConfig/buildFakeResponseInit, from the Global SDK) gets wired
  * into the generic infra (installNetworkInterceptor, createMainWorldChannel). Zero chrome.* here —
- * dynamically registered by background/modules/http-error-mocker/index.ts via
+ * dynamically registered by features/http-mock/http-error-mocker.background.ts via
  * utils/main-world-injector.ts, built via the `?script&iife` resource import (crxjs's dedicated
  * IIFE bundler). chrome.scripting always injects `js` entries as a classic script, so this file
  * must end up with zero `import` statements — `?script&module` instead leaves real ESM imports to

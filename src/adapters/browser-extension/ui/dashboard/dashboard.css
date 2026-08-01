@@ -64,3 +64,11 @@ header h1 {
   justify-content: flex-end;
   gap: 0.5rem;
 }
+
+/* docs/ROADMAP.md §11.5 — shown when the Module rejects a save (item-form-view.ts's errorBanner),
+   e.g. a MockConfig combination shared/http-mock.ts's validateMockConfig doesn't allow. Same color
+   convention side-panel.css's .download-progress-error already uses. */
+.form-error {
+  color: var(--pico-del-color, #c00);
+  margin: 0.5em 0;
+}

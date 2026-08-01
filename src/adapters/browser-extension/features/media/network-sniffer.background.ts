@@ -1,24 +1,24 @@
-import type { CacheService, Module } from '../../../../../kernel/module';
-import type { CollectionCommand } from '../../../../../kernel/ui-schema';
-import { classifyMediaUrl, classifyMediaMimeType, type MediaKind } from '../../../../../shared/media-url-matcher';
-import { sniffMediaMagicBytes } from '../../../../../shared/media-magic-bytes';
-import { isAdNetworkDomain, looksLikeAdHostnamePrefix } from '../../../../../shared/ad-domain-denylist';
-import { looksLikeAdOrTrackerPath, looksLikeAdMacroTemplate } from '../../../../../shared/junk-url-patterns';
-import { looksLikeSignedUrl } from '../../../../../shared/signed-url-detector';
-import { describeResolution } from '../../../../../shared/resolution-label';
-import { ensureNetworkObserver, type ObservedRequest } from '../../../utils/webrequest-media-observer';
-import { syncHeaderReplayRule } from '../../../utils/header-replay-rules';
+import type { CacheService, Module } from '../../../../kernel/module';
+import type { CollectionCommand } from '../../../../kernel/ui-schema';
+import { classifyMediaUrl, classifyMediaMimeType, type MediaKind } from '../../../../shared/media-url-matcher';
+import { sniffMediaMagicBytes } from '../../../../shared/media-magic-bytes';
+import { isAdNetworkDomain, looksLikeAdHostnamePrefix } from '../../../../shared/ad-domain-denylist';
+import { looksLikeAdOrTrackerPath, looksLikeAdMacroTemplate } from '../../../../shared/junk-url-patterns';
+import { looksLikeSignedUrl } from '../../../../shared/signed-url-detector';
+import { describeResolution } from '../../../../shared/resolution-label';
+import { ensureNetworkObserver, type ObservedRequest } from './webrequest-media-observer.background';
+import { syncHeaderReplayRule } from './header-replay-rules';
 import {
   isMainWorldScriptRegistered,
   registerMainWorldScript,
   unregisterMainWorldScript,
-} from '../../../utils/main-world-injector';
-import { isModuleActive } from '../../../module-registry/storage';
+} from '../../utils/main-world-injector';
+import { isModuleActive } from '../../module-registry/storage';
 // `&iife`, not `&module` — see main-world-interceptor skill: chrome.scripting always injects `js`
 // entries as a classic script, and a raw ES module chunk (real `import` statements) throws a
 // SyntaxError before a single line runs. `&iife` inlines every dependency into one self-contained
 // file with zero `import` statements.
-import payloadPath from './main-world-payload?script&iife';
+import payloadPath from './main-world-payload.page?script&iife';
 import { MAIN_WORLD_SCRIPT_ID } from './constants';
 import {
   addDetectedMedia,
@@ -28,8 +28,8 @@ import {
   updateDetectedMedia,
   type DetectedMedia,
 } from './store';
-import { parseM3u8 } from '../../../../../shared/media-manifest-parser';
-import { chromeStorageCache } from '../../services/cache';
+import { parseM3u8 } from '../../../../shared/media-manifest-parser';
+import { chromeStorageCache } from '../../background/services/cache';
 
 /** docs/ROADMAP.md #5.2 — combines both junk signals (static domain denylist + path/query keyword
  * heuristic) into the one check used at all three detection entry points below. The keyword half
@@ -60,7 +60,7 @@ function isJunkRequest(url: string, pageUrl: string | undefined): boolean {
 
 /**
  * docs/ROADMAP.md #4.1's junk-URL filtering, the "what counts as media" policy half (the observer
- * mechanism itself has zero opinion — see webrequest-media-observer.ts's doc comment).
+ * mechanism itself has zero opinion — see webrequest-media-observer.background.ts's doc comment).
  *
  * `resourceType === 'media'` means Chrome itself already classified this as a real media fetch —
  * unchanged behavior, Content-Type kind preferred when present, URL-extension fallback otherwise
@@ -175,7 +175,7 @@ function classifyDetection(req: ObservedRequest): MediaKind | undefined {
  */
 /**
  * Whether a rejected request is worth RECORDING a reason for. The observer no longer filters by
- * resource type at the browser level (see webrequest-media-observer.ts), so every stylesheet, script
+ * resource type at the browser level (see webrequest-media-observer.background.ts), so every stylesheet, script
  * and tracking pixel now reaches the reject path — logging all of them would push the one URL being
  * investigated out of the 100-entry ring buffer within a second of page load, i.e. break the
  * diagnostic in exactly the case it exists for. Records only what a reasonable person would expect
@@ -247,7 +247,7 @@ function recordRejection(req: ObservedRequest, reasonOverride?: string): void {
  * served with no useful Content-Type at all.
  */
 // The resource types this probe is willing to spend a fetch on. Pinned here now that the observer
-// reports EVERY type (see webrequest-media-observer.ts): without it, "no Content-Type and no
+// reports EVERY type (see webrequest-media-observer.background.ts): without it, "no Content-Type and no
 // extension" would newly match fonts, beacons and pings, turning one page load into a burst of
 // speculative range requests. This list is the same set the browser-level filter used to enforce.
 const PROBEABLE_RESOURCE_TYPES: readonly string[] = ['media', 'xmlhttprequest', 'object', 'other'];
@@ -298,7 +298,7 @@ async function probeMagicBytesKind(url: string): Promise<MediaKind | undefined> 
   }
 }
 
-/** Sent directly by content-scripts/dom-media-observer.ts (docs/ROADMAP.md #4 Phase 1) via
+/** Sent directly by content-scripts/dom-media-observer.content.ts (docs/ROADMAP.md #4 Phase 1) via
  * `chrome.runtime.sendMessage({event: 'network-sniffer', payload: ...})` — a second detection
  * source alongside chrome.webRequest, not part of the generic CollectionCommand wire shape (this
  * op is specific to this Module, not a generic Dashboard CRUD write). Handled by a standalone
@@ -411,8 +411,8 @@ async function persistDetectedMedia(url: string, pageUrl: string | undefined, ta
 // can peek at `sender.tab` directly, which the generic BusService.on() handler shape doesn't
 // expose (same reasoning as the report-dom-media notify-only listener this replaces). Two things
 // need `sender.tab`: (a) the tabId, to notify the top frame's floating icon when the detection
-// happened in a nested/cross-origin iframe (dom-media-observer.ts runs in every frame,
-// frame-media-observer.ts's all_frames:true — chrome.tabs.sendMessage broadcasts to every frame
+// happened in a nested/cross-origin iframe (dom-media-observer.content.ts runs in every frame,
+// frame-media-observer.content.ts's all_frames:true — chrome.tabs.sendMessage broadcasts to every frame
 // with no frameId, so only content-scripts/index.ts's top-frame instance is listening for
 // `synapse:media-found`); (b) the tab's own url, to record on the entry as `tabUrl` — `sender.tab`
 // is a full `chrome.tabs.Tab` (host_permissions already cover `<all_urls>`), no extra
@@ -449,7 +449,7 @@ chrome.runtime.onMessage.addListener((message: { event?: string; payload?: Repor
   })();
 });
 
-// docs/ROADMAP.md #4.2 — the anchored badge's click handler (dom-media-observer.ts) can't call
+// docs/ROADMAP.md #4.2 — the anchored badge's click handler (dom-media-observer.content.ts) can't call
 // chrome.downloads.download() itself (content scripts don't have that API), so it messages
 // background to do it instead. Registered unconditionally at module load (not inside run()'s
 // install-once pattern) since it's stateless — isModuleActive is checked per-message instead.
@@ -688,7 +688,7 @@ function setSniffingActive(active: boolean): void {
 
 /**
  * Installed unconditionally at module-evaluation time. `background-modules.ts` pulls every
- * `background/modules/*\/index.ts` in via an EAGER `import.meta.glob`, so this runs synchronously
+ * `features/*\/**\/*.background.ts` in via an EAGER `import.meta.glob`, so this runs synchronously
  * during service-worker startup — the only point at which an MV3 `chrome.webRequest` listener is
  * guaranteed to catch the requests that woke the worker.
  *

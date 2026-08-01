@@ -9,7 +9,7 @@
  * SourceBuffer") back to the same instance — a `WeakMap` can't be inspected by the caller directly.
  * Has zero opinion on which network URL that corresponds to; that decision (matching against
  * recently-observed fetch/XHR URLs) belongs entirely to the caller
- * (network-sniffer/main-world-payload.ts) — same mechanism/policy split as network-interceptor.ts.
+ * (media/main-world-payload.page.ts) — same mechanism/policy split as network-interceptor.ts.
  *
  * Deliberately doesn't try to bridge a `fetch()` call to the specific MediaSource that consumes its
  * response — no browser API exposes that link. What this DOES give the caller, that a page-global

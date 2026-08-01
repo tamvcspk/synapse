@@ -11,7 +11,7 @@ export const HTTP_METHODS: HttpMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELET
  * Which interception mechanism a rule runs under (docs/ROADMAP.md #2.6):
  * - 'main-world': patches window.fetch/XHR in the page's MAIN world (utils/main-world/network-interceptor.ts).
  *   Cheapest, no extra permission — but invisible in DevTools' Network tab and only catches fetch/XHR calls.
- * - 'debugger': attaches chrome.debugger (CDP Fetch domain, utils/debugger-network-interceptor.ts) to
+ * - 'debugger': attaches chrome.debugger (CDP Fetch domain, utils/debugger-network-interceptor.background.ts) to
  *   tabs — real network-stack traffic, visible in the Network tab, catches every request type
  *   (images, scripts, downloads), at the cost of the 'debugger' permission and a persistent
  *   "being debugged" banner Chrome shows on affected tabs.
@@ -72,7 +72,7 @@ export interface MockConfig {
    * reason as `hitCountLimit`). `main-world` uses `fakeResponseFileInline` instead (see below); this
    * field stays `undefined` for a `main-world` rule's file upload. This file itself stays I/O-free
    * (Global SDK, docs/design.md §9) — resolving the blobRef into actual bytes happens in the
-   * background composition root (http-error-mocker/index.ts's `evaluateDebuggerRequest`), never
+   * background composition root (http-error-mocker.background.ts's `evaluateDebuggerRequest`), never
    * here. Item-form-view.ts's file field submits BOTH this and `fakeResponseFileInline` at once, as
    * one JSON string — see `parseFileFieldValue`. */
   fakeResponseFile?: string;
@@ -337,7 +337,7 @@ function compileEndpointPattern(pattern: string): RegExp {
 
 /** First active config for the given `mechanism` whose method + endpointPattern (glob match, see
  * compileEndpointPattern) matches the request URL. Each mechanism's composition root (see
- * main-world-payload.ts / debugger-network-interceptor.ts's caller) only ever wants configs meant
+ * main-world-payload.ts / debugger-network-interceptor.background.ts's caller) only ever wants configs meant
  * for itself — a 'debugger' rule must never be silently answered by the 'main-world' patch or
  * vice versa.
  *

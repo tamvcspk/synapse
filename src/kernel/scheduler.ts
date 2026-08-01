@@ -33,9 +33,17 @@ export class Scheduler {
     const ctx = this.injector.resolve(mod.needs, mod.id);
     bus.on(mod.id, async (payload: unknown) => {
       try {
-        await mod.run(payload, ctx);
+        return await mod.run(payload, ctx);
       } catch (err) {
         onFailure?.(toFailure(mod, err));
+        // Re-thrown (not swallowed after reporting, as before) so a transport that awaits this
+        // handler's returned Promise (chromeRuntimeBus, docs/ROADMAP.md §11.5) sees the rejection
+        // and can relay it back to whoever sent the message — previously a Module's own thrown
+        // validation error (e.g. shared/http-mock.ts's validateMockConfig) only ever reached this
+        // function's console.error, never the caller that triggered it. A fire-and-forget bus.emit()
+        // caller (network-sniffer's startup 'sync', etc.) is unaffected either way — it never awaits
+        // this handler's return value to begin with.
+        throw err;
       }
     });
   }

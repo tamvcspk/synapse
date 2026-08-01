@@ -6,8 +6,8 @@ import { installStorageToMainWorldRelay } from '../utils/main-world/storage-rela
 import { createMainWorldChannel } from '../utils/main-world/event-channel';
 import { createUiSurface, installUiStyles, setOwnerUiHidden } from '../utils/ui-compositor';
 import { onUiVisibilityChanged } from '../module-registry/ui-visibility';
-import { MOCK_CONFIG_CHANNEL_ID, MOCK_CONFIG_STORAGE_KEY } from '../background/modules/http-error-mocker/constants';
-import { MAIN_WORLD_REPORT_CHANNEL_ID } from '../background/modules/network-sniffer/constants';
+import { MOCK_CONFIG_CHANNEL_ID, MOCK_CONFIG_STORAGE_KEY } from '../features/http-mock/constants';
+import { MAIN_WORLD_REPORT_CHANNEL_ID } from '../features/media/constants';
 
 // Generic infra call (not a Module — see main-world-interceptor skill): forwards
 // http-error-mocker's persisted MockConfig list into its MAIN-world interceptor whenever it's
@@ -15,14 +15,14 @@ import { MAIN_WORLD_REPORT_CHANNEL_ID } from '../background/modules/network-snif
 installStorageToMainWorldRelay(MOCK_CONFIG_STORAGE_KEY, MOCK_CONFIG_CHANNEL_ID);
 
 // network-sniffer's DOM/iframe detection (docs/ROADMAP.md #4) lives in a SEPARATE
-// `all_frames: true` content_scripts entry (frame-media-observer.ts), not here — this file's entry
+// `all_frames: true` content_scripts entry (frame-media-observer.content.ts), not here — this file's entry
 // stays top-frame-only (all_frames defaults to false) because chrome.tabs.sendMessage broadcasts to
 // every frame when no frameId is given, and putting registerDomModule (below) in every iframe would
 // let multiple frames race to answer the same trigger message.
 
 // docs/ROADMAP.md §6.1 — persistent floating icon (top-right), replacing the old bottom-right
-// toast, for network-sniffer's push (background/modules/network-sniffer/index.ts's
-// notifyTabMediaFound). Registered here (not frame-media-observer.ts) for the same top-frame-only
+// toast, for network-sniffer's push (features/media/network-sniffer.background.ts's
+// notifyTabMediaFound). Registered here (not frame-media-observer.content.ts) for the same top-frame-only
 // reason as registerDomModule above: showing one icon per page, not one per iframe. No
 // count/message — see the `icon` doc comment in ui-compositor.ts for why. Click messages background to open
 // the Side Panel (synapse:open-side-panel, background/index.ts) rather than a real
@@ -76,7 +76,7 @@ chrome.runtime.onMessage.addListener((message: { type?: string } | undefined) =>
 // background purely for persistence into the Dashboard's detected-media list. Registered here
 // (top-frame-only), matching where the MAIN-world script itself runs — registerMainWorldScript
 // doesn't set `allFrames`, so it defaults to top-frame-only, same as http-error-mocker's. Separate
-// from dom-media-observer.ts's OWN listener on this same channel (badge-anchoring correlation,
+// from dom-media-observer.content.ts's OWN listener on this same channel (badge-anchoring correlation,
 // no relay needed there — see that file) — two independent listeners on the same shared-window
 // CustomEvent, one per purpose.
 createMainWorldChannel<{ url: string }>(MAIN_WORLD_REPORT_CHANNEL_ID).onUpdate(({ url }) => {
@@ -93,7 +93,7 @@ createMainWorldChannel<{ url: string }>(MAIN_WORLD_REPORT_CHANNEL_ID).onUpdate((
 });
 
 // Every BUNDLED_MODULE is a dom Module by construction — bundled-modules.ts globs
-// `content-scripts/modules/**` and nothing else. The old `needs?.includes('dom')` filter here was
+// `features/*/**/*.module.ts` and nothing else. The old `needs?.includes('dom')` filter here was
 // redundant with that, and `'dom'` is gone as a Capability anyway (docs/ROADMAP.md §11.3: it
 // resolved to no service, so declaring it was a silent no-op; what a script can do to the page is
 // now the `page.dom` *scope*, which is Disclosed rather than injected).

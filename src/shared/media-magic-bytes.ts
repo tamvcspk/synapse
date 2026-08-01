@@ -5,7 +5,7 @@
  * docs/ROADMAP.md #7.2 — MV3 has no `webRequest.filterResponseData` (Firefox-only), so there is no
  * way to read a request's response body as the page issues it. This function is the payload-half of
  * the rescue path for a response Content-Type lies about or omits: the caller does a small, active
- * `Range` probe fetch (network-sniffer/index.ts's `probeMagicBytesKind`, not in this file — that's
+ * `Range` probe fetch (network-sniffer.background.ts's `probeMagicBytesKind`, not in this file — that's
  * I/O) and hands the first bytes here to identify the container/manifest format by its leading
  * signature bytes, independent of whatever Content-Type the server sent.
  *

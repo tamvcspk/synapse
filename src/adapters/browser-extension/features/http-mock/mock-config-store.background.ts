@@ -1,6 +1,6 @@
-import type { CacheService } from '../../../../../kernel/module';
-import type { MockConfig } from '../../../../../shared/http-mock';
-import { chromeStorageCache } from '../../services/cache';
+import type { CacheService } from '../../../../kernel/module';
+import type { MockConfig } from '../../../../shared/http-mock';
+import { chromeStorageCache } from '../../background/services/cache';
 import { MOCK_CONFIG_STORAGE_KEY } from './constants';
 
 /**

@@ -83,7 +83,7 @@ export async function deleteBlob(id: string): Promise<void> {
 
 /** Raw bytes -> base64, for handing a file's content to APIs that want base64 (CDP's
  * `Fetch.fulfillRequest` body) — deliberately not the `btoa(unescape(encodeURIComponent(...)))`
- * trick `debugger-network-interceptor.ts` uses elsewhere, since that's for encoding *text*, not
+ * trick `debugger-network-interceptor.background.ts` uses elsewhere, since that's for encoding *text*, not
  * for re-encoding bytes that are already binary. */
 export function bytesToBase64(bytes: ArrayBuffer): string {
   let binary = '';

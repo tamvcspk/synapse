@@ -16,7 +16,13 @@ const MAX_INLINE_FILE_BYTES = 2 * 1024 * 1024;
  * DOM. Navigates back to the Management View on both Save and Cancel; the caller (dashboard's
  * main.ts) owns that navigation via the callbacks. */
 export interface ItemFormViewCallbacks {
-  onSave(item: Record<string, unknown>): void;
+  /** Returns a Promise now (docs/ROADMAP.md §11.5) — a rejection (e.g. the Module's own
+   * validateMockConfig-style check throwing) is caught here and shown inline instead of the form
+   * silently navigating back to the list either way, which is what happened when this write path
+   * was fire-and-forget (see module-data-sources.ts's `emitCollectionCommand`). The caller (the
+   * Dashboard's main.ts) is still the one that decides to navigate on SUCCESS — this file only
+   * ever reacts to a rejection. */
+  onSave(item: Record<string, unknown>): Promise<void>;
   onCancel(): void;
 }
 
@@ -65,12 +71,22 @@ export function renderItemFormView(
   // fast click could submit the field's *previous* blobRef (or none) instead of the new upload's.
   // Declared before `saveButton` exists (assigned once the button is created below) — safe because
   // `setUploading` is only ever invoked later, from a file input's async 'change' handler.
+  //
+  // Reused below for the Save click itself (now also async — see `ItemFormViewCallbacks.onSave`'s
+  // doc comment) for the exact same reason: without disabling the button, a second click while the
+  // first save is still in flight could fire a duplicate onSave before the first one's result (a
+  // navigate-away on success, or an error to show) has landed.
   let saveButton!: HTMLButtonElement;
   let pendingUploads = 0;
   const setUploading = (uploading: boolean) => {
     pendingUploads += uploading ? 1 : -1;
     saveButton.disabled = pendingUploads > 0;
   };
+
+  // Shown when callbacks.onSave() rejects (e.g. the Module's own validation threw) — hidden by
+  // default and on every new save attempt, so a stale error from a previous try doesn't linger
+  // once the user has changed something and is trying again.
+  const errorBanner = div({ class: 'form-error', style: 'display:none' });
 
   for (const field of formFields) {
     const { fieldLabel, fieldInput } = renderField(field, existing, setUploading);
@@ -114,9 +130,10 @@ export function renderItemFormView(
   // button never triggers constraint validation, which is how an empty Fake status used to
   // silently become 0 and get rejected with zero UI feedback). But we still own the actual save —
   // preventDefault() first so the browser never attempts its own submission afterward; without it,
-  // onSave()'s navigate() call replaces the view (root.replaceChildren()) before the browser gets
-  // to its default action, and it warns "Form submission canceled because the form is not
-  // connected" trying to submit a form that's no longer in the document.
+  // a *successful* save's navigate() call (still owned by the caller — see onSave's doc comment)
+  // would replace the view (root.replaceChildren()) before the browser gets to its default action,
+  // and it warns "Form submission canceled because the form is not connected" trying to submit a
+  // form that's no longer in the document.
   saveButton = button(
     {
       type: 'submit',
@@ -135,7 +152,19 @@ export function renderItemFormView(
           const fieldInput = fieldEntries.get(field.key)!.fieldInput;
           item[field.key] = readFieldValue(field, fieldInput);
         }
-        callbacks.onSave(item);
+
+        errorBanner.textContent = '';
+        errorBanner.style.display = 'none';
+        setUploading(true);
+        callbacks
+          .onSave(item)
+          .catch((err: unknown) => {
+            // Stays on the form (caller's onSave only navigates after its own await succeeds — see
+            // its doc comment) so the user's input isn't lost and they can fix the rejected field.
+            errorBanner.textContent = err instanceof Error ? err.message : String(err);
+            errorBanner.style.display = 'block';
+          })
+          .finally(() => setUploading(false));
       },
     },
     existing ? 'Save' : 'Add',
@@ -143,6 +172,7 @@ export function renderItemFormView(
 
   const formEl = form(
     fieldsSlot,
+    errorBanner,
     div(
       { class: 'form-actions' },
       button({ type: 'button', class: 'secondary', onclick: callbacks.onCancel }, 'Cancel'),

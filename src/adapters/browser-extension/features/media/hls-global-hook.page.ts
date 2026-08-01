@@ -5,7 +5,7 @@
  * (a-hls)) — `Hls.Events.MANIFEST_LOADED` hands both directly (`data.url`, the firing instance's
  * own `.media`).
  *
- * Narrower than media-source-interceptor.ts's generic hook above: only fires when the page happens
+ * Narrower than media-source-interceptor.page.ts's generic hook above: only fires when the page happens
  * to expose `window.Hls` as a global (common for a simple `<script src=".../hls.min.js">` include,
  * absent for a player whose own bundler keeps hls.js internal with no global at all) — a supplement
  * for a better-than-heuristic result when available, not a replacement for the generic mechanism.
@@ -91,7 +91,7 @@ function wrap(
 
 /** Idempotent-by-convention: call once, before the page's own script can run. No-ops (never throws)
  * if `window.Hls` turns out not to be a constructor, or if redefining the property is rejected
- * (e.g. the page already froze it) — same "graceful absence" posture as media-source-interceptor.ts. */
+ * (e.g. the page already froze it) — same "graceful absence" posture as media-source-interceptor.page.ts. */
 export function installHlsGlobalHook(onManifestLoaded: (event: { url: string; media: HTMLMediaElement }) => void): void {
   try {
     let current: unknown = (window as { Hls?: unknown }).Hls;

@@ -1,6 +1,6 @@
-import { installDomMediaObserver } from './dom-media-observer';
-import { installIframeUnsandbox } from './iframe-unsandbox-dom';
-import { isModuleActive } from '../module-registry/storage';
+import { installDomMediaObserver } from './dom-media-observer.content';
+import { installIframeUnsandbox } from './iframe-unsandbox-dom.content';
+import { isModuleActive } from '../../module-registry/storage';
 
 /**
  * Entry point for the second, `all_frames: true` content_scripts entry (manifest.config.ts,

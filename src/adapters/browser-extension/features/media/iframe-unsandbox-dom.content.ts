@@ -5,14 +5,14 @@
  * within. The fix has to come from the PARENT frame that embeds it, widening the `sandbox` token
  * list on the `<iframe>` element itself, before/as it loads.
  *
- * Every frame (this file is loaded via frame-media-observer.ts's `all_frames: true` entry) fixes
+ * Every frame (this file is loaded via frame-media-observer.content.ts's `all_frames: true` entry) fixes
  * only its own direct `<iframe>` children — this cascades correctly through arbitrary nesting depth:
  * once a child is unsandboxed, the browser injects this same content script into it, which then
  * fixes its own children, and so on.
  *
  * Deliberately does NOT touch `Content-Security-Policy` response headers — a server-declared
  * `sandbox` directive on the framed document itself isn't a DOM attribute, so no DOM mutation can
- * fix that case; see background/modules/iframe-unsandbox/index.ts's DNR rule for that half.
+ * fix that case; see features/media/iframe-unsandbox.background.ts's DNR rule for that half.
  */
 
 const REQUIRED_TOKENS = ['allow-scripts', 'allow-same-origin'];

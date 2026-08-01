@@ -32,7 +32,7 @@ export default defineManifest({
     // trigger message — a real regression unrelated to this feature.
     {
       matches: ['<all_urls>'],
-      js: ['src/adapters/browser-extension/content-scripts/frame-media-observer.ts'],
+      js: ['src/adapters/browser-extension/features/media/frame-media-observer.content.ts'],
       all_frames: true,
       // 'document_start' (not the default 'document_idle') matters for iframe-unsandbox: widening a
       // sandboxed <iframe>'s token list only takes effect on that frame's *next* navigation, so the

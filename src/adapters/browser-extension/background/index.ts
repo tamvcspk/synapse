@@ -6,8 +6,8 @@ import { setUserScriptsPermissionGranted } from '../module-registry/storage';
 import { DASHBOARD_PATH } from '../ui/dashboard/dashboard-path';
 import { SIDE_PANEL_PATH } from '../ui/side-panel/side-panel-path';
 import { ensureOffscreenDocument } from '../utils/offscreen-manager';
-import { describeHeaderReplay, syncHeaderReplayRule } from '../utils/header-replay-rules';
-import { listDetectedMedia } from './modules/network-sniffer/store';
+import { describeHeaderReplay, syncHeaderReplayRule } from '../features/media/header-replay-rules';
+import { listDetectedMedia } from '../features/media/store';
 import { listDownloadJobCheckpoints, saveDownloadJobCheckpoint, removeDownloadJobCheckpoint } from '../features/media/download/checkpoints';
 import type { DownloadEngineCommand, DownloadEngineRelayedCommand, DownloadJobCheckpoint } from '../../../shared/download-engine-protocol';
 import { createSynapseApi } from '../module-registry/synapse-api-host';
@@ -38,7 +38,7 @@ const trustedScopes: TrustedScopeMap = Object.fromEntries(
 
 registerRpcHandler(trustedScopes);
 
-// Registers every background/modules/*/index.ts Module onto the Bus (needs: ['bus']) or runs it
+// Registers every features/*/**/*.background.ts Module onto the Bus (needs: ['bus']) or runs it
 // once (pipeline). A bus-only Module never gets an initial call from kernel.run() itself — it's
 // only registered as a listener — so http-error-mocker also needs an explicit startup 'sync' so
 // configs left active from a previous session resume being registered after a service-worker

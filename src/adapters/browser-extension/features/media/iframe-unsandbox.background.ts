@@ -1,6 +1,6 @@
-import type { Module } from '../../../../../kernel/module';
-import { syncDnrRules, clearDnrRules, type DnrRuleSpec } from '../../../utils/dnr-network-rules';
-import { isModuleActive } from '../../../module-registry/storage';
+import type { Module } from '../../../../kernel/module';
+import { syncDnrRules, clearDnrRules, type DnrRuleSpec } from '../../utils/dnr-network-rules';
+import { isModuleActive } from '../../module-registry/storage';
 
 /**
  * Background Module (docs/ROADMAP.md #4, Part C) — a standalone, off-by-default toggle, deliberately
@@ -8,7 +8,7 @@ import { isModuleActive } from '../../../module-registry/storage';
  * Slide Toggle every Module without one already gets (docs/ROADMAP.md §2's Navigation Flow).
  *
  * Two independent halves, both gated on this Module's own active state:
- * - DOM half: content-scripts/iframe-unsandbox-dom.ts widens a sandboxed <iframe>'s token list
+ * - DOM half: iframe-unsandbox-dom.content.ts widens a sandboxed <iframe>'s token list
  *   (parent-side DOM mutation) — fixes the case where the PARENT page itself set `sandbox`.
  * - Network half (this file): a single, always-on DNR rule stripping the `Content-Security-Policy`
  *   response header from every `sub_frame` response while active — fixes the case where the framed

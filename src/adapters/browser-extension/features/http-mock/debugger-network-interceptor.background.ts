@@ -1,4 +1,4 @@
-import type { InterceptDecision, InterceptRequest } from './main-world/network-interceptor';
+import type { InterceptDecision, InterceptRequest } from '../../utils/main-world/network-interceptor';
 
 /**
  * Generic background-only network interception mechanism built on chrome.debugger + CDP's Fetch
@@ -21,9 +21,12 @@ import type { InterceptDecision, InterceptRequest } from './main-world/network-i
 
 // CDP's Fetch domain isn't in @types/chrome (chrome.debugger.sendCommand's params/result are
 // typed as a bare `Object`) — this is the minimal slice of its schema this file actually reads.
+// `headers` (Network.Headers — a plain name->value map) is REQUIRED here, not optional decoration:
+// see `onDebuggerEvent`'s rewrite branch for why the original request's headers have to be read
+// from this event at all.
 interface FetchRequestPausedEvent {
   requestId: string;
-  request: { url: string; method: string; postData?: string };
+  request: { url: string; method: string; postData?: string; headers: Record<string, string> };
 }
 
 /** `main-world`'s `InterceptDecision` plus `'block'` — only `chrome.debugger` (real network-stack
@@ -90,7 +93,17 @@ async function onDebuggerEvent(source: chrome.debugger.Debuggee, method: string,
       commandParams.postData = overrides.bodyEncoding === 'base64' ? overrides.body : toBase64Utf8(overrides.body);
     }
     if (overrides.headers !== undefined) {
-      commandParams.headers = Object.entries(overrides.headers).map(([name, value]) => ({ name, value }));
+      // CDP's `Fetch.continueRequest.headers` REPLACES the request's entire header set — it is not
+      // a merge/patch, unlike `main-world`'s rewrite path (network-interceptor.ts), which layers
+      // overrides on top of whatever the page already set. Sending only `overrides.headers` here
+      // silently dropped every original header (Content-Type, Cookie, the lot) the moment a rule
+      // rewrote even one — a real bug: the rewritten request often still reached its destination,
+      // but missing headers the server needed made the override look like it "did nothing" or broke
+      // the request outright. Start from the ORIGINAL headers this event already carries and let
+      // `overrides.headers` win on a name collision, same "override wins" contract every other
+      // mechanism's rewrite path already honors.
+      const merged = { ...request.headers, ...overrides.headers };
+      commandParams.headers = Object.entries(merged).map(([name, value]) => ({ name, value }));
     }
     void chrome.debugger.sendCommand({ tabId }, 'Fetch.continueRequest', commandParams);
     return;

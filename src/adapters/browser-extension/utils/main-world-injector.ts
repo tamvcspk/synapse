@@ -2,7 +2,7 @@
  * Generic background-only wrapper around chrome.scripting's dynamic content-script registration
  * (Environment SDK — see the sdk-layers skill's mechanism-vs-policy rule). No domain knowledge:
  * callers decide *when* to register/unregister (that's business policy — see
- * background/modules/http-error-mocker/index.ts) and *what* script to register (a built path,
+ * features/http-mock/http-error-mocker.background.ts) and *what* script to register (a built path,
  * typically obtained via a `?script&module` resource import — see the main-world-interceptor
  * skill). chrome.scripting is only available in the background/service-worker context, never in a
  * content script.

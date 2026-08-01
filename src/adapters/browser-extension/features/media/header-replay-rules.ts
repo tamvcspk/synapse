@@ -178,7 +178,7 @@ function ruleIdFor(host: string, tabIds: number[]): number {
  * `headers` set — a real page's requests for the same host stay untouched. Idempotent per host —
  * safe to call before every fetch to that host; only actually talks to chrome.declarativeNetRequest
  * when the header set for that host changed. Callable from any extension context with the
- * `declarativeNetRequest` permission — not background-only, unlike webrequest-media-observer.ts.
+ * `declarativeNetRequest` permission — not background-only, unlike webrequest-media-observer.background.ts.
  *
  * `tabIds` defaults to `[TAB_ID_NONE]` (-1), which matches only requests originating from no tab at
  * all — correct for the background service worker's own `fetch()` (network-sniffer's
