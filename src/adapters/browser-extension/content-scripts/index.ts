@@ -8,6 +8,7 @@ import { createUiSurface, installUiStyles, setOwnerUiHidden } from '../utils/ui-
 import { onUiVisibilityChanged } from '../module-registry/ui-visibility';
 import { MOCK_CONFIG_CHANNEL_ID, MOCK_CONFIG_STORAGE_KEY } from '../features/http-mock/constants';
 import { MAIN_WORLD_REPORT_CHANNEL_ID } from '../features/media/constants';
+import { SUBSCRIPTION_EVENT_MESSAGE_TYPE, SUBSCRIPTION_PUSH_CHANNEL_ID, type SubscriptionPushPayload } from '../../../shared/subscription-bridge';
 
 // Generic infra call (not a Module — see main-world-interceptor skill): forwards
 // http-error-mocker's persisted MockConfig list into its MAIN-world interceptor whenever it's
@@ -70,6 +71,20 @@ chrome.runtime.onMessage.addListener((message: { type?: string } | undefined) =>
     if (!(await isModuleActive('network-sniffer'))) return;
     showNetworkSnifferIcon();
   })();
+});
+
+// docs/api-inventory.md §6 item 8 (subscription spike) — relays a background push
+// (module-registry/subscription-push.ts's pushSubscriptionEvent) into a shared-window DOM
+// CustomEvent, the ONLY hop that can reach the USER_SCRIPT world (it has no chrome.runtime.onMessage
+// route from the extension side — see user-script-shim.ts's trailer() for the sibling attempt that
+// is suspected dead for the exact reason this file's approach avoids: no messaging API, only DOM).
+// This dispatch also reaches the page's own MAIN world, same as every other main-world channel this
+// codebase uses (MOCK_CONFIG_CHANNEL_ID, MAIN_WORLD_REPORT_CHANNEL_ID) — the page could in principle
+// listen for this event name too, the same accepted tradeoff those channels already make.
+const subscriptionPushChannel = createMainWorldChannel<SubscriptionPushPayload>(SUBSCRIPTION_PUSH_CHANNEL_ID);
+chrome.runtime.onMessage.addListener((message: { type?: string; topic?: string; data?: unknown } | undefined) => {
+  if (message?.type !== SUBSCRIPTION_EVENT_MESSAGE_TYPE || typeof message.topic !== 'string') return;
+  subscriptionPushChannel.dispatch({ topic: message.topic, data: message.data });
 });
 
 // docs/ROADMAP.md #4.1 — relays network-sniffer's MAIN-world observer (main-world-payload.ts) to

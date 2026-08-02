@@ -16,9 +16,16 @@ import type {
 import { htmlToMarkdown } from '../../../shared/html-to-markdown';
 import { isValidMatchPattern, matchesAnyPattern, matchesUrlPattern } from '../../../shared/match-pattern';
 import { parseM3u8 } from '../../../shared/media-manifest-parser';
+import { SUBSCRIPTION_PUSH_CHANNEL_ID, type SubscriptionPushPayload } from '../../../shared/subscription-bridge';
 import { buildZip } from '../../../shared/zip';
 import { readable } from '../module-registry/lib-readable';
+import { createMainWorldChannel } from '../utils/main-world/event-channel';
 import { createUiSurface } from '../utils/ui-compositor';
+
+// docs/api-inventory.md §6 item 8 — the same DOM-CustomEvent channel content-scripts/index.ts
+// relays a background push onto; `media.onProgress` below is this transport's own in-world listener
+// on it, exactly the shape `synapseApi.ui` already uses for its content-script implementation.
+const subscriptionPushChannel = createMainWorldChannel<SubscriptionPushPayload>(SUBSCRIPTION_PUSH_CHANNEL_ID);
 
 // lib.* (docs/api-inventory.md §3.0) — this is the extension's own ISOLATED-world bundle, an
 // ordinary ESM context, so it imports the real functions directly rather than needing the
@@ -100,6 +107,12 @@ export function buildDomModuleApi(moduleId: string): SynapseApi {
       job: (jobId: string) => call(moduleId, 'media', 'job', [jobId]) as Promise<SynapseMediaJobStatus | undefined>,
       control: (jobId: string, action: SynapseMediaControlAction) =>
         call(moduleId, 'media', 'control', [jobId, action]).then(() => undefined),
+      onProgress: (jobId: string, handler: (status: SynapseMediaJobStatus) => void) => {
+        const topic = `media.progress:${jobId}`;
+        return subscriptionPushChannel.onUpdate((payload) => {
+          if (payload.topic === topic) handler(payload.data as SynapseMediaJobStatus);
+        });
+      },
     },
     page: {
       eval: (code: string, args?: unknown[]) => call(moduleId, 'page', 'eval', [code, args]),

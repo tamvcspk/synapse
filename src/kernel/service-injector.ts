@@ -66,7 +66,8 @@ function unavailableSynapseApi(moduleId: string): SynapseApi {
     ui: { toast: failSync, icon: failSync, badge: failSync, dismiss: failSync, clear: failSync },
     net: { request: fail, mock: { add: fail, remove: fail, list: fail } },
     files: { save: fail },
-    media: { list: fail, inspect: fail, download: fail, job: fail, control: fail },
+    // onProgress is synchronous like ui.* (see synapse-api.ts), so it needs failSync too, not fail.
+    media: { list: fail, inspect: fail, download: fail, job: fail, control: fail, onProgress: failSync },
     page: { eval: fail },
     // hls.parse/toMarkdown/zip have no context dependency to be "unavailable" — pure computation
     // (docs/api-inventory.md §3.0) importable straight from shared/, so the real implementation is

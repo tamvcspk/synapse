@@ -7,7 +7,11 @@
  */
 export interface MainWorldChannel<T> {
   dispatch(payload: T): void;
-  onUpdate(handler: (payload: T) => void): void;
+  /** Returns an unsubscribe function — added for the subscription-push spike
+   * (docs/api-inventory.md §6 item 8, `module-registry/rpc-client.ts`'s `media.onProgress`), whose
+   * callers register and tear down a listener per subscribe call. Every existing caller ignores the
+   * return value, so this is additive, not a breaking change. */
+  onUpdate(handler: (payload: T) => void): () => void;
 }
 
 export function createMainWorldChannel<T>(channelId: string): MainWorldChannel<T> {
@@ -16,9 +20,11 @@ export function createMainWorldChannel<T>(channelId: string): MainWorldChannel<T
       window.dispatchEvent(new CustomEvent<T>(channelId, { detail: payload }));
     },
     onUpdate(handler) {
-      window.addEventListener(channelId, (event) => {
+      const listener = (event: Event): void => {
         handler((event as CustomEvent<T>).detail);
-      });
+      };
+      window.addEventListener(channelId, listener);
+      return () => window.removeEventListener(channelId, listener);
     },
   };
 }

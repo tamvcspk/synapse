@@ -220,7 +220,7 @@ globalThis.__synapseModule = {
     if (!stream) return;
 
     const jobId = await ctx.api.media.download({ url: stream.url });
-    // poll — there's no subscription/callback form, see below
+    // poll — see below for the onProgress push alternative
     let status;
     do {
       await new Promise((r) => setTimeout(r, 1000));
@@ -234,9 +234,20 @@ globalThis.__synapseModule = {
   `media`, and it never takes `match`: a grant is all-or-nothing, same as the Side Panel's own view
   of whatever the sniffer has found.
 - **`download()` returns immediately** with a `jobId` — it does not wait for the file to finish.
-  Progress is **polling only**, not a callback: `ctx.api.media.job(jobId)` returns `undefined` until
-  there's a snapshot to report, and again after a background service-worker restart, since progress
-  isn't persisted to disk any more than the Side Panel's own view of it is.
+  `ctx.api.media.job(jobId)` polling (above) always works and returns `undefined` until there's a
+  snapshot to report, and again after a background service-worker restart, since progress isn't
+  persisted to disk any more than the Side Panel's own view of it is.
+- **`ctx.api.media.onProgress(jobId, handler)` is a push alternative to polling**, confirmed working
+  on real Chrome (docs/api-inventory.md §6 item 8). Synchronous, takes a closure, returns an
+  unsubscribe function — it never crosses the RPC boundary the way every other `media.*` method does
+  (a function-valued parameter cannot survive structured clone), so it costs nothing extra to also
+  keep a `job()` poll running as a belt-and-suspenders fallback (a background service-worker restart
+  between the push and your handler still loses it, same as any other in-memory-only state here):
+  ```javascript
+  const unsubscribe = ctx.api.media.onProgress(jobId, (status) => console.log(status));
+  // ... later, once you no longer care ...
+  unsubscribe();
+  ```
 - **`url` has to look like media** — an `.m3u8`/`.mpd` runs the HLS engine, a recognized direct-file
   extension (`.mp4`, `.mp3`, …) runs the multi-connection downloader. Anything else is refused before
   a job is even created; pass a URL from `list()` or one of a master entry's `variants`.

@@ -12,6 +12,7 @@ import { classifyMediaUrl } from '../../../shared/media-url-matcher';
 import { chromeStorageCache } from '../background/services/cache';
 import { relayDownloadEngineCommand } from '../features/media/download/engine-relay.background';
 import { collapseVariantShadowedEntries, listDetectedMedia, type DetectedMedia } from '../features/media/store';
+import { pushSubscriptionEvent } from './subscription-push';
 
 /**
  * Backs `synapseApi.media.*` (docs/api-inventory.md §3.1 — "phần việc lớn nhất" of the trần
@@ -73,8 +74,20 @@ export interface DownloadEngineTransport {
 
 const realTransport: DownloadEngineTransport = { send: relayDownloadEngineCommand };
 
+/** `jobId` → the tab that started it, ONLY when that tab is known (an RPC caller — a content-script
+ * dom Module or an uploaded script; a background Module has no tab of its own, see
+ * `synapse-api-host.ts`'s `pageApiFor` for the same absent-tabId case). Backs the push half of
+ * `onProgress` (docs/api-inventory.md §6 item 8): `recordMediaJobSnapshot` reads this to know WHERE
+ * to push, the same way `jobSnapshots` below answers WHAT to push. In-memory only, same
+ * service-worker-lifetime posture as `jobSnapshots` — entries are removed once a job reaches a
+ * terminal phase so this cannot grow without bound across a long session. */
+const jobTabOwners = new Map<string, number>();
+
+const TERMINAL_PHASES: ReadonlySet<SynapseMediaJobStatus['phase']> = new Set(['done', 'error', 'cancelled']);
+
 export async function performMediaDownload(
   options: SynapseMediaDownloadOptions,
+  tabId?: number,
   transport: DownloadEngineTransport = realTransport,
 ): Promise<string> {
   if (typeof options?.url !== 'string' || options.url === '') {
@@ -102,6 +115,7 @@ export async function performMediaDownload(
         }
       : { type: 'synapse:download-engine-command', op: 'START_TURBO', jobId, url: options.url };
 
+  if (tabId !== undefined) jobTabOwners.set(jobId, tabId);
   await transport.send(command);
   return jobId;
 }
@@ -121,18 +135,64 @@ const realSnapshotStore: MediaJobSnapshotStore = {
   set: (jobId, status) => jobSnapshots.set(jobId, status),
 };
 
+/** Backs `synapseApi.media.onProgress` for the IN-PROCESS transport only (a background Module,
+ * wired straight to this in `synapse-api-host.ts`) — no `chrome.*` messaging involved at all, since
+ * a background Module already runs in this exact JS realm. This is the one of the three
+ * `onProgress` implementations that needs no spike: it is the same in-memory pub/sub a plain
+ * `EventTarget` would give, just without one, matching `jobSnapshots`'s existing "a Map is enough"
+ * posture. The content-script/USER_SCRIPT transports (`rpc-client.ts`, `user-script-shim.ts`) are
+ * the ones crossing a world boundary — see `pushSubscriptionEvent` below for that half. */
+const localProgressListeners = new Map<string, Set<(status: SynapseMediaJobStatus) => void>>();
+
+export function onMediaProgressLocal(jobId: string, handler: (status: SynapseMediaJobStatus) => void): () => void {
+  let handlers = localProgressListeners.get(jobId);
+  if (!handlers) {
+    handlers = new Set();
+    localProgressListeners.set(jobId, handlers);
+  }
+  handlers.add(handler);
+  return () => {
+    handlers!.delete(handler);
+    if (handlers!.size === 0) localProgressListeners.delete(jobId);
+  };
+}
+
+/** Where a push actually goes out — injected so `recordMediaJobSnapshot` stays unit-testable
+ * without `chrome.tabs`, the same DI shape `DownloadEngineTransport` uses for the same reason. */
+export interface MediaProgressPushTransport {
+  push(tabId: number, jobId: string, status: SynapseMediaJobStatus): void;
+}
+const realPushTransport: MediaProgressPushTransport = {
+  push: (tabId, jobId, status) => pushSubscriptionEvent(tabId, `media.progress:${jobId}`, status),
+};
+
 /** Called from `background/index.ts`'s own `synapse:download-engine-event` listener for EVERY
  * broadcast the engine emits (not just ones a script started) — same reasoning `net.mock`'s
  * `ownerModuleId` isolation applies at the read side instead of the write side: recording every
  * event is cheap and harmless, `performMediaJob` doesn't know or care who started a job, and a
  * script polling a `jobId` it never started (someone else's, or the Side Panel's own) learns nothing
- * it couldn't already see for itself in the Side Panel UI. */
-export function recordMediaJobSnapshot(event: DownloadEngineEvent, store: MediaJobSnapshotStore = realSnapshotStore): void {
+ * it couldn't already see for itself in the Side Panel UI. `onProgress` (docs/api-inventory.md §6
+ * item 8) inherits the same openness deliberately, not as an oversight: it only ever fires for a
+ * jobId the caller already knows (from `download()`'s own return value or a `list()`/Side-Panel
+ * read), so broadcasting every event costs nothing new. */
+export function recordMediaJobSnapshot(
+  event: DownloadEngineEvent,
+  store: MediaJobSnapshotStore = realSnapshotStore,
+  pushTransport: MediaProgressPushTransport = realPushTransport,
+): void {
   const status: SynapseMediaJobStatus = { phase: event.phase };
   if (event.segmentsDone !== undefined) status.done = event.segmentsDone;
   if (event.segmentsTotal !== undefined) status.total = event.segmentsTotal;
   if (event.phase === 'error' && event.message !== undefined) status.error = event.message;
   store.set(event.jobId, status);
+
+  for (const handler of localProgressListeners.get(event.jobId) ?? []) handler(status);
+
+  const tabId = jobTabOwners.get(event.jobId);
+  if (tabId !== undefined) {
+    pushTransport.push(tabId, event.jobId, status);
+    if (TERMINAL_PHASES.has(event.phase)) jobTabOwners.delete(event.jobId);
+  }
 }
 
 export async function performMediaJob(jobId: unknown, store: MediaJobSnapshotStore = realSnapshotStore): Promise<SynapseMediaJobStatus | undefined> {

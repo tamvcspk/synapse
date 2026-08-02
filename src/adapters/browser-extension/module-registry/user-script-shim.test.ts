@@ -1,6 +1,7 @@
 import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { API_METHODS } from '../../../kernel/scopes';
+import { SUBSCRIPTION_PUSH_CHANNEL_ID } from '../../../shared/subscription-bridge';
 import { buildShimSource } from './user-script-shim';
 
 /**
@@ -15,12 +16,61 @@ import { buildShimSource } from './user-script-shim';
  * realm, which is what `vm.runInContext` (evaluating each source as a script in one context) models.
  * The first test below is the control that proves the harness can still see the failure.
  */
+/**
+ * Minimal `window`/`CustomEvent` stand-in — the USER_SCRIPT world has both for real (it shares the
+ * page's DOM), but `node:vm`'s bare context has neither. Needed once `subscriptionSource()`
+ * (docs/api-inventory.md §6 item 8) started calling `window.addEventListener` unconditionally at
+ * shim-eval time, not just inside a function body the way `uiSource()`'s `document.*` calls are —
+ * every existing test in this file would otherwise fail with `window is not defined` the moment
+ * ANY shim source is evaluated, not just the ones that exercise `onProgress`.
+ */
+function fakeWindow(): { window: unknown; CustomEvent: unknown; dispatch: (type: string, detail: unknown) => void } {
+  const listeners = new Map<string, Set<(event: unknown) => void>>();
+  const window = {
+    addEventListener: (type: string, handler: (event: unknown) => void) => {
+      let set = listeners.get(type);
+      if (!set) {
+        set = new Set();
+        listeners.set(type, set);
+      }
+      set.add(handler);
+    },
+    removeEventListener: (type: string, handler: (event: unknown) => void) => {
+      listeners.get(type)?.delete(handler);
+    },
+    dispatchEvent: (event: { type: string }) => {
+      for (const handler of listeners.get(event.type) ?? []) handler(event);
+    },
+  };
+  class CustomEvent {
+    type: string;
+    detail: unknown;
+    constructor(type: string, init?: { detail?: unknown }) {
+      this.type = type;
+      this.detail = init?.detail;
+    }
+  }
+  return {
+    window,
+    CustomEvent,
+    dispatch: (type, detail) => {
+      for (const handler of listeners.get(type) ?? []) handler({ type, detail });
+    },
+  };
+}
+
 function sharedRealm(sendMessage: (m: any) => unknown = () => Promise.resolve()): vm.Context {
-  return vm.createContext({
+  const { window, CustomEvent, dispatch } = fakeWindow();
+  const ctx = vm.createContext({
     chrome: { runtime: { sendMessage, onMessage: { addListener: () => {} } } },
     crypto,
     console,
+    window,
+    CustomEvent,
   });
+  (ctx as { __dispatchSubscriptionEvent?: (topic: string, data: unknown) => void }).__dispatchSubscriptionEvent = (topic, data) =>
+    dispatch(SUBSCRIPTION_PUSH_CHANNEL_ID, { topic, data });
+  return ctx;
 }
 
 function evaluateAll(sources: string[], context: vm.Context = sharedRealm()): vm.Context {
@@ -282,6 +332,83 @@ describe('buildShimSource', () => {
     });
   });
 
+  describe('media.onProgress (subscription-push spike, docs/api-inventory.md §6 item 8)', () => {
+    async function captureApi(moduleId: string, context = sharedRealm()): Promise<any> {
+      vm.runInContext(
+        buildShimSource(
+          moduleId,
+          `globalThis.__synapseModule = { id: ${JSON.stringify(moduleId)}, run: (input, ctx) => { globalThis['captured_' + ${JSON.stringify(moduleId)}] = ctx.api; } };`,
+        ),
+        context,
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      return (context as any)[`captured_${moduleId}`];
+    }
+
+    it('is synchronous and returns an unsubscribe function, like ui.*', async () => {
+      const api = await captureApi('uuid-sub');
+      const unsubscribe = api.media.onProgress('job-1', () => {});
+      expect(typeof unsubscribe).toBe('function');
+    });
+
+    it('calls the handler when the relayed CustomEvent carries this jobId’s topic', async () => {
+      const context = sharedRealm();
+      const api = await captureApi('uuid-sub', context);
+      const received: unknown[] = [];
+      api.media.onProgress('job-1', (status: unknown) => received.push(status));
+
+      (context as any).__dispatchSubscriptionEvent('media.progress:job-1', { phase: 'done' });
+
+      expect(received).toEqual([{ phase: 'done' }]);
+    });
+
+    it('never calls a handler registered for a different jobId’s topic', async () => {
+      const context = sharedRealm();
+      const api = await captureApi('uuid-sub', context);
+      const received: unknown[] = [];
+      api.media.onProgress('job-1', (status: unknown) => received.push(status));
+
+      (context as any).__dispatchSubscriptionEvent('media.progress:job-2', { phase: 'done' });
+
+      expect(received).toEqual([]);
+    });
+
+    it('stops calling the handler once unsubscribed', async () => {
+      const context = sharedRealm();
+      const api = await captureApi('uuid-sub', context);
+      const received: unknown[] = [];
+      const unsubscribe = api.media.onProgress('job-1', (status: unknown) => received.push(status));
+      unsubscribe();
+
+      (context as any).__dispatchSubscriptionEvent('media.progress:job-1', { phase: 'done' });
+
+      expect(received).toEqual([]);
+    });
+
+    it('keeps two scripts’ subscriptions on the shared window fully isolated from each other', async () => {
+      const context = sharedRealm();
+      const a = await captureApi('uuid-a', context);
+      const b = await captureApi('uuid-b', context);
+      const receivedA: unknown[] = [];
+      const receivedB: unknown[] = [];
+      a.media.onProgress('job-1', (status: unknown) => receivedA.push(status));
+      b.media.onProgress('job-1', (status: unknown) => receivedB.push(status));
+
+      (context as any).__dispatchSubscriptionEvent('media.progress:job-1', { phase: 'done' });
+
+      expect(receivedA).toEqual([{ phase: 'done' }]);
+      expect(receivedB).toEqual([{ phase: 'done' }]);
+    });
+
+    it('makes the global guard THROW for media.onProgress rather than return a promise', async () => {
+      const context = sharedRealm();
+      await captureApi('uuid-a', context);
+      const guard = (context as any).synapseApi;
+
+      expect(() => guard.media.onProgress('job-1', () => {})).toThrow(/not a global/);
+    });
+  });
+
   describe('RPC namespaces (structural coverage)', () => {
     /**
      * Guards against the exact bug found while adding `media`: a namespace present in
@@ -294,8 +421,12 @@ describe('buildShimSource', () => {
      * namespace/method added to the catalog and forgotten here fails here, not at a user's console.
      */
     function expectedShape(namespace: string): Record<string, unknown> {
+      // NOT filtered to transport === 'rpc': `media` mixes transports (onProgress is 'in-world',
+      // docs/api-inventory.md §6 item 8) since it lives on the same ctx.api.media object as the RPC
+      // methods, so the real shim's actual keys include both — this has to build the same union or
+      // the two would drift apart by construction, not by a bug either side introduced.
       const shape: Record<string, unknown> = {};
-      for (const m of API_METHODS.filter((x) => x.namespace === namespace && x.transport === 'rpc')) {
+      for (const m of API_METHODS.filter((x) => x.namespace === namespace)) {
         const parts = m.method.split('.');
         let cur = shape;
         for (let i = 0; i < parts.length - 1; i++) {

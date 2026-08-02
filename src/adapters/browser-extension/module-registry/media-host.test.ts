@@ -1,8 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CacheService } from '../../../kernel/module';
 import type { DetectedMedia } from '../features/media/store';
-import type { DownloadEngineTransport, MediaJobSnapshotStore } from './media-host';
-import { performMediaControl, performMediaDownload, performMediaInspect, performMediaJob, performMediaList, recordMediaJobSnapshot } from './media-host';
+import type { DownloadEngineTransport, MediaJobSnapshotStore, MediaProgressPushTransport } from './media-host';
+import {
+  onMediaProgressLocal,
+  performMediaControl,
+  performMediaDownload,
+  performMediaInspect,
+  performMediaJob,
+  performMediaList,
+  recordMediaJobSnapshot,
+} from './media-host';
 
 /**
  * `cache`/`transport`/`store` are all injected — same DI pattern `net-mock-host.test.ts`'s
@@ -36,6 +44,16 @@ function fakeSnapshotStore(): MediaJobSnapshotStore {
     get: (jobId) => map.get(jobId),
     set: (jobId, status) => {
       map.set(jobId, status);
+    },
+  };
+}
+
+function fakePushTransport(): MediaProgressPushTransport & { pushed: { tabId: number; jobId: string; status: unknown }[] } {
+  const pushed: { tabId: number; jobId: string; status: unknown }[] = [];
+  return {
+    pushed,
+    push: (tabId, jobId, status) => {
+      pushed.push({ tabId, jobId, status });
     },
   };
 }
@@ -160,19 +178,19 @@ describe('performMediaInspect', () => {
 describe('performMediaDownload', () => {
   it('rejects a missing/empty url before touching the transport', async () => {
     const transport = fakeTransport();
-    await expect(performMediaDownload({ url: '' }, transport)).rejects.toThrow(/"url" is required/);
+    await expect(performMediaDownload({ url: '' }, undefined, transport)).rejects.toThrow(/"url" is required/);
     expect(transport.sent).toHaveLength(0);
   });
 
   it('rejects a url with no recognized media extension', async () => {
     const transport = fakeTransport();
-    await expect(performMediaDownload({ url: 'https://example.com/page' }, transport)).rejects.toThrow(/not a recognized media file/);
+    await expect(performMediaDownload({ url: 'https://example.com/page' }, undefined, transport)).rejects.toThrow(/not a recognized media file/);
     expect(transport.sent).toHaveLength(0);
   });
 
   it('sends op START for a stream (.m3u8) url and returns a fresh jobId', async () => {
     const transport = fakeTransport();
-    const jobId = await performMediaDownload({ url: 'https://cdn.example.com/master.m3u8' }, transport);
+    const jobId = await performMediaDownload({ url: 'https://cdn.example.com/master.m3u8' }, undefined, transport);
 
     expect(typeof jobId).toBe('string');
     expect(jobId.length).toBeGreaterThan(0);
@@ -181,22 +199,22 @@ describe('performMediaDownload', () => {
 
   it('passes resolutionLabel through only when given', async () => {
     const transport = fakeTransport();
-    const jobId = await performMediaDownload({ url: 'https://cdn.example.com/master.m3u8', resolutionLabel: '1080p' }, transport);
+    const jobId = await performMediaDownload({ url: 'https://cdn.example.com/master.m3u8', resolutionLabel: '1080p' }, undefined, transport);
 
     expect(transport.sent[0]).toMatchObject({ resolutionLabel: '1080p', jobId });
   });
 
   it('sends op START_TURBO for a direct video/audio file url', async () => {
     const transport = fakeTransport();
-    const jobId = await performMediaDownload({ url: 'https://cdn.example.com/movie.mp4' }, transport);
+    const jobId = await performMediaDownload({ url: 'https://cdn.example.com/movie.mp4' }, undefined, transport);
 
     expect(transport.sent).toEqual([{ type: 'synapse:download-engine-command', op: 'START_TURBO', jobId, url: 'https://cdn.example.com/movie.mp4' }]);
   });
 
   it('generates a distinct jobId per call', async () => {
     const transport = fakeTransport();
-    const a = await performMediaDownload({ url: 'https://cdn.example.com/a.mp4' }, transport);
-    const b = await performMediaDownload({ url: 'https://cdn.example.com/b.mp4' }, transport);
+    const a = await performMediaDownload({ url: 'https://cdn.example.com/a.mp4' }, undefined, transport);
+    const b = await performMediaDownload({ url: 'https://cdn.example.com/b.mp4' }, undefined, transport);
     expect(a).not.toBe(b);
   });
 });
@@ -232,6 +250,77 @@ describe('recordMediaJobSnapshot / performMediaJob', () => {
     recordMediaJobSnapshot({ type: 'synapse:download-engine-event', jobId: 'j1', phase: 'done' }, store);
 
     await expect(performMediaJob('j1', store)).resolves.toEqual({ phase: 'done' });
+  });
+});
+
+describe('onMediaProgressLocal / recordMediaJobSnapshot push (docs/api-inventory.md §6 item 8)', () => {
+  it('calls a locally-registered handler for the same jobId, in-process, with no chrome.* involved', () => {
+    const store = fakeSnapshotStore();
+    const push = fakePushTransport();
+    const received: unknown[] = [];
+    const unsubscribe = onMediaProgressLocal('j1', (status) => received.push(status));
+
+    recordMediaJobSnapshot({ type: 'synapse:download-engine-event', jobId: 'j1', phase: 'segments', segmentsDone: 1, segmentsTotal: 10 }, store, push);
+
+    expect(received).toEqual([{ phase: 'segments', done: 1, total: 10 }]);
+    unsubscribe();
+  });
+
+  it('never calls a handler registered for a different jobId', () => {
+    const store = fakeSnapshotStore();
+    const push = fakePushTransport();
+    const received: unknown[] = [];
+    onMediaProgressLocal('other-job', (status) => received.push(status));
+
+    recordMediaJobSnapshot({ type: 'synapse:download-engine-event', jobId: 'j1', phase: 'done' }, store, push);
+
+    expect(received).toEqual([]);
+  });
+
+  it('stops calling the handler once unsubscribed', () => {
+    const store = fakeSnapshotStore();
+    const push = fakePushTransport();
+    const received: unknown[] = [];
+    const unsubscribe = onMediaProgressLocal('j1', (status) => received.push(status));
+    unsubscribe();
+
+    recordMediaJobSnapshot({ type: 'synapse:download-engine-event', jobId: 'j1', phase: 'done' }, store, push);
+
+    expect(received).toEqual([]);
+  });
+
+  it('pushes to the tab that started the job, only when download() was called with one', async () => {
+    const engineTransport = fakeTransport();
+    const store = fakeSnapshotStore();
+    const push = fakePushTransport();
+
+    const jobId = await performMediaDownload({ url: 'https://cdn.example.com/a.mp4' }, 7, engineTransport);
+    recordMediaJobSnapshot({ type: 'synapse:download-engine-event', jobId, phase: 'chunks', segmentsDone: 2, segmentsTotal: 5 }, store, push);
+
+    expect(push.pushed).toEqual([{ tabId: 7, jobId, status: { phase: 'chunks', done: 2, total: 5 } }]);
+  });
+
+  it('never pushes for a job started with no tabId (a background Module)', async () => {
+    const engineTransport = fakeTransport();
+    const store = fakeSnapshotStore();
+    const push = fakePushTransport();
+
+    const jobId = await performMediaDownload({ url: 'https://cdn.example.com/a.mp4' }, undefined, engineTransport);
+    recordMediaJobSnapshot({ type: 'synapse:download-engine-event', jobId, phase: 'done' }, store, push);
+
+    expect(push.pushed).toEqual([]);
+  });
+
+  it('forgets the tab owner once the job reaches a terminal phase, so a later stray event for the same jobId does not push again', async () => {
+    const engineTransport = fakeTransport();
+    const store = fakeSnapshotStore();
+    const push = fakePushTransport();
+
+    const jobId = await performMediaDownload({ url: 'https://cdn.example.com/a.mp4' }, 7, engineTransport);
+    recordMediaJobSnapshot({ type: 'synapse:download-engine-event', jobId, phase: 'done' }, store, push);
+    recordMediaJobSnapshot({ type: 'synapse:download-engine-event', jobId, phase: 'segments', segmentsDone: 1, segmentsTotal: 1 }, store, push);
+
+    expect(push.pushed).toHaveLength(1);
   });
 });
 

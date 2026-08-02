@@ -381,6 +381,18 @@ export const API_METHODS: ApiMethodDefinition[] = [
     transport: 'rpc',
   },
   {
+    namespace: 'media',
+    method: 'onProgress',
+    scope: 'media',
+    signature: 'onProgress(jobId: string, handler: (status: SynapseMediaJobStatus) => void): () => void',
+    description:
+      'Push updates for a job started by media.download, instead of polling job() — the first real ' +
+      'use of the subscription mechanism docs/api-inventory.md §4 spiked (§6 item 8), confirmed on ' +
+      'real Chrome. Runs in your own world, like ui.*, and never reaches this scope check the way ' +
+      'job()/download() do (a function-valued handler cannot cross the RPC boundary at all).',
+    transport: 'in-world',
+  },
+  {
     namespace: 'page',
     method: 'eval',
     scope: 'page.eval',

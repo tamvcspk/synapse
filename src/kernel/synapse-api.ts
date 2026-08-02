@@ -400,6 +400,21 @@ export interface SynapseMediaApi {
   /** Acts on a job started by `download()`. `'stop-live'` only makes sense for a live capture (a
    * sliding-window manifest with no `#EXT-X-ENDLIST`) and is a no-op otherwise. */
   control(jobId: string, action: SynapseMediaControlAction): Promise<void>;
+  /**
+   * Push updates for a job started by `download()`, instead of polling `job()` — the first real
+   * consumer of the subscription mechanism docs/api-inventory.md §4 spiked (§6 item 8).
+   * **Synchronous, and takes a closure — like `ui`, not like the rest of `media`**: this never
+   * crosses the RPC boundary (a function-valued `handler` cannot survive structured clone), so the
+   * platform registers it in your own world and only ever pushes the already-serializable
+   * `SynapseMediaJobStatus` across. Returns an unsubscribe function.
+   *
+   * **Delivery into the USER_SCRIPT world is confirmed working on real Chrome** — the platform CAN
+   * push into that world (docs/api-inventory.md §6 item 8's write-up has the mechanism); `job(jobId)`
+   * polling remains available as a fallback (a background service-worker restart between the push
+   * and your handler still loses in-flight events, same as any other in-memory-only state here), but
+   * is no longer the only working path.
+   */
+  onProgress(jobId: string, handler: (status: SynapseMediaJobStatus) => void): () => void;
 }
 
 /**

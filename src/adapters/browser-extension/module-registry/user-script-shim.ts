@@ -1,3 +1,4 @@
+import { SUBSCRIPTION_PUSH_CHANNEL_ID } from '../../../shared/subscription-bridge';
 import {
   KEY_SEPARATOR,
   SURFACE_QUOTA,
@@ -227,6 +228,43 @@ const __synapseUi = (function (ownerId) {
 `.trim();
 }
 
+/**
+ * `synapseApi.media.onProgress` for the USER_SCRIPT world — docs/api-inventory.md §4/§6 item 8, the
+ * subscription spike. This was the leg that mattered: `content-scripts/index.ts` relays a background
+ * push as a DOM `CustomEvent` on `window` (`SUBSCRIPTION_PUSH_CHANNEL_ID`), and this world shares
+ * that `window` with ISOLATED. Whether Chrome actually delivers a DOM event dispatched from one JS
+ * world into a listener registered in another when USER_SCRIPT is one of the two worlds was open
+ * (only MAIN↔ISOLATED was proven before this, `utils/main-world/event-channel.ts`) —
+ * **confirmed on real Chrome**: an uploaded script's `onProgress` handler received a real
+ * `media.download` push (docs/LESSONS.md's `chrome.userScripts.register` section has the write-up).
+ * `job()` polling remains available as a fallback, no longer as the only working path.
+ *
+ * One `window.addEventListener` per active script (this function is emitted once per
+ * `buildShimSource` call, same as `uiSource()`), each closing over its OWN topic→handlers registry
+ * so two scripts' subscriptions can never see each other's — same per-script isolation `__synapseUi`
+ * already gives toasts/icons/badges.
+ */
+function subscriptionSource(): string {
+  const channelId = JSON.stringify(SUBSCRIPTION_PUSH_CHANNEL_ID);
+  return `
+const __synapseSubscriptions = {};
+window.addEventListener(${channelId}, function (event) {
+  var handlers = __synapseSubscriptions[event.detail.topic];
+  if (!handlers) return;
+  handlers.slice().forEach(function (h) { h(event.detail.data); });
+});
+function __synapseSubscribe(topic, handler) {
+  (__synapseSubscriptions[topic] || (__synapseSubscriptions[topic] = [])).push(handler);
+  return function () {
+    var arr = __synapseSubscriptions[topic];
+    if (!arr) return;
+    var i = arr.indexOf(handler);
+    if (i !== -1) arr.splice(i, 1);
+  };
+}
+`.trim();
+}
+
 /** Injected before the user's code: the RPC transport plus the `synapseApi` facade. Must stay in
  * sync with `kernel/synapse-api.ts` (the interface) and `kernel/scopes.ts`'s `API_METHODS` (which
  * is what the background will actually accept) — a method here that isn't in the catalog is
@@ -258,6 +296,8 @@ function __synapseCall(namespace, method, args) {
 }
 
 ${uiSource()}
+
+${subscriptionSource()}
 
 // lib.* (docs/api-inventory.md §3.0) — set by user-script-lib-payload.ts, registered as a separate
 // { file } entry BEFORE this code (chrome-module-registry.ts's registerUploadedScript). Captured
@@ -305,6 +345,7 @@ const synapseApi = {
     download: function (options) { return __synapseCall('media', 'download', [options]); },
     job: function (jobId) { return __synapseCall('media', 'job', [jobId]); },
     control: function (jobId, action) { return __synapseCall('media', 'control', [jobId, action]); },
+    onProgress: function (jobId, handler) { return __synapseSubscribe('media.progress:' + jobId, handler); },
   },
   page: {
     eval: function (code, args) { return __synapseCall('page', 'eval', [code, args]); },
@@ -367,6 +408,9 @@ if (!globalThis.synapseApi) {
       download: __synapseWrongHandle,
       job: __synapseWrongHandle,
       control: __synapseWrongHandle,
+      // Synchronous like ui.*'s stubs (must THROW, not reject) — onProgress never crosses the RPC
+      // boundary, so a rejected promise here would read as a truthy unsubscribe function.
+      onProgress: __synapseWrongHandleSync,
     },
     page: {
       eval: __synapseWrongHandle,

@@ -5,7 +5,7 @@ import { parseM3u8 } from '../../../shared/media-manifest-parser';
 import { buildZip } from '../../../shared/zip';
 import { performFilesSave } from './files-save-host';
 import { readable } from './lib-readable';
-import { performMediaControl, performMediaDownload, performMediaInspect, performMediaJob, performMediaList } from './media-host';
+import { onMediaProgressLocal, performMediaControl, performMediaDownload, performMediaInspect, performMediaJob, performMediaList } from './media-host';
 import { performMockAdd, performMockList, performMockRemove } from './net-mock-host';
 import { performNetRequest } from './net-request-host';
 import { performPageEval } from './page-eval-host';
@@ -115,9 +115,16 @@ export function createSynapseApi(moduleId: string, context: SynapseApiContext = 
     media: {
       list: () => performMediaList(),
       inspect: (url) => performMediaInspect(url),
-      download: (options) => performMediaDownload(options),
+      download: (options) => performMediaDownload(options, context.tabId),
       job: (jobId) => performMediaJob(jobId),
       control: (jobId, action) => performMediaControl(jobId, action),
+      // Real, working implementation for the in-process (background-Module) transport — no world
+      // boundary to cross here, so it needs no spike (see media-host.ts's own doc comment on
+      // onMediaProgressLocal). The content-script and USER_SCRIPT transports each carry their OWN
+      // implementation instead of calling through here (rpc-client.ts, user-script-shim.ts) — same
+      // "every transport builds its own in-world thing" shape `ui` already established, because
+      // `onProgress` never crosses the RPC boundary this file backs (docs/api-inventory.md §6 item 8).
+      onProgress: (jobId, handler) => onMediaProgressLocal(jobId, handler),
     },
     page: pageApiFor(context.tabId),
   };
