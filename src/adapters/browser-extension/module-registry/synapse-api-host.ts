@@ -1,9 +1,11 @@
 import type { SynapseApi, SynapseUiApi } from '../../../kernel/synapse-api';
 import { htmlToMarkdown } from '../../../shared/html-to-markdown';
+import { isValidMatchPattern, matchesAnyPattern, matchesUrlPattern } from '../../../shared/match-pattern';
 import { parseM3u8 } from '../../../shared/media-manifest-parser';
 import { buildZip } from '../../../shared/zip';
 import { performFilesSave } from './files-save-host';
 import { readable } from './lib-readable';
+import { performMediaControl, performMediaDownload, performMediaInspect, performMediaJob, performMediaList } from './media-host';
 import { performMockAdd, performMockList, performMockRemove } from './net-mock-host';
 import { performNetRequest } from './net-request-host';
 import { createScriptStorage } from './script-storage';
@@ -15,7 +17,13 @@ import { createScriptStorage } from './script-storage';
  * are real here too, not stubbed — a background Module calling `readable()` with no `doc` (there is
  * no page `document` in a service worker) fails with a plain `ReferenceError`, an honest failure for
  * a missing input rather than a crafted "unavailable" message. */
-const lib = { hls: { parse: parseM3u8 }, readable, toMarkdown: htmlToMarkdown, zip: buildZip };
+const lib = {
+  hls: { parse: parseM3u8 },
+  readable,
+  toMarkdown: htmlToMarkdown,
+  zip: buildZip,
+  matchPattern: { isValid: isValidMatchPattern, test: matchesUrlPattern, testAny: matchesAnyPattern },
+};
 
 /**
  * The one real implementation of `synapseApi` (docs/ROADMAP.md §11.3). All three transports funnel
@@ -73,5 +81,12 @@ export function createSynapseApi(moduleId: string): SynapseApi {
     },
     files: { save: performFilesSave },
     lib,
+    media: {
+      list: () => performMediaList(),
+      inspect: (url) => performMediaInspect(url),
+      download: (options) => performMediaDownload(options),
+      job: (jobId) => performMediaJob(jobId),
+      control: (jobId, action) => performMediaControl(jobId, action),
+    },
   };
 }

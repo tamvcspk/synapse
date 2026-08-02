@@ -1,5 +1,6 @@
 import type { AiService, BusService, Capability, CacheService, ModuleContext } from './module';
 import { htmlToMarkdown } from '../shared/html-to-markdown';
+import { isValidMatchPattern, matchesAnyPattern, matchesUrlPattern } from '../shared/match-pattern';
 import { parseM3u8 } from '../shared/media-manifest-parser';
 import { buildZip } from '../shared/zip';
 import type { SynapseApi } from './synapse-api';
@@ -65,11 +66,18 @@ function unavailableSynapseApi(moduleId: string): SynapseApi {
     ui: { toast: failSync, icon: failSync, badge: failSync, dismiss: failSync, clear: failSync },
     net: { request: fail, mock: { add: fail, remove: fail, list: fail } },
     files: { save: fail },
+    media: { list: fail, inspect: fail, download: fail, job: fail, control: fail },
     // hls.parse/toMarkdown/zip have no context dependency to be "unavailable" — pure computation
     // (docs/api-inventory.md §3.0) importable straight from shared/, so the real implementation is
     // always constructible here. `readable` is the one exception: its real implementation lives in
     // module-registry/lib-readable.ts (browser-extension Adapter layer), which kernel/ must not
     // depend on — so it gets the same throwing stub as everything else in this fallback.
-    lib: { hls: { parse: parseM3u8 }, readable: failSync, toMarkdown: htmlToMarkdown, zip: buildZip },
+    lib: {
+      hls: { parse: parseM3u8 },
+      readable: failSync,
+      toMarkdown: htmlToMarkdown,
+      zip: buildZip,
+      matchPattern: { isValid: isValidMatchPattern, test: matchesUrlPattern, testAny: matchesAnyPattern },
+    },
   };
 }

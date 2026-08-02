@@ -260,13 +260,25 @@ function __synapseCall(namespace, method, args) {
 ${uiSource()}
 
 // lib.* (docs/api-inventory.md §3.0) — set by user-script-lib-payload.ts, registered as a separate
-// { file } entry BEFORE this code (chrome-module-registry.ts's registerUploadedScript), so it is
-// already present here by the time this line runs. Captured and deleted immediately, same reason
-// __synapseModule is below: every uploaded script's own registration lists that same file, so on a
-// page running several scripts it runs once per script — each run must hand its result only to the
-// script that triggered it, never leak into the shared USER_SCRIPT world past this point.
+// { file } entry BEFORE this code (chrome-module-registry.ts's registerUploadedScript). Captured
+// but DELIBERATELY NOT deleted — unlike __synapseModule below, which MUST be deleted because it
+// carries one script's own identity/manifest and leaking it into the next script's read would hand
+// that script someone else's id. __synapseLib carries no such thing: every function in it is pure
+// and script-agnostic (parseM3u8/Readability/toMarkdown/zip/matchPattern — none of them close over a
+// moduleId or any caller identity), so two scripts reading the exact same value is not a leak, it's
+// the correct outcome.
+//
+// Bugfix (found on real Chrome with 2 scripts active on one page, both matching all_urls): this
+// USED to delete, on the theory that every uploaded script's registration re-lists the same file
+// entry, so it always runs fresh right before this line. With only one script active that held —
+// but with a second script ALSO registered against the same URL, the second script's ctx.api.lib was
+// undefined. The file entry is the exact same resource URL for every registered script, and Chrome
+// does not guarantee re-running it once per registration on a page where several scripts share it —
+// whichever script's own read raced (or lost a dedupe) after an earlier script had already
+// captured-and-deleted it got nothing. Not deleting removes the race entirely: whichever script's
+// file entry actually ran leaves a value every other script's shim can safely read too, since the
+// content is identical no matter which script's copy set it.
 const __synapseLib = globalThis.__synapseLib;
-delete globalThis.__synapseLib;
 
 const synapseApi = {
   storage: {
@@ -286,6 +298,13 @@ const synapseApi = {
   },
   files: {
     save: function (options) { return __synapseCall('files', 'save', [options]); },
+  },
+  media: {
+    list: function () { return __synapseCall('media', 'list', []); },
+    inspect: function (url) { return __synapseCall('media', 'inspect', [url]); },
+    download: function (options) { return __synapseCall('media', 'download', [options]); },
+    job: function (jobId) { return __synapseCall('media', 'job', [jobId]); },
+    control: function (jobId, action) { return __synapseCall('media', 'control', [jobId, action]); },
   },
   lib: __synapseLib,
 };
@@ -339,11 +358,23 @@ if (!globalThis.synapseApi) {
     files: {
       save: __synapseWrongHandle,
     },
+    media: {
+      list: __synapseWrongHandle,
+      inspect: __synapseWrongHandle,
+      download: __synapseWrongHandle,
+      job: __synapseWrongHandle,
+      control: __synapseWrongHandle,
+    },
     lib: {
       hls: { parse: __synapseWrongHandleSync },
       readable: __synapseWrongHandleSync,
       toMarkdown: __synapseWrongHandleSync,
       zip: __synapseWrongHandleSync,
+      matchPattern: {
+        isValid: __synapseWrongHandleSync,
+        test: __synapseWrongHandleSync,
+        testAny: __synapseWrongHandleSync,
+      },
     },
   };
 }

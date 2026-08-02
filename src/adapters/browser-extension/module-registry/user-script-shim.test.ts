@@ -239,24 +239,38 @@ describe('buildShimSource', () => {
       });
     });
 
-    it('deletes globalThis.__synapseLib immediately, so it never leaks to a second script', async () => {
+    it('does NOT delete globalThis.__synapseLib — leaving it in place is what fixes the 2-script bug below', async () => {
       const context = sharedRealm();
       await captureApiWithLib('uuid-a', context);
-      expect((context as any).__synapseLib).toBeUndefined();
+      expect((context as any).__synapseLib).toBe(FAKE_LIB);
     });
 
-    it('does not silently fall back to a previous script’s lib if this script’s own { file } entry is missing', async () => {
-      // Models a registration bug (the { file } entry dropped) rather than the happy path: nothing
-      // set __synapseLib before this shim ran, so ctx.api.lib must be undefined, not stale data
-      // some earlier script in the same vm context happened to leave behind.
+    /**
+     * Bugfix, found on real Chrome: with two scripts both registered against the same page (both
+     * matching `<all_urls>`), the SECOND script's `ctx.api.lib` came back `undefined`. Root cause —
+     * `{file: libPayloadPath}` is the exact same resource URL in both scripts' own `js` arrays, and
+     * Chrome does not guarantee re-running it once per registration on a page where several scripts
+     * share it. The old design captured `globalThis.__synapseLib` and immediately `delete`d it (on
+     * the theory that every script's own `{file}` entry always re-sets it fresh first) — so whichever
+     * script's shim ran second, after an earlier script's `{file}` entry either didn't re-fire or
+     * simply lost the race to that earlier script's delete, got nothing. This models the exact
+     * failure: only the FIRST script's `{file}` entry actually sets the global (the second script's
+     * own copy of that entry is simulated as a no-op, matching what Chrome did) — the fix is that NOT
+     * deleting means the second script can still read the first script's value, safely, because the
+     * content is script-agnostic (see `user-script-lib-payload.ts`'s doc comment for why that's fine).
+     */
+    it('still hands ctx.api.lib to a second script whose own { file } entry did not fire, because the global is never deleted', async () => {
       const context = sharedRealm();
-      await captureApiWithLib('uuid-a', context); // leaves __synapseLib deleted afterward
+      await captureApiWithLib('uuid-a', context); // only this script's own {file} entry "ran"
+      // uuid-b's {file} entry is simulated as a no-op — not re-assigning __synapseLib here — the
+      // exact condition observed on real Chrome with 2 active scripts.
       vm.runInContext(
         buildShimSource('uuid-b', `globalThis.__synapseModule = { id: 'uuid-b', run: (input, ctx) => { globalThis.captured_b = ctx.api; } };`),
         context,
       );
       await new Promise((resolve) => setImmediate(resolve));
-      expect((context as any).captured_b.lib).toBeUndefined();
+      expect((context as any).captured_b.lib).toBe(FAKE_LIB);
+      expect((context as any).captured_b.lib.hls.parse).toBe(FAKE_LIB.hls.parse);
     });
 
     it('makes the global guard THROW for lib.hls.parse rather than return a promise', async () => {
@@ -265,6 +279,59 @@ describe('buildShimSource', () => {
       const guard = (context as any).synapseApi;
 
       expect(() => guard.lib.hls.parse('#EXTM3U', 'https://x.test/')).toThrow(/not a global/);
+    });
+  });
+
+  describe('RPC namespaces (structural coverage)', () => {
+    /**
+     * Guards against the exact bug found while adding `media`: a namespace present in
+     * `API_METHODS` (so `rpc-handler.ts` accepts calls to it) but never wired into THIS file's own
+     * `synapseApi` object literal — every RPC method reference here is hand-written, not generated
+     * from the catalog, so nothing but a test catches the two drifting apart. `ctx.api.media` was
+     * `undefined` for every uploaded script for a while with zero failing test, because no existing
+     * test enumerated namespaces generically — only `ui` (an in-world namespace) had that coverage.
+     * Built from `API_METHODS` itself, the same reasoning the `ui` coverage test above uses, so a
+     * namespace/method added to the catalog and forgotten here fails here, not at a user's console.
+     */
+    function expectedShape(namespace: string): Record<string, unknown> {
+      const shape: Record<string, unknown> = {};
+      for (const m of API_METHODS.filter((x) => x.namespace === namespace && x.transport === 'rpc')) {
+        const parts = m.method.split('.');
+        let cur = shape;
+        for (let i = 0; i < parts.length - 1; i++) {
+          cur = (cur[parts[i]!] ??= {}) as Record<string, unknown>;
+        }
+        cur[parts[parts.length - 1]!] = true;
+      }
+      return shape;
+    }
+
+    function assertShape(actual: unknown, expected: Record<string, unknown>, path: string): void {
+      expect(actual, path).toBeTypeOf('object');
+      expect(Object.keys(actual as object).sort(), `${path} keys`).toEqual(Object.keys(expected).sort());
+      for (const [key, value] of Object.entries(expected)) {
+        if (value === true) {
+          expect((actual as Record<string, unknown>)[key], `${path}.${key}`).toBeTypeOf('function');
+        } else {
+          assertShape((actual as Record<string, unknown>)[key], value as Record<string, unknown>, `${path}.${key}`);
+        }
+      }
+    }
+
+    const rpcNamespaces = [...new Set(API_METHODS.filter((m) => m.transport === 'rpc').map((m) => m.namespace))];
+
+    it.each(rpcNamespaces)('ctx.api.%s exposes exactly the RPC methods the catalog declares', async (namespace) => {
+      const context = sharedRealm();
+      vm.runInContext(
+        buildShimSource(
+          'uuid-shape',
+          `globalThis.__synapseModule = { id: 'uuid-shape', run: (input, ctx) => { globalThis.captured = ctx.api; } };`,
+        ),
+        context,
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      const api = (context as { captured: Record<string, unknown> }).captured;
+      assertShape(api[namespace], expectedShape(namespace), `api.${namespace}`);
     });
   });
 

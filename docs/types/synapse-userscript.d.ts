@@ -34,6 +34,14 @@
  *   runs under the cheapest mechanism (a MAIN-world fetch/XHR patch, no DevTools "being
  *   debugged" banner) — a script cannot request `debugger` or `dnr` directly.
  *   Requires a `match` list: `{ scope, match: [...] }`.
+ * - `media` — Detect, inspect and download media (video/audio/HLS) found on any page.
+ *   List media the network sniffer has detected, inspect an HLS manifest, and start/poll/control
+ *   a download - the GM_video-shaped hole Tampermonkey has no equivalent for at all
+ *   (docs/api-inventory.md section 3.1). One scope for list/inspect/download/job/control:
+ *   splitting detection from download would be an empty two-prompt ritual (anyone who allows
+ *   detection also wants to download). No `match` dimension - unlike `net.request`/`net.mock`,
+ *   this is all-or-nothing, the same posture the Side Panel already takes toward everything it
+ *   detects.
  *
  * ### Disclosed — the script can do this anyway; declaring it is transparency, not a gate
  *
@@ -91,6 +99,18 @@
  *   are refused.
  * - `synapseApi.net.mock.list(): Promise<SynapseMockRule[]>` — requires `net.mock`.
  *   List this script's own rules — never another script's or the user's manually-created ones.
+ * - `synapseApi.media.list(): Promise<SynapseMediaEntry[]>` — requires `media`.
+ *   Every media file the network sniffer has detected so far — the same list the Side Panel
+ *   shows.
+ * - `synapseApi.media.inspect(url: string): Promise<SynapseMediaInspectResult>` — requires `media`.
+ *   Fetch and parse an HLS manifest URL fresh (not a cached read).
+ * - `synapseApi.media.download(options: SynapseMediaDownloadOptions): Promise<string>` — requires `media`.
+ *   Start a download; returns the jobId immediately without waiting for completion.
+ * - `synapseApi.media.job(jobId: string): Promise<SynapseMediaJobStatus | undefined>` — requires `media`.
+ *   Poll a snapshot of a download started by media.download — no subscription exists
+ *   (docs/api-inventory.md §4).
+ * - `synapseApi.media.control(jobId: string, action: 'pause' | 'resume' | 'cancel' | 'stop-live'): Promise<void>` — requires `media`.
+ *   Act on a job started by media.download.
  * - `synapseApi.lib.hls.parse(text: string, baseUrl: string): SynapseHlsManifest` — no scope required — pure computation (runs in your own world — synchronous).
  *   Parse an HLS (.m3u8) manifest already fetched by the script. No scope: pure computation on
  *   data the caller already has, granted no privilege (docs/api-inventory.md §3.0).
@@ -103,6 +123,13 @@
  *   has.
  * - `synapseApi.lib.zip(entries: { name, data }[]): Uint8Array` — no scope required — pure computation (runs in your own world — synchronous).
  *   Build an uncompressed .zip archive from named byte buffers. No scope: pure computation.
+ * - `synapseApi.lib.matchPattern.isValid(pattern: string): boolean` — no scope required — pure computation (runs in your own world — synchronous).
+ *   Whether pattern is well-formed Chrome match-pattern syntax. No scope: pure computation.
+ * - `synapseApi.lib.matchPattern.test(url: string, pattern: string): boolean` — no scope required — pure computation (runs in your own world — synchronous).
+ *   Whether url falls under pattern - the exact matcher net.request/net.mock enforce against. No
+ *   scope: pure computation.
+ * - `synapseApi.lib.matchPattern.testAny(url: string, patterns: string[]): boolean` — no scope required — pure computation (runs in your own world — synchronous).
+ *   Whether url falls under any of patterns. No scope: pure computation.
  */
 
 /**
@@ -111,7 +138,7 @@
  * deliberately absent and can never become a scope: `bus.emit(moduleId, …)` reaches every bundled
  * Module's own listener, which is a god-capability no consent prompt can describe honestly.
  */
-type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch' | 'ui.render' | 'net.request' | 'files.save' | 'net.mock';
+type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch' | 'ui.render' | 'net.request' | 'files.save' | 'net.mock' | 'media';
 
 /**
  * One entry in a script's `scopes` declaration. `match` is the resource dimension: a grant is
@@ -358,6 +385,125 @@ interface SynapseLibApi {
    * no dependency (docs/ROADMAP.md §1). Pass the result to `files.save` with
    * `contentEncoding: 'base64'` to write it to disk. */
   zip(entries: { name: string; data: Uint8Array }[]): Uint8Array;
+  /** Chrome extension match-pattern syntax (`*://*.example.com/*` — the same shape `net.request`'s
+   * `match` grants use, and Tampermonkey's `@connect`). Pure, no scope: this is the exact matcher
+   * `net.request`/`net.mock` are enforced against, exposed rather than re-implemented, because its
+   * edge cases (the `*.` subdomain-wildcard rule, `*` as scheme meaning http/https only) are easy to
+   * get subtly wrong and NOT the same rules a standard `URLPattern` follows. Useful to pre-filter a
+   * batch of candidate URLs against your own declared `match` list before firing `net.request` for
+   * each one, instead of discovering the rejection at the call site one at a time. */
+  matchPattern: {
+    /** Whether `pattern` itself is well-formed Chrome match-pattern syntax. */
+    isValid(pattern: string): boolean;
+    /** Whether `url` falls under `pattern`. An unparseable `url` or `pattern` never matches. */
+    test(url: string, pattern: string): boolean;
+    /** Whether `url` falls under any of `patterns`. */
+    testAny(url: string, patterns: string[]): boolean;
+  };
+}
+
+/** A `synapseApi.media.list()`/`.download()`-eligible file the network sniffer already detected —
+ * mirrors `features/media/store.ts`'s `DetectedMedia` (duplicated here, not imported: this file
+ * must stay import-free, see the file banner), trimmed to the fields a script has any use for.
+ * `requestHeaders` is deliberately excluded: it exists so Synapse's OWN later fetch of this URL can
+ * replay a handful of allowlisted headers, not something a script needs to see or act on. */
+interface SynapseMediaEntry {
+  id: string;
+  url: string;
+  kind: 'video' | 'audio' | 'stream';
+  pageUrl?: string;
+  tabUrl?: string;
+  /** ISO timestamp — display-only; list order is detection order. */
+  detectedAt: string;
+  thirdParty?: boolean;
+  /** Best-effort signal the URL carries a signed/expiry query param (S3-style presigned URL, CDN
+   * token-auth, …) — a label, not a filter: a legitimate file being served this way is normal. */
+  expiring?: boolean;
+  resolution?: string;
+  /** Set once a `kind: 'stream'` entry has been auto-inspected and turned out to be a media/variant
+   * playlist (not a master listing other resolutions) — segment count only, not the segment URLs
+   * themselves (those are hundreds-long and go stale the moment a live manifest rotates). */
+  segmentCount?: number;
+  /** Set alongside `segmentCount` — real DRM (not the AES-128-with-clear-key case `media.download`
+   * can handle), same distinction `SynapseHlsSegmentKey` documents for `lib.hls.parse`. */
+  encrypted?: boolean;
+  /** Set on a master-playlist `kind: 'stream'` entry once auto-inspected — one variant per
+   * resolution the master lists, each its own downloadable media-playlist URL. */
+  variants?: { url: string; resolution?: string }[];
+}
+
+/** What `media.inspect(url)` resolves to for an HLS (`.m3u8`) URL — a fresh fetch+parse, not a
+ * cached read, so it reflects the manifest as it is right now. A master playlist populates only
+ * `variants`; a media/variant playlist populates the rest; a URL that isn't parseable HLS resolves
+ * to `{}` (all fields absent) — the same "honest primitive, no crafted fallback" posture as
+ * `lib.readable`. DASH (`.mpd`) is out of scope, same as `lib.hls.parse` (docs/api-inventory.md §3.1). */
+interface SynapseMediaInspectResult {
+  /** Present only for a master playlist — each entry is another resolution's own media-playlist URL. */
+  variants?: { url: string; resolution?: string }[];
+  /** Present only for a media/variant playlist — segment count, not the segment URLs themselves. */
+  segments?: number;
+  encrypted?: boolean;
+  /** A sliding-window (no `#EXT-X-ENDLIST`) playlist — `media.download` on one of these keeps
+   * capturing until `media.control(jobId, 'stop-live')`, never reaching `'done'` on its own. */
+  live?: boolean;
+}
+
+interface SynapseMediaDownloadOptions {
+  url: string;
+  /** Cosmetic label (e.g. `"1080p"`) — carried through to `media.job()`'s status for display only. */
+  resolutionLabel?: string;
+}
+
+/** Mirrors the download engine's own phase names (`shared/download-engine-protocol.ts`'s
+ * `DownloadEnginePhase`, duplicated here per this file's import-free constraint). `'pausing'` is the
+ * honest in-between state between a `'pause'` control call and the engine actually reaching a quiet
+ * point — up to one segment/chunk can still be genuinely in flight when the request arrives. */
+type SynapseMediaDownloadPhase = 'segments' | 'chunks' | 'remux' | 'pausing' | 'paused' | 'done' | 'error' | 'cancelled';
+
+/** What `media.job(jobId)` resolves to — a snapshot, not a subscription (docs/api-inventory.md §4:
+ * a function-valued `onProgress` callback cannot cross the RPC boundary, so polling is the v1 answer
+ * for every job-shaped API). `undefined` means this platform has no snapshot for `jobId` — either it
+ * was never started via `media.download`, or the background service worker restarted since (the
+ * snapshot is in-memory only, same "no persistence" posture `docs/ROADMAP.md §7.6` already commits
+ * to for download progress). */
+interface SynapseMediaJobStatus {
+  phase: SynapseMediaDownloadPhase;
+  done?: number;
+  total?: number;
+  /** Set only when `phase === 'error'`. */
+  error?: string;
+}
+
+type SynapseMediaControlAction = 'pause' | 'resume' | 'cancel' | 'stop-live';
+
+/**
+ * Detect → inspect → download → poll → control, over media the network sniffer already found on
+ * pages this script (or any other) ran on. Scope: `media`, no `match` dimension — unlike
+ * `net.request`/`net.mock`, a grant is all-or-nothing, not scoped per origin (docs/api-inventory.md
+ * §5: a script asking to see detected media is asking to see all of it, the same way the Side Panel
+ * does).
+ *
+ * `download`/`job`/`control` are the id-based facade docs/api-inventory.md §3.1 calls for: the
+ * engine itself deals in live objects (`AbortController`, an OPFS run) that cannot cross structured
+ * clone, so every one of these methods takes or returns a plain `jobId` string instead.
+ */
+interface SynapseMediaApi {
+  /** Every media file detected so far, most-recently-seen order. Same list the Side Panel shows. */
+  list(): Promise<SynapseMediaEntry[]>;
+  /** Fetches and parses an HLS manifest URL fresh — typically one of `list()`'s own entries, or one
+   * of a master entry's `variants`. */
+  inspect(url: string): Promise<SynapseMediaInspectResult>;
+  /** Starts a download and returns its `jobId` immediately — does not wait for completion. Poll
+   * `job(jobId)` for progress. `url` must classify as media by extension (`.m3u8`/`.mpd` run the
+   * HLS/segment engine; `.mp4`/`.webm`/`.mp3`/… run the multi-connection direct-file downloader) —
+   * anything else is refused before a job is created. */
+  download(options: SynapseMediaDownloadOptions): Promise<string>;
+  /** A snapshot of `jobId`'s current progress, or `undefined` if there is none to report (see
+   * `SynapseMediaJobStatus`'s own doc comment for why "none" is a legitimate, non-error answer). */
+  job(jobId: string): Promise<SynapseMediaJobStatus | undefined>;
+  /** Acts on a job started by `download()`. `'stop-live'` only makes sense for a live capture (a
+   * sliding-window manifest with no `#EXT-X-ENDLIST`) and is a no-op otherwise. */
+  control(jobId: string, action: SynapseMediaControlAction): Promise<void>;
 }
 
 /** The facade every caller programs against, delivered as `ctx.api`: to bundled Modules from the
@@ -373,6 +519,7 @@ interface SynapseApi {
   net: SynapseNetApi;
   files: SynapseFilesApi;
   lib: SynapseLibApi;
+  media: SynapseMediaApi;
 }
 
 /** What an uploaded user script assigns to `globalThis.__synapseModule` to declare itself. */

@@ -203,6 +203,49 @@ globalThis.__synapseModule = {
   (not your script's). `ctx.api.net.request` is unrelated to all of this too — a separate call under
   the extension's own identity, never intercepted by a `net.mock` rule either way.
 
+### Detecting, inspecting and downloading media
+
+`media` lists what the network sniffer has already detected (video/audio files, HLS manifests),
+inspects an HLS manifest fresh, and starts/polls/controls a download — the same engine the Side
+Panel's Download button drives, fronted as a plain `jobId` string so nothing live (an
+`AbortController`, an in-progress file) ever has to cross the RPC boundary:
+
+```javascript
+globalThis.__synapseModule = {
+  id: 'auto-downloader',
+  scopes: ['media'],
+  async run(input, ctx) {
+    const found = await ctx.api.media.list();
+    const stream = found.find((m) => m.kind === 'stream');
+    if (!stream) return;
+
+    const jobId = await ctx.api.media.download({ url: stream.url });
+    // poll — there's no subscription/callback form, see below
+    let status;
+    do {
+      await new Promise((r) => setTimeout(r, 1000));
+      status = await ctx.api.media.job(jobId);
+    } while (status && status.phase !== 'done' && status.phase !== 'error');
+  },
+};
+```
+
+- **One scope covers everything** — `list`/`inspect`/`download`/`job`/`control` all gate on
+  `media`, and it never takes `match`: a grant is all-or-nothing, same as the Side Panel's own view
+  of whatever the sniffer has found.
+- **`download()` returns immediately** with a `jobId` — it does not wait for the file to finish.
+  Progress is **polling only**, not a callback: `ctx.api.media.job(jobId)` returns `undefined` until
+  there's a snapshot to report, and again after a background service-worker restart, since progress
+  isn't persisted to disk any more than the Side Panel's own view of it is.
+- **`url` has to look like media** — an `.m3u8`/`.mpd` runs the HLS engine, a recognized direct-file
+  extension (`.mp4`, `.mp3`, …) runs the multi-connection downloader. Anything else is refused before
+  a job is even created; pass a URL from `list()` or one of a master entry's `variants`.
+- **`inspect(url)` is a fresh fetch+parse**, not a cached read — useful for a `variants` entry
+  `list()` hasn't gotten around to auto-inspecting yet. Resolves to `{}` for a URL that isn't
+  parseable HLS, the same "no crafted fallback" posture as `lib.readable`.
+- **`control(jobId, action)`** takes `'pause' | 'resume' | 'cancel' | 'stop-live'` — `'stop-live'`
+  only means something for a live (no-`#EXT-X-ENDLIST`) capture, and is a no-op otherwise.
+
 ### `lib` — pure helpers, no scope, no `await`
 
 `ctx.api.lib` is different from everything above it: it costs nothing to grant because it grants
@@ -235,6 +278,19 @@ nothing ever crosses the RPC boundary.
   `net.request` instead of the original remote URL.
 - **`lib.zip(entries)`** — builds an uncompressed `.zip` from `{ name, data: Uint8Array }[]`. Hand
   the result to `files.save` with `contentEncoding: 'base64'`.
+- **`lib.matchPattern`** — the exact matcher `net.request`/`net.mock` enforce `match` grants
+  against, exposed rather than re-implemented (Chrome's match-pattern syntax has real edge cases —
+  `*.example.com` only matches subdomains, `*` as a scheme means http/https only — that a naive
+  regex gets subtly wrong). `isValid(pattern)` checks the pattern itself is well-formed;
+  `test(url, pattern)`/`testAny(url, patterns)` check a URL against one or several. Handy for
+  pre-filtering a batch of candidate URLs against your own `match` list before firing `net.request`
+  for each one, instead of discovering the rejection one call at a time:
+
+  ```javascript
+  const links = Array.from(document.querySelectorAll('a')).map((a) => a.href);
+  const myPatterns = ['https://api.example.com/*'];
+  const inScope = links.filter((url) => ctx.api.lib.matchPattern.testAny(url, myPatterns));
+  ```
 
 Put together, these plus `net.request` (image fetch) and `files.save` (writing the result) are
 enough to recreate the shape of the `reader-mode-converter` builtin entirely from user-script level

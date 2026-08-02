@@ -5,11 +5,12 @@ import { BACKGROUND_MODULES } from '../module-registry/background-modules';
 import { setUserScriptsPermissionGranted } from '../module-registry/storage';
 import { DASHBOARD_PATH } from '../ui/dashboard/dashboard-path';
 import { SIDE_PANEL_PATH } from '../ui/side-panel/side-panel-path';
-import { ensureOffscreenDocument } from '../utils/offscreen-manager';
 import { describeHeaderReplay, syncHeaderReplayRule } from '../features/media/header-replay-rules';
 import { listDetectedMedia } from '../features/media/store';
 import { listDownloadJobCheckpoints, saveDownloadJobCheckpoint, removeDownloadJobCheckpoint } from '../features/media/download/checkpoints';
-import type { DownloadEngineCommand, DownloadEngineRelayedCommand, DownloadJobCheckpoint } from '../../../shared/download-engine-protocol';
+import type { DownloadEngineCommand, DownloadEngineEvent, DownloadJobCheckpoint } from '../../../shared/download-engine-protocol';
+import { relayDownloadEngineCommand } from '../features/media/download/engine-relay.background';
+import { recordMediaJobSnapshot } from '../module-registry/media-host';
 import { createSynapseApi } from '../module-registry/synapse-api-host';
 import type { TrustedScopeMap } from '../module-registry/rpc-handler';
 import { chromeRuntimeBus } from './services/bus';
@@ -84,8 +85,19 @@ chrome.runtime.onMessage.addListener((message: { type?: string; moduleId?: strin
 // cannot receive the original broadcast a second time.
 chrome.runtime.onMessage.addListener((message: DownloadEngineCommand | undefined) => {
   if (message?.type !== 'synapse:download-engine-command') return;
-  const relayed: DownloadEngineRelayedCommand = { ...message, type: 'synapse:download-engine-command-relayed' };
-  void ensureOffscreenDocument().then(() => chrome.runtime.sendMessage(relayed).catch(() => {}));
+  void relayDownloadEngineCommand(message);
+});
+
+// docs/api-inventory.md §3.1/§6 item 6 — `synapseApi.media.job()` polls a snapshot rather than
+// subscribing (§4: a function-valued callback cannot cross the RPC boundary), so something has to
+// keep the latest snapshot per jobId around for it to read. Background is the only context alive for
+// the whole session regardless of which UI surface (if any) is open, so it listens to the same
+// `synapse:download-engine-event` broadcast the Side Panel already does and hands each one to
+// media-host.ts's in-memory store — every event, not just ones a script itself started (see
+// `recordMediaJobSnapshot`'s own doc comment for why that's fine).
+chrome.runtime.onMessage.addListener((message: DownloadEngineEvent | undefined) => {
+  if (message?.type !== 'synapse:download-engine-event') return;
+  recordMediaJobSnapshot(message);
 });
 
 /**

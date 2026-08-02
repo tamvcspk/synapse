@@ -3,12 +3,18 @@ import type {
   SynapseApi,
   SynapseFilesSaveOptions,
   SynapseFilesSaveResult,
+  SynapseMediaControlAction,
+  SynapseMediaDownloadOptions,
+  SynapseMediaEntry,
+  SynapseMediaInspectResult,
+  SynapseMediaJobStatus,
   SynapseMockRule,
   SynapseMockRuleOptions,
   SynapseNetRequestOptions,
   SynapseNetResponse,
 } from '../../../kernel/synapse-api';
 import { htmlToMarkdown } from '../../../shared/html-to-markdown';
+import { isValidMatchPattern, matchesAnyPattern, matchesUrlPattern } from '../../../shared/match-pattern';
 import { parseM3u8 } from '../../../shared/media-manifest-parser';
 import { buildZip } from '../../../shared/zip';
 import { readable } from '../module-registry/lib-readable';
@@ -17,7 +23,13 @@ import { createUiSurface } from '../utils/ui-compositor';
 // lib.* (docs/api-inventory.md §3.0) — this is the extension's own ISOLATED-world bundle, an
 // ordinary ESM context, so it imports the real functions directly rather than needing the
 // `?script&iife` + `{file}` delivery the USER_SCRIPT-world shim requires (user-script-shim.ts).
-const lib = { hls: { parse: parseM3u8 }, readable, toMarkdown: htmlToMarkdown, zip: buildZip };
+const lib = {
+  hls: { parse: parseM3u8 },
+  readable,
+  toMarkdown: htmlToMarkdown,
+  zip: buildZip,
+  matchPattern: { isValid: isValidMatchPattern, test: matchesUrlPattern, testAny: matchesAnyPattern },
+};
 
 /**
  * Content-script-side transport for `synapseApi` (docs/ROADMAP.md §11.3) — the counterpart to
@@ -81,5 +93,13 @@ export function buildDomModuleApi(moduleId: string): SynapseApi {
         call(moduleId, 'files', 'save', [options]) as Promise<SynapseFilesSaveResult>,
     },
     lib,
+    media: {
+      list: () => call(moduleId, 'media', 'list', []) as Promise<SynapseMediaEntry[]>,
+      inspect: (url: string) => call(moduleId, 'media', 'inspect', [url]) as Promise<SynapseMediaInspectResult>,
+      download: (options: SynapseMediaDownloadOptions) => call(moduleId, 'media', 'download', [options]) as Promise<string>,
+      job: (jobId: string) => call(moduleId, 'media', 'job', [jobId]) as Promise<SynapseMediaJobStatus | undefined>,
+      control: (jobId: string, action: SynapseMediaControlAction) =>
+        call(moduleId, 'media', 'control', [jobId, action]).then(() => undefined),
+    },
   };
 }

@@ -117,6 +117,19 @@ export const SCOPE_CATALOG: Record<SynapseScope, ScopeDefinition> = {
       'banner) — a script cannot request `debugger` or `dnr` directly.',
     requiresMatch: true,
   },
+  media: {
+    scope: 'media',
+    enforcement: 'enforced',
+    consentLine: 'Detect, inspect and download media (video/audio/HLS) found on any page',
+    description:
+      'List media the network sniffer has detected, inspect an HLS manifest, and start/poll/control ' +
+      'a download - the GM_video-shaped hole Tampermonkey has no equivalent for at all ' +
+      '(docs/api-inventory.md section 3.1). One scope for list/inspect/download/job/control: splitting ' +
+      'detection from download would be an empty two-prompt ritual (anyone who allows detection also ' +
+      'wants to download). No `match` dimension - unlike `net.request`/`net.mock`, this is ' +
+      'all-or-nothing, the same posture the Side Panel already takes toward everything it detects.',
+    requiresMatch: false,
+  },
 };
 
 export const ALL_SCOPES: SynapseScope[] = Object.keys(SCOPE_CATALOG) as SynapseScope[];
@@ -300,6 +313,46 @@ export const API_METHODS: ApiMethodDefinition[] = [
     transport: 'rpc',
   },
   {
+    namespace: 'media',
+    method: 'list',
+    scope: 'media',
+    signature: 'list(): Promise<SynapseMediaEntry[]>',
+    description: 'Every media file the network sniffer has detected so far — the same list the Side Panel shows.',
+    transport: 'rpc',
+  },
+  {
+    namespace: 'media',
+    method: 'inspect',
+    scope: 'media',
+    signature: 'inspect(url: string): Promise<SynapseMediaInspectResult>',
+    description: 'Fetch and parse an HLS manifest URL fresh (not a cached read).',
+    transport: 'rpc',
+  },
+  {
+    namespace: 'media',
+    method: 'download',
+    scope: 'media',
+    signature: 'download(options: SynapseMediaDownloadOptions): Promise<string>',
+    description: 'Start a download; returns the jobId immediately without waiting for completion.',
+    transport: 'rpc',
+  },
+  {
+    namespace: 'media',
+    method: 'job',
+    scope: 'media',
+    signature: 'job(jobId: string): Promise<SynapseMediaJobStatus | undefined>',
+    description: 'Poll a snapshot of a download started by media.download — no subscription exists (docs/api-inventory.md §4).',
+    transport: 'rpc',
+  },
+  {
+    namespace: 'media',
+    method: 'control',
+    scope: 'media',
+    signature: "control(jobId: string, action: 'pause' | 'resume' | 'cancel' | 'stop-live'): Promise<void>",
+    description: 'Act on a job started by media.download.',
+    transport: 'rpc',
+  },
+  {
     namespace: 'lib',
     method: 'hls.parse',
     signature: 'hls.parse(text: string, baseUrl: string): SynapseHlsManifest',
@@ -330,6 +383,27 @@ export const API_METHODS: ApiMethodDefinition[] = [
     method: 'zip',
     signature: 'zip(entries: { name, data }[]): Uint8Array',
     description: 'Build an uncompressed .zip archive from named byte buffers. No scope: pure computation.',
+    transport: 'in-world',
+  },
+  {
+    namespace: 'lib',
+    method: 'matchPattern.isValid',
+    signature: 'matchPattern.isValid(pattern: string): boolean',
+    description: 'Whether pattern is well-formed Chrome match-pattern syntax. No scope: pure computation.',
+    transport: 'in-world',
+  },
+  {
+    namespace: 'lib',
+    method: 'matchPattern.test',
+    signature: 'matchPattern.test(url: string, pattern: string): boolean',
+    description: 'Whether url falls under pattern - the exact matcher net.request/net.mock enforce against. No scope: pure computation.',
+    transport: 'in-world',
+  },
+  {
+    namespace: 'lib',
+    method: 'matchPattern.testAny',
+    signature: 'matchPattern.testAny(url: string, patterns: string[]): boolean',
+    description: 'Whether url falls under any of patterns. No scope: pure computation.',
     transport: 'in-world',
   },
 ];
