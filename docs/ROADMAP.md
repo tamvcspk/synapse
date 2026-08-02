@@ -434,7 +434,7 @@ Việc phải làm:
 
 ### 11.9 Thứ tự & cách vào việc
 
-`0 → 1 → 2 → 3 → 4 → 5 → 6 → 7`. **Phase 0, 1, 2, 3 và 4 xong (Phase 4 chưa verify browser — thuần cấu trúc, xem §11.5). Phase 5 (mở API surface thật) đã bắt đầu: `net.request`+`files.save`+`lib.*`+template reader-mode+`net.mock`+`media`+`lib.matchPattern`+`page.eval`+spike subscription (`media.onProgress`) xong theo đúng thứ tự đề xuất ở [api-inventory.md §6](api-inventory.md#6-thứ-tự-đề-xuất) (mục 1-8, TẤT CẢ đã xác nhận bằng browser thật) — spike subscription xác nhận 2026-08-02, chi tiết ở [LESSONS.md](LESSONS.md). §12.1 (vòng đời script) vẫn làm được song song, chỉ phụ thuộc Phase 2. Tiếp theo: hoặc nâng `net.observe`/progress `media` lên push (không cấp bách, chưa có consumer thật đòi), hoặc chuyển sang §12 (Script Studio).**
+`0 → 1 → 2 → 3 → 4 → 5 → 6 → 7`. **Phase 0, 1, 2, 3 và 4 xong (Phase 4 chưa verify browser — thuần cấu trúc, xem §11.5). Phase 5 (mở API surface thật) đã bắt đầu: `net.request`+`files.save`+`lib.*`+template reader-mode+`net.mock`+`media`+`lib.matchPattern`+`page.eval`+spike subscription (`media.onProgress`) xong theo đúng thứ tự đề xuất ở [api-inventory.md §6](api-inventory.md#6-thứ-tự-đề-xuất) (mục 1-8, TẤT CẢ đã xác nhận bằng browser thật) — spike subscription xác nhận 2026-08-02, chi tiết ở [LESSONS.md](LESSONS.md). §12.1 (vòng đời script) vẫn làm được song song, chỉ phụ thuộc Phase 2. Tiếp theo: xem thứ tự cụ thể, từng bước, ở [§11.10](#1110-thứ-tự-cụ-thể-cho-phần-còn-lại-116--12--bắt-đầu-được-ngay-từng-bước-một) ngay dưới đây.**
 
 **Đảo 5 lên trước 3 — đã cân nhắc (lúc soạn [api-inventory.md](api-inventory.md)), đã từ chối.** Lập luận ủng hộ có thật: §11.6 tự nói "UI không phải nút thắt, bề mặt API mới là", và Phase 5 không có phụ thuộc cứng nào vào Phase 3. Nhưng "không phải nút thắt" không phải lý do để đảo — không có ràng buộc nào BẮT phải đảo, nên giữ thứ tự đã chốt. Đổi lại được: Phase 3 vá lỗ `floating-widget` id-do-caller *trước* khi Phase 5 nhân số script lên (vá một lỗ khi có 3 consumer builtin rẻ hơn hẳn khi đã có N script của user), và nó trả lời sớm một câu hỏi phân loại mà Phase 5 sẽ phải hỏi hàng chục lần (`ui.render` hoá ra là Disclosed, xem §11.4 — rẻ hơn nhiều khi phát hiện ở 1 scope thay vì ở 8).
 
@@ -445,6 +445,30 @@ Phase 2 **đã qua verify browser thật** (xem "Xong khi" của §11.3) — n�
 ~~Lưu ý cho Phase 3: `ui.render` sẽ là scope Enforced đầu tiên…~~ — **dự đoán này SAI, xem §11.4.** `ui.render` hoá ra là Disclosed (script vẽ được lên trang mà không cần xin phép ai), nên Phase 3 không sinh scope Enforced nào và `requiresMatch` vẫn chưa có consumer đầu tiên. Cả hai lùi sang Phase 5, nơi `net.request`/`net.mock` bắt buộc mang `match`. Bài học lặp lại lần thứ hai trong pivot này: **phân loại Enforced/Disclosed phải suy từ ràng buộc (C) tại thời điểm implement, không phải từ cảm giác "cái này nghe có vẻ cần xin phép"** lúc lập kế hoạch.
 
 **§12 (Script Studio) chạy SONG SONG, không nối đuôi, và KHÔNG mục nào bị Phase 5 chặn.** Toàn bộ §12.1→12.4 chỉ phụ thuộc Phase 2 (đã xong). Phase 5 chỉ làm template ở §12.4 dày lên chứ không phải điều kiện để bắt đầu — đây là điểm khác biệt so với bản nháp trước, vốn treo mục cuối sau Phase 5.
+
+### 11.10 Thứ tự cụ thể cho phần còn lại (11.6 + 12) — bắt đầu được ngay, từng bước một
+
+Không còn phụ thuộc cứng nào giữa phần còn lại của 11.6 và §12 — hai track chạy song song được, làm track nào trước cũng không chặn track kia. Thứ tự trong mỗi track chọn theo **rủi ro thấp trước, spike trước khi cam kết, tài liệu viết sau cùng một lần** (viết Help/bundle AI trước khi catalog ổn định nghĩa là viết lại 2-3 lần).
+
+**Track Studio (§12) — nên làm trước: ít rủi ro, giá trị thấy ngay, không đụng permission model.**
+
+1. **§12.1 — Vòng đời script** (đổi tên/tải về/xoá). Không cần spike, không phụ thuộc gì ngoài Phase 2 (đã xong). Bắt đầu ngay.
+2. **Spike Monaco** (bước đầu của §12.2, tách riêng khỏi phần còn lại). Xanh → đi tiếp bước 3; đỏ → CodeMirror 6, ghi lý do vào [LESSONS.md](LESSONS.md) cạnh mục Alpine.js. Đừng viết gì phụ thuộc Monaco trước khi biết kết quả.
+3. **§12.2 — Studio editor đầy đủ** (save = unregister+register lại, `.d.ts` autocomplete, hiện lỗi cú pháp). Phụ thuộc (1)+(2).
+4. **§12.3 — steps-view map ngược về code.** Phụ thuộc CỨNG (3) — không có editor thì không "nhảy tới dòng định nghĩa" được, không phải "dùng được một nửa".
+5. **§12.4 — template + Clone builtin.** Phụ thuộc (1)+(3). KHÔNG phụ thuộc track API bên dưới — chỉ dày hơn khi track đó xong thêm việc, không phải điều kiện để bắt đầu.
+
+**Track API (11.6 còn lại) — chạy song song với Studio, độc lập hoàn toàn với nó:**
+
+6. **Secret Service.** Không phụ thuộc gì thêm ngoài Phase 2. Bắt đầu ngay, làm trước vì (7) cần nó.
+7. **`ai.ask`** (helper mỏng, không phải Port agentic). Phụ thuộc CỨNG (6) — provider OpenAI cần `secretRef` mới gọi được.
+8. **Tier 2 — `synapseApi.pipeline.hook(...)`.** Độc lập với (6)/(7), chèn vào bất cứ lúc nào sau Phase 2 — không có thứ tự bắt buộc với hai mục trên trong track này.
+
+**Cuối cùng, một lần, sau khi cả hai track đủ ổn định:**
+
+9. **Trang Help + `synapse-ai-context.md` + `docs/types/synapse-userscript.d.ts`.** Cố ý để cuối — nguồn của bundle là catalog `SynapseApi`, và (7)/(8) còn thêm method/scope mới vào đúng catalog đó. Viết trang Help trước khi (6)(7)(8) xong nghĩa là phải re-generate lại nhiều lần trong lúc catalog còn đổi hình dạng; sau khi (7)(8) xong, bundle mang đúng version cuối, không phải một snapshot giữa chừng.
+
+**Việc dọn kèm theo, không phải task mới:** bullet "[§11.6] Spike tiêm `lib.*` — chưa chạy" ở Open Points ([dưới đây](#chưa-implement--chưa-chọn-hướng)) đã lỗi thời — spike đã chạy và xác nhận bằng browser thật (xem §11.6 mục "Spike `lib.*`"), chỉ là sót lại chưa xoá theo đúng quy ước dọn Open Points.
 
 ---
 
@@ -535,7 +559,6 @@ Mọi việc chưa xong, chưa chốt hướng, hoặc chưa verify — gom theo
 
 - **[§11] Pivot Userscript Platform — Phase 0 + 1 + 2 xong, còn Phase 3→7** (đã chốt hướng, mỗi phase có "Xong khi" riêng). Ba lỗi từng liệt kê ở đây (`synapse.bus.on()` gãy câm lặng, `needs:['net'|'dom']` no-op, `ai.*` throw) đã dọn một lượt ở Phase 2 đúng như kế hoạch — cả ba bằng cách XOÁ khỏi bề mặt, không phải vá.
 - **[§11.4] Thứ tự icon hiện đang theo `ownerId`, mà `ownerId` của script upload là uuid — ổn định nhưng vô nghĩa với người dùng.** Sắp theo id là thứ duy nhất hai world tính ra giống nhau mà không cần chia sẻ state (xem §11.4), và nó đúng mục tiêu "không bao giờ theo thứ tự khởi tạo". Nhưng kế hoạch gốc ghi "theo tên script hoặc cấu hình user" — muốn vậy phải có **tên ổn định**, tức §12.1 (`synapse:script-meta`). Làm sau §12.1: đổi khoá sắp xếp từ `ownerId` sang `resolveScriptLabel()`, giữ `ownerId` làm tie-break (2 script trùng tên vẫn phải có thứ tự tất định).
-- **[§11.6] Spike tiêm `lib.*` — chưa chạy.** Nhét tĩnh vào shim (cộng size vào mọi script world) vs `import()` động một URL `chrome-extension://` từ USER_SCRIPT world (chưa biết có qua được CSP/world boundary). Cùng lớp rủi ro với spike Monaco §12.0 — không viết tính năng nào phụ thuộc `lib.*` trước khi spike xanh.
 - **[§11.6] Catalog scope đề xuất 8 enforced + 2 disclosed ([api-inventory.md §5](api-inventory.md)) — chưa chốt.** Đếm thô cả hai trục ra ~13, vỡ trần ~10. Cách gộp đã chọn: **giảm chiều số lượng bằng chiều tài nguyên** (×match của ràng buộc (B) giới hạn thiệt hại tốt hơn chẻ nhỏ scope). Hai quyết định gộp còn tranh cãi: `media.read`+`media.download` gộp làm một (tách ra là nghi thức 2-prompt mà ai cũng Allow cả hai), và `tabs.open` bỏ hẳn khỏi v1 (`window.open` đã có sẵn, delta chỉ là popup blocker).
 - **[§11.3] Đường dispatch "gọi `run(input)` của một uploaded module" trong shim trailer NGHI LÀ CHẾT — chưa verify, chưa có caller.** Nó nghe `chrome.runtime.onMessage` bên trong USER_SCRIPT world, nhưng Chrome định tuyến chiều user-script→extension sang `onUserScriptMessage` và không có đường ngược lại được ghi trong tài liệu. Hôm nay không ai gửi tới nó (`triggerModuleAction` chỉ nhắm dom Module qua `chrome.tabs.sendMessage`), nên chưa gây hại. Cố ý KHÔNG xoá vội (xoá là âm thầm bỏ một capability đã ghi trong doc); nếu thêm caller thì phải verify end-to-end trên Chrome thật TRƯỚC, đừng tin là nó chạy. **Vẫn KHÔNG được câu trả lời từ spike subscription** (`media.onProgress`, xem LESSONS.md) — spike đó đi vòng qua `chrome.runtime.onMessage` hoàn toàn (dùng DOM CustomEvent trên `window` thay vì messaging API), nên nó chứng minh có đường push khác vào USER_SCRIPT world, KHÔNG chứng minh (hay bác bỏ) `onMessage` cụ thể có fire trong world đó hay không — câu hỏi ở đây vẫn mở y nguyên.
 - **[§11.3 UX] Hai khoảng trống nhỏ của Registry lộ ra trong lượt verify Phase 2, chưa làm.** (a) Trước lần chạy đầu tiên, popup hiển thị **uuid thô** vì `label` chỉ biết được qua ManifestReport — uuid không nói gì với người vừa upload xong. Vá rẻ nhất: lưu tên file lúc upload làm label dự phòng (`uploadModule(source, fileName?)`), vẫn để ManifestReport ghi đè khi tới. (b) **Không có đường xoá module đã upload trong UI** — `deleteUploadedSource`/`deleteManifestReport` tồn tại nhưng không có caller, nên upload lại cùng một file là tích tụ entry trùng và cách dọn duy nhất là gõ `chrome.storage.local` trong console. Xoá đúng nghĩa phải gồm cả `chrome.userScripts.unregister`, grant record, và `clearScriptStorage(moduleId)` (đã có sẵn, cũng chưa có caller).
