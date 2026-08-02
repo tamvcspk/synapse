@@ -130,6 +130,20 @@ export const SCOPE_CATALOG: Record<SynapseScope, ScopeDefinition> = {
       'all-or-nothing, the same posture the Side Panel already takes toward everything it detects.',
     requiresMatch: false,
   },
+  'page.eval': {
+    scope: 'page.eval',
+    enforcement: 'enforced',
+    consentLine: "Run arbitrary code in the page's own JavaScript context on {domains}",
+    description:
+      "Execute code directly in the page's MAIN-world JS context — the `unsafeWindow` delta a " +
+      'USER_SCRIPT-world script has no way to close on its own (docs/api-inventory.md §2). The ' +
+      'highest-privilege scope in the catalog: granted code runs with the full authority of the ' +
+      "page's own JS context, not a sandboxed subset. Requires `match`, but the resource checked " +
+      "is not an argument the script provides — it is the calling tab's REAL url, read from the " +
+      'platform\'s own record of the call, so a script cannot widen its own reach by lying about ' +
+      'which page it is calling from.',
+    requiresMatch: true,
+  },
 };
 
 export const ALL_SCOPES: SynapseScope[] = Object.keys(SCOPE_CATALOG) as SynapseScope[];
@@ -150,10 +164,11 @@ export interface ApiMethodDefinition {
   signature: string;
   description: string;
   /** For a method whose scope `requiresMatch` (§11.3 constraint B): pulls the resource URL out of
-   * the call's own arguments, so the boundary can check it against the grant's `match` patterns
-   * without knowing each namespace's argument shape. Absent for every method whose scope doesn't
-   * require one — `grantsAllow` only consults it when `SCOPE_CATALOG[scope].requiresMatch`. */
-  resourceUrl?: (args: unknown[]) => string | undefined;
+   * the call's own arguments (or, for `page.eval`, out of `context` — see `ResourceUrlContext`),
+   * so the boundary can check it against the grant's `match` patterns without knowing each
+   * namespace's argument shape. Absent for every method whose scope doesn't require one —
+   * `grantsAllow` only consults it when `SCOPE_CATALOG[scope].requiresMatch`. */
+  resourceUrl?: (args: unknown[], context: ResourceUrlContext) => string | undefined;
   /** True for a method gated by a `requiresMatch` scope that does NOT itself introduce a new
    * resource — it only reads or removes something the caller already owns, whose origin was
    * already checked against `match` at the moment it was *created* (e.g. `mock.remove`/`mock.list`
@@ -177,6 +192,19 @@ export interface ApiMethodDefinition {
    *   both.
    */
   transport: 'rpc' | 'in-world';
+}
+
+/** What a `resourceUrl` extractor gets besides the call's own `args` — populated by
+ * `rpc-handler.ts` from `chrome.runtime.MessageSender`, never from anything the caller sent. Exists
+ * for `page.eval`: unlike `net.request`'s `options.url` or `net.mock`'s `endpointPattern`, there is
+ * no argument naming which page a call is about — the resource IS the tab the call came from, and
+ * trusting a caller-supplied URL for that would let a script claim a different origin than the one
+ * it is actually running on. */
+export interface ResourceUrlContext {
+  /** The real URL of the tab the call originated from, when the transport could determine one
+   * (always true for a content-script or uploaded-script caller; absent for an in-process bundled
+   * Module, which has no tab of its own). */
+  tabUrl?: string;
 }
 
 export const API_METHODS: ApiMethodDefinition[] = [
@@ -353,6 +381,19 @@ export const API_METHODS: ApiMethodDefinition[] = [
     transport: 'rpc',
   },
   {
+    namespace: 'page',
+    method: 'eval',
+    scope: 'page.eval',
+    signature: 'eval(code: string, args?: unknown[]): Promise<unknown>',
+    description:
+      "Run code in the page's own MAIN-world JS context (Tampermonkey's `unsafeWindow`, made an " +
+      'explicit call) — breaks the isolation the USER_SCRIPT world otherwise guarantees. `code` runs ' +
+      "as an async function body; `args` become its own `args` parameter. Gated on the calling tab's " +
+      'REAL url falling under this call\'s granted `match` patterns — not a url the script provides.',
+    resourceUrl: (_args, context) => context.tabUrl,
+    transport: 'rpc',
+  },
+  {
     namespace: 'lib',
     method: 'hls.parse',
     signature: 'hls.parse(text: string, baseUrl: string): SynapseHlsManifest',
@@ -426,9 +467,14 @@ export function scopeForApiMethod(namespace: string, method: string): SynapseSco
 /** The resource URL (if any) a call is about, per that method's own `resourceUrl` extractor — the
  * boundary needs this to check a `requiresMatch` scope's `match` patterns without special-casing
  * each namespace. Returns `undefined` for a method with no extractor, same as one with none named. */
-export function resourceUrlForCall(namespace: string, method: string, args: unknown[]): string | undefined {
+export function resourceUrlForCall(
+  namespace: string,
+  method: string,
+  args: unknown[],
+  context: ResourceUrlContext = {},
+): string | undefined {
   const def = API_METHODS.find((m) => m.namespace === namespace && m.method === method && m.transport === 'rpc');
-  return def?.resourceUrl?.(args);
+  return def?.resourceUrl?.(args, context);
 }
 
 /** Whether this call should skip the `requiresMatch` resource check even though its scope carries

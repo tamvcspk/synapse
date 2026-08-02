@@ -306,6 +306,9 @@ const synapseApi = {
     job: function (jobId) { return __synapseCall('media', 'job', [jobId]); },
     control: function (jobId, action) { return __synapseCall('media', 'control', [jobId, action]); },
   },
+  page: {
+    eval: function (code, args) { return __synapseCall('page', 'eval', [code, args]); },
+  },
   lib: __synapseLib,
 };
 
@@ -364,6 +367,9 @@ if (!globalThis.synapseApi) {
       download: __synapseWrongHandle,
       job: __synapseWrongHandle,
       control: __synapseWrongHandle,
+    },
+    page: {
+      eval: __synapseWrongHandle,
     },
     lib: {
       hls: { parse: __synapseWrongHandleSync },

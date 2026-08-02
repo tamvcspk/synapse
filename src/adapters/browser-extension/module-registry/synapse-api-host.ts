@@ -1,4 +1,4 @@
-import type { SynapseApi, SynapseUiApi } from '../../../kernel/synapse-api';
+import type { SynapseApi, SynapsePageApi, SynapseUiApi } from '../../../kernel/synapse-api';
 import { htmlToMarkdown } from '../../../shared/html-to-markdown';
 import { isValidMatchPattern, matchesAnyPattern, matchesUrlPattern } from '../../../shared/match-pattern';
 import { parseM3u8 } from '../../../shared/media-manifest-parser';
@@ -8,7 +8,17 @@ import { readable } from './lib-readable';
 import { performMediaControl, performMediaDownload, performMediaInspect, performMediaJob, performMediaList } from './media-host';
 import { performMockAdd, performMockList, performMockRemove } from './net-mock-host';
 import { performNetRequest } from './net-request-host';
+import { performPageEval } from './page-eval-host';
 import { createScriptStorage } from './script-storage';
+
+/** Second argument to `createSynapseApi` — context the transport itself knows and the caller cannot
+ * fake, threaded in from `rpc-handler.ts`'s `sender` (for RPC callers) or left absent (for an
+ * in-process bundled Module, which has no tab of its own). Kept separate from `moduleId` because it
+ * describes WHERE the call came from, not WHO is calling. */
+export interface SynapseApiContext {
+  /** The tab `page.eval` should run in — absent for a background Module, which gets `backgroundPageStub`. */
+  tabId?: number;
+}
 
 /** `lib.*` (docs/api-inventory.md §3.0) needs no injection trick here — this context is a plain
  * ESM module (the background service worker), so it just imports the real functions directly. The
@@ -67,7 +77,28 @@ function backgroundUiStub(): SynapseUiApi {
   return { toast: unavailable, icon: unavailable, badge: unavailable, dismiss: unavailable, clear: unavailable };
 }
 
-export function createSynapseApi(moduleId: string): SynapseApi {
+/** Same posture as `backgroundUiStub`, for the same reason: "the page's MAIN world" has no meaning
+ * for code that isn't attached to any tab. A background Module calling `ctx.api.page.eval` has a
+ * real design error, so the failure says so rather than silently no-op'ing or throwing a generic
+ * "no tabId" error that reads like a platform bug. */
+function backgroundPageStub(): SynapsePageApi {
+  return {
+    eval: () =>
+      Promise.reject(
+        new Error(
+          'synapseApi.page.eval is only available to code running on a page. This Module runs in ' +
+            'the background service worker, which has no tab of its own to run code in.',
+        ),
+      ),
+  };
+}
+
+function pageApiFor(tabId: number | undefined): SynapsePageApi {
+  if (tabId === undefined) return backgroundPageStub();
+  return { eval: (code, args) => performPageEval(tabId, code, args) };
+}
+
+export function createSynapseApi(moduleId: string, context: SynapseApiContext = {}): SynapseApi {
   return {
     storage: createScriptStorage(moduleId),
     ui: backgroundUiStub(),
@@ -88,5 +119,6 @@ export function createSynapseApi(moduleId: string): SynapseApi {
       job: (jobId) => performMediaJob(jobId),
       control: (jobId, action) => performMediaControl(jobId, action),
     },
+    page: pageApiFor(context.tabId),
   };
 }

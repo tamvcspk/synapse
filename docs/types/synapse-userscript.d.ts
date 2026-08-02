@@ -42,6 +42,15 @@
  *   detection also wants to download). No `match` dimension - unlike `net.request`/`net.mock`,
  *   this is all-or-nothing, the same posture the Side Panel already takes toward everything it
  *   detects.
+ * - `page.eval` — Run arbitrary code in the page's own JavaScript context on {domains}.
+ *   Execute code directly in the page's MAIN-world JS context — the `unsafeWindow` delta a
+ *   USER_SCRIPT-world script has no way to close on its own (docs/api-inventory.md §2). The
+ *   highest-privilege scope in the catalog: granted code runs with the full authority of the
+ *   page's own JS context, not a sandboxed subset. Requires `match`, but the resource checked is
+ *   not an argument the script provides — it is the calling tab's REAL url, read from the
+ *   platform's own record of the call, so a script cannot widen its own reach by lying about
+ *   which page it is calling from.
+ *   Requires a `match` list: `{ scope, match: [...] }`.
  *
  * ### Disclosed — the script can do this anyway; declaring it is transparency, not a gate
  *
@@ -111,6 +120,12 @@
  *   (docs/api-inventory.md §4).
  * - `synapseApi.media.control(jobId: string, action: 'pause' | 'resume' | 'cancel' | 'stop-live'): Promise<void>` — requires `media`.
  *   Act on a job started by media.download.
+ * - `synapseApi.page.eval(code: string, args?: unknown[]): Promise<unknown>` — requires `page.eval`.
+ *   Run code in the page's own MAIN-world JS context (Tampermonkey's `unsafeWindow`, made an
+ *   explicit call) — breaks the isolation the USER_SCRIPT world otherwise guarantees. `code`
+ *   runs as an async function body; `args` become its own `args` parameter. Gated on the calling
+ *   tab's REAL url falling under this call's granted `match` patterns — not a url the script
+ *   provides.
  * - `synapseApi.lib.hls.parse(text: string, baseUrl: string): SynapseHlsManifest` — no scope required — pure computation (runs in your own world — synchronous).
  *   Parse an HLS (.m3u8) manifest already fetched by the script. No scope: pure computation on
  *   data the caller already has, granted no privilege (docs/api-inventory.md §3.0).
@@ -138,7 +153,7 @@
  * deliberately absent and can never become a scope: `bus.emit(moduleId, …)` reaches every bundled
  * Module's own listener, which is a god-capability no consent prompt can describe honestly.
  */
-type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch' | 'ui.render' | 'net.request' | 'files.save' | 'net.mock' | 'media';
+type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch' | 'ui.render' | 'net.request' | 'files.save' | 'net.mock' | 'media' | 'page.eval';
 
 /**
  * One entry in a script's `scopes` declaration. `match` is the resource dimension: a grant is
@@ -506,6 +521,34 @@ interface SynapseMediaApi {
   control(jobId: string, action: SynapseMediaControlAction): Promise<void>;
 }
 
+/**
+ * Runs `code` directly in the page's own MAIN-world JS context — Tampermonkey's `unsafeWindow`,
+ * made an explicit call instead of an ambient global (docs/api-inventory.md §2, §6 item 7). Scope:
+ * `page.eval`, always carries `match` — but unlike every other `requiresMatch` scope, the resource
+ * checked is not something passed as an argument: it is whichever tab this call is actually running
+ * on, read from the platform's own record of the sender, so a script cannot claim a different origin
+ * than the one it is really calling from.
+ *
+ * The highest-privilege scope in the catalog and the only one with no partial version: once granted
+ * for a domain, `code` runs with the full authority of that page's own JS context — every global,
+ * every cookie-backed fetch, every DOM mutation a hand-authored `<script>` tag on that page could
+ * do. There is no sandboxing inside `code` itself.
+ *
+ * Same structured-clone rules as every other `rpc` method (see the file banner): `args` and
+ * whatever `code` `return`s must both survive it — no functions, no DOM nodes, no live objects.
+ * `code` runs as the body of an async function, so `await` works inside it.
+ *
+ * **Best-effort, not a bypass**: a page whose `script-src` CSP excludes `unsafe-eval` will reject
+ * the `Function` construction this relies on, and the call rejects with that page's own CSP error
+ * instead of running — v1 has no workaround for that (docs/api-inventory.md §7).
+ */
+interface SynapsePageApi {
+  /** Runs synchronously to the extent `code` itself is synchronous, but always resolves the same
+   * way `net.request` etc. does: an async round trip, whether or not `code` itself awaits anything.
+   * `args` are passed through as `code`'s own `args` parameter. */
+  eval(code: string, args?: unknown[]): Promise<unknown>;
+}
+
 /** The facade every caller programs against, delivered as `ctx.api`: to bundled Modules from the
  * Kernel, to uploaded user scripts from the shim. One interface, three transports (in-process /
  * content-script RPC / user script shim) — a method reachable from one but not another is a
@@ -520,6 +563,10 @@ interface SynapseApi {
   files: SynapseFilesApi;
   lib: SynapseLibApi;
   media: SynapseMediaApi;
+  /** Only usable from code that runs on a page, same as `ui` — a background Module gets a stub
+   * whose method throws with that explanation, since "the page's MAIN world" has no meaning for
+   * code that isn't attached to any tab. */
+  page: SynapsePageApi;
 }
 
 /** What an uploaded user script assigns to `globalThis.__synapseModule` to declare itself. */

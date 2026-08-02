@@ -174,6 +174,40 @@ describe('resourceUrlForCall', () => {
   });
 });
 
+describe('page.eval — resource comes from context, not args', () => {
+  it('resolves scopeForApiMethod for page.eval', () => {
+    expect(scopeForApiMethod('page', 'eval')).toBe('page.eval');
+  });
+
+  it('ignores args entirely and pulls the resource url from context.tabUrl', () => {
+    expect(resourceUrlForCall('page', 'eval', ['alert(1)'], { tabUrl: 'https://real-tab.example/' })).toBe(
+      'https://real-tab.example/',
+    );
+  });
+
+  it('a caller-supplied url inside args is never consulted — only context matters', () => {
+    expect(resourceUrlForCall('page', 'eval', [{ url: 'https://attacker.example/' }])).toBeUndefined();
+  });
+
+  it('returns undefined (and so denies, fail-closed) when the call has no known tab context', () => {
+    expect(resourceUrlForCall('page', 'eval', ['alert(1)'])).toBeUndefined();
+    expect(resourceUrlForCall('page', 'eval', ['alert(1)'], {})).toBeUndefined();
+  });
+
+  it('is enforced and requiresMatch, the highest-privilege scope in the catalog', () => {
+    expect(SCOPE_CATALOG['page.eval'].enforcement).toBe('enforced');
+    expect(SCOPE_CATALOG['page.eval'].requiresMatch).toBe(true);
+  });
+
+  it('grantsAllow checks the real tab url the same way it checks any other requiresMatch resource', () => {
+    const grant = { scope: 'page.eval' as const, match: ['*://real-tab.example/*'] };
+    const url = resourceUrlForCall('page', 'eval', [], { tabUrl: 'https://real-tab.example/' });
+    expect(grantsAllow([grant], 'page.eval', url)).toBe(true);
+    expect(grantsAllow([grant], 'page.eval', 'https://attacker.example/')).toBe(false);
+    expect(grantsAllow([grant], 'page.eval', undefined)).toBe(false);
+  });
+});
+
 describe('net.mock — dotted method names + matchExempt', () => {
   it('resolves scopeForApiMethod/resourceUrlForCall for a dotted method name (mock.add)', () => {
     expect(scopeForApiMethod('net', 'mock.add')).toBe('net.mock');

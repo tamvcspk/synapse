@@ -101,5 +101,8 @@ export function buildDomModuleApi(moduleId: string): SynapseApi {
       control: (jobId: string, action: SynapseMediaControlAction) =>
         call(moduleId, 'media', 'control', [jobId, action]).then(() => undefined),
     },
+    page: {
+      eval: (code: string, args?: unknown[]) => call(moduleId, 'page', 'eval', [code, args]),
+    },
   };
 }

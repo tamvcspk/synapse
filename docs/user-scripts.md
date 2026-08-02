@@ -246,6 +246,43 @@ globalThis.__synapseModule = {
 - **`control(jobId, action)`** takes `'pause' | 'resume' | 'cancel' | 'stop-live'` — `'stop-live'`
   only means something for a live (no-`#EXT-X-ENDLIST`) capture, and is a no-op otherwise.
 
+### Running code in the page's own JS context
+
+`page.eval` runs code directly in the page's MAIN-world JS context — the same place a
+hand-authored `<script>` tag on that page would run, and Tampermonkey's `unsafeWindow` in spirit.
+Your script normally runs in the USER_SCRIPT world, which shares the page's DOM but *not* its JS
+globals (see "Faking network responses" above for why that separation matters) — `page.eval` is
+the one deliberate way through it:
+
+```javascript
+globalThis.__synapseModule = {
+  id: 'read-page-global',
+  scopes: [{ scope: 'page.eval', match: ['https://example.com/*'] }],
+  async run(input, ctx) {
+    const title = await ctx.api.page.eval('return document.title;');
+    const sum = await ctx.api.page.eval('return args[0] + args[1];', [2, 3]);
+  },
+};
+```
+
+- **The highest-privilege scope there is, and the only one with no partial version.** Once
+  granted, `code` runs with the full authority of the page's own JS context — every global, every
+  cookie-backed request, every DOM mutation a real `<script>` tag could do. There is no
+  sandboxing inside `code` itself; only grant it to sites you trust running your own script on.
+- **`match` is checked against the tab you're actually running on — not a URL you pass in.**
+  There is no `url` argument to this call, unlike `net.request`/`net.mock`: the resource *is*
+  whichever page your script is injected into, and the platform reads that itself rather than
+  trusting anything the call could claim.
+- **`code` is a function body, not an expression** — write `return x;`, not just `x`. `await`
+  works inside it (it runs as the body of an async function), and `args` (the second, optional
+  parameter to `page.eval`) shows up inside `code` as its own `args` array.
+- **Same structured-clone rules as everything else that crosses the RPC boundary**: whatever
+  `code` returns must survive it — a DOM node, a live object, or a function cannot come back as the
+  resolved value, only plain data.
+- **Best-effort, not a bypass.** A page whose Content-Security-Policy excludes `unsafe-eval` in
+  its `script-src` blocks the mechanism `page.eval` relies on internally — the call rejects with
+  that page's own CSP error instead of running. There's no workaround for that today.
+
 ### `lib` — pure helpers, no scope, no `await`
 
 `ctx.api.lib` is different from everything above it: it costs nothing to grant because it grants

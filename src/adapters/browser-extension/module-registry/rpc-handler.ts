@@ -1,5 +1,5 @@
 import type { ManifestReport, RpcRequest, RpcResponse } from '../../../kernel/rpc';
-import { grantsAllow, isMatchExemptMethod, resourceUrlForCall, scopeForApiMethod } from '../../../kernel/scopes';
+import { SCOPE_CATALOG, grantsAllow, isMatchExemptMethod, resourceUrlForCall, scopeForApiMethod } from '../../../kernel/scopes';
 import type { SynapseApi, SynapseScopeGrant } from '../../../kernel/synapse-api';
 import { hashScriptSource } from '../../../shared/source-hash';
 import { getActivationMap, getGrantedScopes, getUploadedSources, setManifestReport } from './storage';
@@ -27,13 +27,13 @@ import { createSynapseApi } from './synapse-api-host';
 export type TrustedScopeMap = Record<string, SynapseScopeGrant[]>;
 
 export function registerRpcHandler(trustedScopes: TrustedScopeMap = {}): void {
-  const listener = (msg: unknown, _sender: chrome.runtime.MessageSender, sendResponse: (r?: unknown) => void) => {
+  const listener = (msg: unknown, sender: chrome.runtime.MessageSender, sendResponse: (r?: unknown) => void) => {
     if (isManifestReport(msg)) {
       void handleManifestReport(msg);
       return;
     }
     if (!isRpcRequest(msg)) return;
-    handleRpc(msg, trustedScopes).then(sendResponse);
+    handleRpc(msg, trustedScopes, sender).then(sendResponse);
     return true;
   };
 
@@ -118,7 +118,7 @@ async function resolveGrantedScopes(
   return trustedScopes[moduleId];
 }
 
-async function handleRpc(req: RpcRequest, trustedScopes: TrustedScopeMap): Promise<RpcResponse> {
+async function handleRpc(req: RpcRequest, trustedScopes: TrustedScopeMap, sender: chrome.runtime.MessageSender): Promise<RpcResponse> {
   const fail = (error: string): RpcResponse => ({ type: 'synapse:rpc-result', callId: req.callId, error });
 
   try {
@@ -141,14 +141,51 @@ async function handleRpc(req: RpcRequest, trustedScopes: TrustedScopeMap): Promi
     // grantsAllow's generic "no resourceUrl ⇒ deny" would make the method permanently unusable, so
     // the check drops to "is the scope granted at all", the same bar files.save (no resource
     // dimension) already clears. Ownership (moduleId), not match, is what isolates callers there.
+    //
+    // `sender.tab` (populated for both onMessage and onUserScriptMessage — a content script or an
+    // uploaded script is always attached to a real tab) is `page.eval`'s resourceUrl: it has no
+    // per-call url ARGUMENT the way net.request/net.mock do, because the resource it touches is the
+    // caller's own tab, not something named in `req.args`. Reading it from `sender` rather than
+    // trusting anything in `req.args` is the point — a script cannot widen its own reach by claiming
+    // to run on a different origin than it actually does. Built conditionally, not `{ tabUrl:
+    // sender.tab?.url }`, because this project's `exactOptionalPropertyTypes` treats an explicit
+    // `undefined` differently from an absent key.
+    const resourceUrlContext = sender.tab?.url !== undefined ? { tabUrl: sender.tab.url } : {};
+    const resourceUrl = resourceUrlForCall(req.namespace, req.method, req.args, resourceUrlContext);
     const scopeOk = isMatchExemptMethod(req.namespace, req.method)
       ? granted.some((g) => g.scope === requiredScope)
-      : grantsAllow(granted, requiredScope, resourceUrlForCall(req.namespace, req.method, req.args));
+      : grantsAllow(granted, requiredScope, resourceUrl);
     if (!scopeOk) {
-      return fail(`Scope "${requiredScope}" is not granted for module "${req.moduleId}"`);
+      // Three distinct denial reasons collapsed into one generic message before this — indistinguishable
+      // from the caller's side, and "not granted" was actively misleading for the other two while
+      // `page.eval` (the first requiresMatch scope with no url ARGUMENT — its resourceUrl comes from
+      // `sender.tab` instead, see the comment above) was being verified on real Chrome: a denial there
+      // could equally mean "scope never granted", "sender.tab was missing/empty so no resourceUrl could
+      // be determined at all" (this codebase has never confirmed `sender.tab` is populated for
+      // `onUserScriptMessage` the same way it is for `onMessage` — see docs/LESSONS.md's own note that
+      // user-script messaging has surprised this codebase before), or "granted, but for a different
+      // domain than the tab you're actually on". Splitting them turns a silent guessing game into a
+      // message that says which one happened.
+      const hasScope = granted.some((g) => g.scope === requiredScope);
+      if (!hasScope) {
+        return fail(`Scope "${requiredScope}" is not granted for module "${req.moduleId}"`);
+      }
+      if (SCOPE_CATALOG[requiredScope].requiresMatch && !resourceUrl) {
+        return fail(
+          `Scope "${requiredScope}" is granted, but no resource url could be determined for this call ` +
+            `(sender.tab was ${sender.tab ? `present with url ${JSON.stringify(sender.tab.url)}` : 'absent'}) — denying, fail-closed`,
+        );
+      }
+      return fail(
+        `Scope "${requiredScope}" is granted for module "${req.moduleId}", but "${resourceUrl}" does not ` +
+          'fall under any of its granted match patterns',
+      );
     }
 
-    const api = createSynapseApi(req.moduleId);
+    // tabId likewise comes only from `sender`, never from `req.args` — it's what lets
+    // synapse-api-host.ts's page.eval implementation know WHICH tab's MAIN world to run in.
+    const apiContext = sender.tab?.id !== undefined ? { tabId: sender.tab.id } : {};
+    const api = createSynapseApi(req.moduleId, apiContext);
     const namespace = api[req.namespace] as unknown as Record<string, unknown>;
     const handler = resolveMethodHandler(namespace, req.method);
     if (!handler) {
