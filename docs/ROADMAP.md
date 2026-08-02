@@ -453,8 +453,8 @@ Không còn phụ thuộc cứng nào giữa phần còn lại của 11.6 và §
 **Track Studio (§12) — nên làm trước: ít rủi ro, giá trị thấy ngay, không đụng permission model.**
 
 1. **§12.1 — Vòng đời script** (đổi tên/tải về/xoá). — ✅ **Xong, ĐÃ xác nhận bằng browser thật** (rename/download/delete, xem §12.1's write-up).
-2. **Spike Monaco** (bước đầu của §12.2, tách riêng khỏi phần còn lại). — **Bước tiếp theo.** Xanh → đi tiếp bước 3; đỏ → CodeMirror 6, ghi lý do vào [LESSONS.md](LESSONS.md) cạnh mục Alpine.js. Đừng viết gì phụ thuộc Monaco trước khi biết kết quả.
-3. **§12.2 — Studio editor đầy đủ** (save = unregister+register lại, `.d.ts` autocomplete, hiện lỗi cú pháp). Phụ thuộc (1)+(2).
+2. **Spike Monaco** (bước đầu của §12.2, tách riêng khỏi phần còn lại). — ✅ **Xong, XANH, ĐÃ xác nhận bằng Chrome thật** (xem §12.2's write-up + LESSONS.md).
+3. **§12.2 — Studio editor đầy đủ** (save = unregister+register lại, `.d.ts` autocomplete, hiện lỗi cú pháp). Phụ thuộc (1)+(2), cả hai đã xong. — **Bước tiếp theo.**
 4. **§12.3 — steps-view map ngược về code.** Phụ thuộc CỨNG (3) — không có editor thì không "nhảy tới dòng định nghĩa" được, không phải "dùng được một nửa".
 5. **§12.4 — template + Clone builtin.** Phụ thuộc (1)+(3). KHÔNG phụ thuộc track API bên dưới — chỉ dày hơn khi track đó xong thêm việc, không phải điều kiện để bắt đầu.
 
@@ -482,7 +482,7 @@ Phase 2 làm script **chạy được** và **phân quyền được**. Nhưng v
 |---|---|---|
 | Nơi đặt | **Dashboard tab riêng ("Studio")**, không phải popup | Soạn code = tác vụ dài, nhiều state → đúng khung [`ui-surface-placement`](../.claude/skills/ui-surface-placement/SKILL.md). Popup giữ đúng vai list + toggle + nút mở Studio (tiền lệ §2.5) |
 | Tên hiển thị | 4 tầng fallback: **tên user đặt → `__synapseModule.id` → tên file lúc upload → uuid** | uuid là thứ vô nghĩa nhất mà lại đang là mặc định. Tên file có NGAY lúc upload, không phải chờ ManifestReport của lần chạy đầu |
-| Editor | **Monaco — nhưng spike CSP/worker TRƯỚC khi cam kết** | Đúng lớp rủi ro đã giết Alpine.js (§2.5): MV3 CSP chặn `unsafe-eval`, mà Monaco cần web worker cho language service. Fallback chọn sẵn: **CodeMirror 6** (nhẹ hơn, không cần worker). Không viết tính năng nào phụ thuộc Monaco trước khi spike xanh |
+| Editor | **Monaco — spike đã chạy, XANH, xác nhận bằng Chrome thật.** Không cần CodeMirror 6 | Worker + `checkJs` semantic diagnostics chạy đúng dưới CSP mặc định (`script-src 'self' 'wasm-unsafe-eval'`), không cần nới CSP gì thêm. Chi tiết + 2 gotcha thật gặp phải (exports-map subpath, `javascriptDefaults` default `noSemanticValidation:true`) ghi ở [LESSONS.md](LESSONS.md) §"Monaco trong extension page" |
 | Grant sau khi sửa code | Sửa **trong editor của chính extension** → giữ grant, chỉ cập nhật `sourceHash`. Mọi nguồn đổi khác → reset như §11.3 (D). Nếu `scopes` khai RỘNG RA thì vẫn hỏi phần chênh | Mục đích của hash là bắt "source đổi mà user CHƯA xem lại". User tự gõ trong editor thì **đã xem lại theo định nghĩa** — hỏi lại ở đó là nghi thức rỗng, và nghi thức rỗng dạy user bấm Allow theo phản xạ (đúng thứ §11.3 trần-10-scope tránh) |
 | Script thường vs pipeline | **Script thường LÀ pipeline 1 bước**, không phải "một loại khác" | Một shape duy nhất trong registry/UI, không nhánh "composite hay không". `createCompositeModule` vốn đã trả về `Module` thường nên kernel không quan tâm. User "lớn" script lên nhiều bước bằng cách sửa code, không đổi loại/identity/grant |
 | Thêm bước | Bằng **sửa code**; UI chỉ lo bật/tắt + đổi thứ tự | Một bước LÀ một hàm — không có cách nào thêm nó qua UI mà không sinh code. Đã thống nhất với user |
@@ -512,7 +512,7 @@ Phase 2 làm script **chạy được** và **phân quyền được**. Nhưng v
 
 ### 12.2 Studio + Monaco — sửa script trong extension
 
-- **Spike trước tiên, tách khỏi mọi việc khác**: dựng Monaco trong một extension page dưới MV3 CSP, xác nhận language service (worker) chạy. Xanh → đi tiếp; đỏ → CodeMirror 6, và ghi lý do vào [LESSONS.md](LESSONS.md) cạnh mục Alpine.js.
+- **Spike — Đã xong, XANH, ĐÃ xác nhận bằng Chrome thật.** [`ui/studio/`](../src/adapters/browser-extension/ui/studio/) (entry Vite riêng, `vite.config.ts`'s `studio`) dựng Monaco + TS language-service worker, nạp `synapse-userscript.d.ts` qua `addExtraLib`, gõ script mẫu có lỗi cố ý (`ctx.api.storage.gett()`) — worker bắt đúng lỗi, gạch đỏ đúng chỗ trong editor. 2 gotcha thật (exports-map subpath cho worker file, `javascriptDefaults` default `noSemanticValidation:true` khiến `checkJs` một mình không đủ) ghi ở [LESSONS.md](LESSONS.md). Trang này CHỈ để chứng minh worker chạy — chưa phải Studio thật (chưa nối vào popup/dashboard, chưa save/load script thật).
 - **Lãi kép của việc sinh doc ở §11.3**: nạp [`docs/types/synapse-userscript.d.ts`](types/synapse-userscript.d.ts) vào editor (`addExtraLib`) → autocomplete cho `ctx.api.*`, tên scope, shape `__synapseModule`; bật diagnostics để `ctx.api.storage.gett()` bị gạch đỏ **trước khi save**. File đó đã được sinh + assert khỏi drift, nên đây gần như miễn phí.
 - **Save = unregister + register lại + rehash + cập nhật `updatedAt`.** Script mới có hiệu lực ở **lần load trang kế tiếp**, không hot-reload (không giả vờ làm được thứ `chrome.userScripts` không cho). Nói rõ điều này ngay trong UI.
 - **Lỗi cú pháp lúc save** → `chrome.userScripts.register` reject → hiện nguyên `reason` (đường surface lỗi này đã thông ở §11.3, sau khi popup từng nuốt êm kết quả upload).

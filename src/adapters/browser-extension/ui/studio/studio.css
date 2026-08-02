@@ -1,0 +1,26 @@
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+#status,
+#markers-status {
+  margin: 0;
+  padding: 0.5rem 1rem;
+  font-family: monospace;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  border-bottom: 1px solid #333;
+}
+
+#editor {
+  flex: 1;
+  min-height: 0;
+}

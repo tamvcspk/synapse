@@ -19,6 +19,7 @@
     "@ffmpeg/util": "^0.12.2",
     "@mozilla/readability": "^0.6.0",
     "@picocss/pico": "^2.1.1",
+    "monaco-editor": "^0.56.0",
     "turndown": "^7.2.4",
     "vanjs-core": "^1.5.3"
   },

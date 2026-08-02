@@ -24,6 +24,9 @@ export default defineConfig({
         // offscreen document has no manifest field of its own either (unlike `side_panel`), it's
         // created purely at runtime via chrome.offscreen.createDocument (utils/offscreen-manager.ts).
         offscreen: 'src/adapters/browser-extension/ui/offscreen/index.html',
+        // §12.2 Monaco spike (docs/ROADMAP.md) — NOT the real Studio page yet, see studio/main.ts's
+        // doc comment. Same "extra Vite HTML entry" treatment as the others above.
+        studio: 'src/adapters/browser-extension/ui/studio/index.html',
       },
     },
   },
