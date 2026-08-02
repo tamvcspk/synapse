@@ -11,7 +11,7 @@ import { deleteBlob } from '../../utils/blob-store';
 import type { DownloadEngineCommand, DownloadEngineEvent, DownloadEnginePhase, DownloadJobCheckpoint } from '../../../../shared/download-engine-protocol';
 import { listDownloadJobCheckpoints } from '../../features/media/download/checkpoints';
 import { describeResolution } from '../../../../shared/resolution-label';
-import downloadIconUrl from '../../../../assets/icon/download.svg';
+import downloadIconUrl from '../../../../assets/icon/download.png';
 
 /**
  * network-sniffer's Side Panel (docs/ROADMAP.md §6) — bespoke renderer, not

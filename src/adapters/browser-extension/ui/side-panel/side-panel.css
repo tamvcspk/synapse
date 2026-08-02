@@ -217,8 +217,8 @@
 .download-btn img {
   width: 16px;
   height: 16px;
-  /* download.svg is `stroke="currentColor"` for inline SVG use — an <img>-loaded SVG doesn't
-     inherit page CSS, so it renders black by default; forced to white to read against Pico's
-     colored button background. */
+  /* download.png (Lucide, docs/icon-inventory.md) renders as opaque black pixels by default — an
+     <img>-loaded raster has no `currentColor` to lean on the way an inline SVG would, so it's
+     forced to white via filter to read against Pico's colored button background. */
   filter: brightness(0) invert(1);
 }
