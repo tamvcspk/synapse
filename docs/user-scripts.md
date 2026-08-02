@@ -17,10 +17,13 @@ background — the popup shows a banner when this has happened).
 ## Writing a script
 
 There's no bundler step for an uploaded file, so there's no `import`. Declare your script by
-assigning one global; the platform hands you its API as `run()`'s second argument:
+assigning one global; the platform hands you its API as `run()`'s second argument. Assign the bare
+name, not `globalThis.__synapseModule` — both create the same global at runtime, but only the bare
+form gets autocomplete/type-checking from `synapse-userscript.d.ts` in an editor (Monaco's `checkJs`
+can't contextually type an assignment through `globalThis.`, see `docs/LESSONS.md`):
 
 ```javascript
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'reading-time',        // display label only — see "Identity"
   scopes: ['storage.rw'],    // permissions you're asking for; omit for none
 
@@ -45,7 +48,7 @@ say), capture it:
 
 ```javascript
 let api;
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'my-script',
   scopes: ['storage.rw'],
   async run(input, ctx) {
@@ -114,7 +117,7 @@ origin's CORS headers say. This is the delta a page script cannot close on its o
 `net.request` is **enforced**, not disclosed — and always requires `match`:
 
 ```javascript
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'weather-widget',
   scopes: [{ scope: 'net.request', match: ['https://api.weather.example/*'] }],
   async run(input, ctx) {
@@ -142,7 +145,7 @@ globalThis.__synapseModule = {
 that reaches the filesystem:
 
 ```javascript
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'export-notes',
   scopes: ['files.save'],
   async run(input, ctx) {
@@ -171,7 +174,7 @@ globalThis.__synapseModule = {
 network — for testing error handling, or working against an API that doesn't exist yet:
 
 ```javascript
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'offline-demo',
   scopes: [{ scope: 'net.mock', match: ['https://api.example.com/*'] }],
   async run(input, ctx) {
@@ -211,7 +214,7 @@ Panel's Download button drives, fronted as a plain `jobId` string so nothing liv
 `AbortController`, an in-progress file) ever has to cross the RPC boundary:
 
 ```javascript
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'auto-downloader',
   scopes: ['media'],
   async run(input, ctx) {
@@ -266,7 +269,7 @@ globals (see "Faking network responses" above for why that separation matters) �
 the one deliberate way through it:
 
 ```javascript
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'read-page-global',
   scopes: [{ scope: 'page.eval', match: ['https://example.com/*'] }],
   async run(input, ctx) {
@@ -301,7 +304,7 @@ nothing. It's computation on data you already have in hand — nothing privilege
 leaves your script — so there's no scope to declare and no message crosses to the background:
 
 ```javascript
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'hls-inspector',
   // No `scopes` entry needed for lib.hls.parse itself.
   async run(input, ctx) {

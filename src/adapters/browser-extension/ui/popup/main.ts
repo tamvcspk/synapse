@@ -12,6 +12,7 @@ import { openReviewPage } from '../review-handoff';
 import { render as renderView, type RouterHandlers, type View } from './router';
 import { DASHBOARD_PATH } from '../dashboard/dashboard-path';
 import { REVIEW_PATH } from '../review-path';
+import { STUDIO_PATH } from '../studio/studio-path';
 
 const registry = new ChromeModuleRegistryService();
 const root = document.getElementById('root')!;
@@ -64,6 +65,7 @@ const handlers: RouterHandlers = {
   onToggleUi: handleToggleUi,
   onGrant: handleGrant,
   onUpload: () => fileInput.click(),
+  onNewScript: () => openStudio(),
   onRefresh: handleRefresh,
   onOpenModule: handleOpenModule,
   onOpenSteps: handleOpenSteps,
@@ -71,6 +73,7 @@ const handlers: RouterHandlers = {
   onConsentApprove: handleConsentApprove,
   onConsentDeny: () => navigate({ kind: 'list' }),
   onRename: (entry) => navigate({ kind: 'rename', moduleId: entry.id, currentLabel: entry.label ?? entry.id }),
+  onEdit: openStudio,
   onDownload: handleDownload,
   onDelete: (entry) => navigate({ kind: 'confirm-delete', moduleId: entry.id, label: entry.label ?? entry.id }),
   onRenameSave: handleRenameSave,
@@ -91,6 +94,17 @@ function openDashboard(entry: RegistryEntry): void {
 
 function handleOpenSteps(entry: RegistryEntry): void {
   openDashboard(entry);
+}
+
+/** Opens Studio (docs/ROADMAP.md §12.2) — `moduleId` given edits that script, omitted opens "New
+ * script" (a template, no upload required first). Same tab-open-then-close-popup shape as
+ * `openDashboard`. */
+function openStudio(entry?: RegistryEntry): void {
+  const url = entry
+    ? `${chrome.runtime.getURL(STUDIO_PATH)}?moduleId=${encodeURIComponent(entry.id)}`
+    : chrome.runtime.getURL(STUDIO_PATH);
+  void chrome.tabs.create({ url });
+  window.close();
 }
 
 async function handleOpenModule(entry: RegistryEntry, actionId?: string): Promise<void> {

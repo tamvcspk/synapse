@@ -26,7 +26,7 @@ const line = (label, value) => {
 
 line('injected + evaluated', 'yes (needs no permission at all)');
 
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'synapse-ui-b',
   scopes: ['ui.render', 'page.dom'],
 

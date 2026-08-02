@@ -13,7 +13,7 @@ panel.line('marker seen by THIS script', SYNAPSE_TEST_MARKER);
 
 let api; // captured from ctx below — the supported way to use the API outside run()
 
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'synapse-test-b',
   scopes: ['storage.rw'],
 

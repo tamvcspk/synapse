@@ -2,6 +2,9 @@ html,
 body {
   height: 100%;
   margin: 0;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: system-ui, sans-serif;
 }
 
 #root {
@@ -10,14 +13,43 @@ body {
   height: 100%;
 }
 
-#status,
-#markers-status {
-  margin: 0;
+#header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   padding: 0.5rem 1rem;
-  font-family: monospace;
-  background: #1e1e1e;
-  color: #d4d4d4;
   border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+#title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+#save-btn {
+  padding: 0.35rem 1rem;
+  cursor: pointer;
+}
+
+#message {
+  margin: 0;
+  padding: 0.4rem 1rem;
+  font-family: monospace;
+  font-size: 0.85rem;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+#message.error {
+  background: #4a1e1e;
+  color: #f4a3a3;
+}
+
+#message.success {
+  background: #1e3a24;
+  color: #a3d9b1;
 }
 
 #editor {

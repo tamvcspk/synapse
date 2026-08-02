@@ -24,7 +24,7 @@
  * future run ever shows `[onProgress]` NOT firing while `[job poll]` still does, that's a real
  * regression worth investigating, not the expected state.
  */
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'subscription-spike-test',
   scopes: ['media'],
   async run(input, ctx) {

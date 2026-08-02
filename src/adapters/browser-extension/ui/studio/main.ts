@@ -1,7 +1,8 @@
 import './studio.css';
 import * as monaco from 'monaco-editor';
 // monaco-editor 0.53+ moved the TS/JS language service out of `monaco.languages.typescript`
-// (now `{ deprecated: true }`) into a top-level `typescript` export with the same shape.
+// (now `{ deprecated: true }`) into a top-level `typescript` export with the same shape — see
+// docs/LESSONS.md's "Monaco trong extension page" for the full spike write-up.
 import { typescript } from 'monaco-editor';
 // No `esm/vs/` prefix and a mandatory `.js` suffix — the package's `exports` map is
 // `'./*.js': './esm/vs/*.js'`, so it already prepends `esm/vs/`; including it in the specifier
@@ -9,21 +10,16 @@ import { typescript } from 'monaco-editor';
 import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker';
 import TsWorker from 'monaco-editor/languages/features/typescript/ts.worker.js?worker';
 import synapseUserscriptDts from '../../../../../docs/types/synapse-userscript.d.ts?raw';
+import type { RegistryEntry } from '../../../../kernel/module-registry';
+import { ChromeModuleRegistryService } from '../../module-registry/chrome-module-registry';
+import { NEW_SCRIPT_TEMPLATE } from './studio-template';
 
 /**
- * §12.2 spike (docs/ROADMAP.md §12.0/§12.2) — NOT the real Studio page. Only question this answers:
- * does Monaco's language-service worker actually start under MV3's default extension_pages CSP
- * (`script-src 'self' 'wasm-unsafe-eval'`, no `unsafe-eval`)? Green → build the real Studio on top of
- * this; red → switch to CodeMirror 6 and record why in docs/LESSONS.md next to the Alpine.js entry.
- * Nothing else in §12.2 (save/reload, "New script", steps-view code-jump) should be written until
- * this is confirmed on real Chrome, per the roadmap's explicit "don't write anything depending on
- * Monaco before knowing the result."
+ * Studio (docs/ROADMAP.md §12.2) — edit an uploaded script's source in the extension itself.
+ * `?moduleId=<id>` edits that script; no `moduleId` opens "New script" (a template, replacing the
+ * old requirement of having a file ready to upload first).
  */
 
-// MV3 extension pages can't fetch cross-origin, so Monaco's default CDN-relative worker loader
-// never resolves — must hand it real Worker instances built by Vite's own `?worker` bundler
-// instead, which emits them as ordinary same-origin chrome-extension:// chunks (same-origin
-// satisfies `script-src 'self'` with no CSP change needed).
 self.MonacoEnvironment = {
   getWorker(_workerId: string, label: string) {
     if (label === 'typescript' || label === 'javascript') return new TsWorker();
@@ -31,31 +27,9 @@ self.MonacoEnvironment = {
   },
 };
 
-// Deliberate typo (`.gett`) alongside a valid call (`.get`) — the worker is confirmed alive only if
-// diagnostics single out the typo and leave the valid call clean.
-//
-// Bare identifier, not `globalThis.__synapseModule` — the .d.ts declares it as `declare let
-// __synapseModule: ...`, and per real JS semantics (which TS mirrors) a top-level `let` does NOT
-// become a `globalThis` property, only `var` does. Assigning through `globalThis.` silently loses
-// the contextual type from the extra lib — checkJs falls back to implicit-`any` for `run`'s
-// params instead of `SynapseUserScriptManifest`'s `(input: unknown, ctx: { api: SynapseApi })`.
-const SPIKE_CODE = `__synapseModule = {
-  id: 'monaco-spike',
-  scopes: ['storage.rw'],
-  async run(input, ctx) {
-    await ctx.api.storage.gett('key'); // typo on purpose — must be flagged red
-    await ctx.api.storage.get('key'); // valid — must stay clean
-  },
-};
-`;
-
-// `javascriptDefaults` ships with `noSemanticValidation: true` baked into its own constructor
-// default (unlike `typescriptDefaults`, which defaults it to `false`) — confirmed by reading
-// register.js's `new LanguageServiceDefaultsImpl(..., { noSemanticValidation: true, ... })` for
-// the 'javascript' mode. Monaco's built-in marker adapter honors this literally: it never even
-// asks the worker for semantic diagnostics on a .js model unless told otherwise, so `.gett()`
-// went unflagged not from any timing race but because the adapter was deliberately configured
-// not to ask — checkJs alone does NOT imply this gets turned back on.
+// `javascriptDefaults` ships with `noSemanticValidation: true` by default (unlike
+// `typescriptDefaults`) — without this, `checkJs` alone does NOT surface type errors as editor
+// diagnostics (see docs/LESSONS.md).
 typescript.javascriptDefaults.setDiagnosticsOptions({
   noSemanticValidation: false,
   noSyntaxValidation: false,
@@ -68,53 +42,95 @@ typescript.javascriptDefaults.setCompilerOptions({
   checkJs: true,
 });
 
+const registry = new ChromeModuleRegistryService();
+
+let moduleId = new URLSearchParams(location.search).get('moduleId') ?? undefined;
+let model: monaco.editor.ITextModel | undefined;
+
+const titleEl = document.getElementById('title')!;
+const messageEl = document.getElementById('message')!;
+const saveBtn = document.getElementById('save-btn') as HTMLButtonElement;
 const editorEl = document.getElementById('editor')!;
-const statusEl = document.getElementById('status')!;
 
-const model = monaco.editor.createModel(SPIKE_CODE, 'javascript', monaco.Uri.parse('file:///spike.js'));
-monaco.editor.create(editorEl, { model, automaticLayout: true, theme: 'vs-dark' });
-
-function flattenMessage(text: string | { messageText: string; next?: unknown[] }): string {
-  return typeof text === 'string' ? text : text.messageText;
+function setMessage(text: string, kind: 'info' | 'error' | 'success' = 'info'): void {
+  messageEl.textContent = text;
+  messageEl.className = kind === 'info' ? '' : kind;
 }
 
-function reportMarkers(): void {
-  const markers = monaco.editor.getModelMarkers({ resource: model.uri });
-  const flaggedTypo = markers.some((m) => m.message.includes('gett'));
-  const line = markers.length > 0
-    ? `Markers: ${markers.length} — ${flaggedTypo ? 'flagged .gett()' : 'did NOT flag .gett()'}. ${markers.map((m) => m.message).join(' | ')}`
-    : 'Markers: none yet.';
-  const el = document.getElementById('markers-status')!;
-  el.textContent = line;
+function setLabel(label: string): void {
+  document.title = `Synapse — Studio — ${label}`;
+  titleEl.textContent = label;
 }
 
-// Bypasses monaco's marker adapter (the UI layer that turns diagnostics into red squigglies) and
-// asks the TS worker directly — ground truth for "does the language-service worker actually run
-// semantic analysis under this CSP", independent of any race/bug in the marker adapter itself.
-async function reportWorkerDirectly(): Promise<void> {
-  try {
-    const getWorker = await typescript.getJavaScriptWorker();
-    const proxy = await getWorker(model.uri);
-    const fileName = model.uri.toString();
-    const [syntactic, semantic, suggestion] = await Promise.all([
-      proxy.getSyntacticDiagnostics(fileName),
-      proxy.getSemanticDiagnostics(fileName),
-      proxy.getSuggestionDiagnostics(fileName),
-    ]);
-    const semanticMsgs = semantic.map((d) => flattenMessage(d.messageText));
-    const flaggedTypo = semanticMsgs.some((m) => m.includes('gett'));
-    statusEl.textContent =
-      `Worker direct — syntactic:${syntactic.length} semantic:${semantic.length} suggestion:${suggestion.length}. ` +
-      `${flaggedTypo ? 'CORRECTLY flagged .gett()' : 'did NOT flag .gett()'}. ` +
-      `semantic: ${semanticMsgs.join(' | ') || '(none)'} | suggestion: ${suggestion.map((d) => flattenMessage(d.messageText)).join(' | ') || '(none)'}`;
-  } catch (err) {
-    statusEl.textContent = `Worker direct query FAILED: ${String(err)} (check console for stack)`;
-    console.error('Synapse Studio spike: worker query failed', err);
+async function init(): Promise<void> {
+  let source: string;
+  let label: string;
+
+  if (moduleId) {
+    const entries = await registry.list();
+    const entry: RegistryEntry | undefined = entries.find((e) => e.id === moduleId);
+    if (!entry || entry.source !== 'uploaded') {
+      setLabel('Script not found');
+      setMessage(`No uploaded script with id "${moduleId}" — open Studio from a script's Edit icon in the popup.`, 'error');
+      saveBtn.disabled = true;
+      return;
+    }
+    const stored = await registry.getUploadedSource(entry.id);
+    if (stored === undefined) {
+      setLabel('Script not found');
+      setMessage('This script has no stored source.', 'error');
+      saveBtn.disabled = true;
+      return;
+    }
+    source = stored;
+    label = entry.label ?? entry.id;
+  } else {
+    source = NEW_SCRIPT_TEMPLATE;
+    label = 'New script';
   }
+
+  setLabel(label);
+
+  model = monaco.editor.createModel(source, 'javascript', monaco.Uri.parse(`file:///${moduleId ?? 'new-script'}.js`));
+  const editor = monaco.editor.create(editorEl, { model, automaticLayout: true, theme: 'vs-dark', minimap: { enabled: false } });
+  // eslint-disable-next-line no-bitwise -- Monaco's own documented way to combine KeyMod/KeyCode.
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => void save());
+
+  setMessage(
+    moduleId
+      ? 'Changes take effect on the next page load — not hot-reload.'
+      : 'New script — Save to upload it. Changes take effect on the next page load.',
+  );
 }
 
-monaco.editor.onDidChangeMarkers(() => reportMarkers());
-// Diagnostics land async after the worker's first analysis pass; poll once as a fallback in case
-// onDidChangeMarkers never fires at all — that silence would itself be the "red" signal.
-setTimeout(reportMarkers, 4000);
-setTimeout(() => void reportWorkerDirectly(), 4000);
+async function save(): Promise<void> {
+  if (!model) return;
+  saveBtn.disabled = true;
+  setMessage('Saving…');
+
+  const source = model.getValue();
+  const result = moduleId ? await registry.updateScriptSource(moduleId, source) : await registry.uploadModule(source);
+
+  saveBtn.disabled = false;
+
+  if (!result.ok) {
+    // The raw `chrome.userScripts.register` rejection reason (a real syntax error) — shown
+    // verbatim, same "don't swallow the reason" posture as popup/main.ts's upload-failure path.
+    setMessage(result.reason ?? 'Save failed.', 'error');
+    return;
+  }
+
+  if (!moduleId && result.entry) {
+    // Was "New script" — the save just minted a real id. Switch this same tab into edit mode for
+    // it rather than leaving the URL (and a subsequent Save) pointed at nothing.
+    moduleId = result.entry.id;
+    history.replaceState(null, '', `${location.pathname}?moduleId=${encodeURIComponent(moduleId)}`);
+    setLabel(result.entry.label ?? result.entry.id);
+  }
+
+  setMessage('Saved — takes effect on the next page load, not immediately.', 'success');
+}
+
+saveBtn.addEventListener('click', () => void save());
+
+void init();

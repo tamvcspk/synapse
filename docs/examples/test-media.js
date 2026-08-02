@@ -1,4 +1,4 @@
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'media-test',
   scopes: ['media'],
   async run(input, ctx) {

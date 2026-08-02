@@ -18,7 +18,7 @@ const SYNAPSE_TEST_MARKER = 'A';
 const panel = createPanel('A', '#0b5', 12);
 panel.line('injected + evaluated', 'yes ✅ (this line needs no permission at all)');
 
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'synapse-test-a',
   scopes: ['storage.rw', 'page.dom'],
 

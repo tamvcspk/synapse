@@ -465,7 +465,12 @@ export interface SynapseApi {
   page: SynapsePageApi;
 }
 
-/** What an uploaded user script assigns to `globalThis.__synapseModule` to declare itself. */
+/** What an uploaded user script assigns to `__synapseModule` to declare itself. Assign the bare
+ * name, not `globalThis.__synapseModule` — both create the same global at runtime (the shim wraps
+ * user source in a non-strict IIFE, so a bare undeclared assignment becomes an implicit global same
+ * as `globalThis.x =` would), but only the bare form gets contextual typing from this file when
+ * loaded into an editor via TS's `addExtraLib` (`declare let __synapseModule: ...` below doesn't
+ * attach to `globalThis`'s type — a top-level `let`/`const` never does, matching real JS semantics). */
 export interface SynapseUserScriptManifest {
   /** Display label only. The extension assigns the canonical routing id at upload time, before
    * this script has ever run, so this can never be a routing or storage key. */

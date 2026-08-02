@@ -2,14 +2,17 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Synapse — Studio (Monaco spike)</title>
+    <title>Synapse — Studio</title>
   </head>
   <body>
-    <main id="root">
-      <p id="status">Loading Monaco…</p>
-      <p id="markers-status">Loading Monaco…</p>
+    <div id="root">
+      <header id="header">
+        <h1 id="title">Studio</h1>
+        <button id="save-btn" type="button">Save</button>
+      </header>
+      <p id="message"></p>
       <div id="editor"></div>
-    </main>
+    </div>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

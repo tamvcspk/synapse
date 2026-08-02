@@ -1,4 +1,4 @@
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'lib-hls-parse-test',
   // No scopes needed — lib.* is unscoped by design.
   async run(input, ctx) {

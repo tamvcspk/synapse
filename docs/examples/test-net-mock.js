@@ -1,4 +1,4 @@
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'net-mock-test',
   scopes: [{ scope: 'net.mock', match: ['https://example.com/*'] }],
   async run(input, ctx) {

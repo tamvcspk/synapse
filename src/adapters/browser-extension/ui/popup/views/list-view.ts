@@ -12,6 +12,9 @@ export interface ListViewCallbacks {
   onToggleUi(entry: RegistryEntry): void;
   onGrant(entry: RegistryEntry): void;
   onUpload(): void;
+  /** "New script" (docs/ROADMAP.md §12.2) — opens Studio with no `moduleId`, the template entry
+   * point that replaces requiring an existing file to upload. */
+  onNewScript(): void;
   onRefresh(): void;
   /** Navigation Flow (docs/ROADMAP.md #2): row/icon click for any entry carrying a uiSchema —
    * router.ts decides whether that means "open Management View" or "trigger run() directly". For
@@ -27,6 +30,9 @@ export interface ListViewCallbacks {
   /** Vòng đời script (docs/ROADMAP.md §12.1) — only ever shown for `entry.source === 'uploaded'`;
    * a bundled Module's identity/code lives in the extension build, not here. */
   onRename(entry: RegistryEntry): void;
+  /** Opens Studio on this script's source (docs/ROADMAP.md §12.2) — same `entry.source ===
+   * 'uploaded'` restriction as the other lifecycle actions below. */
+  onEdit(entry: RegistryEntry): void;
   onDownload(entry: RegistryEntry): void;
   onDelete(entry: RegistryEntry): void;
 }
@@ -56,6 +62,7 @@ export function renderListView(
     nav(
       ul(li(strong('Synapse Modules'))),
       ul(
+        li(button({ title: 'New script', 'aria-label': 'New script', onclick: callbacks.onNewScript }, icon(ICONS.fileText))),
         li(button({ title: 'Upload script', 'aria-label': 'Upload script', onclick: callbacks.onUpload }, icon(ICONS.upload))),
         li(button({ title: 'Refresh', 'aria-label': 'Refresh', onclick: callbacks.onRefresh }, icon(ICONS.refreshCw))),
       ),
@@ -165,6 +172,7 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
 function lifecycleButtons(entry: RegistryEntry, callbacks: ListViewCallbacks) {
   if (entry.source !== 'uploaded') return [];
   return [
+    button({ class: 'icon-btn', title: 'Edit in Studio', 'aria-label': 'Edit in Studio', onclick: () => callbacks.onEdit(entry) }, icon(ICONS.squarePen)),
     button({ class: 'icon-btn', title: 'Rename', 'aria-label': 'Rename', onclick: () => callbacks.onRename(entry) }, icon(ICONS.pencil)),
     button({ class: 'icon-btn', title: 'Download source', 'aria-label': 'Download source', onclick: () => callbacks.onDownload(entry) }, icon(ICONS.download)),
     button({ class: 'icon-btn', title: 'Delete', 'aria-label': 'Delete', onclick: () => callbacks.onDelete(entry) }, icon(ICONS.trash)),

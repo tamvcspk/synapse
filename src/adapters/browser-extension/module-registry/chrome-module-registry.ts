@@ -152,6 +152,65 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     return (await getUploadedSources())[id];
   }
 
+  /** See the Port doc comment (kernel/module-registry.ts) for the full rationale — summary: validate
+   * via unregister+register the same way upload does, restore the OLD registration on rejection so a
+   * bad save never leaves the script unregistered, preserve active/inactive across the save, and
+   * rehash (not drop) any existing grant. */
+  async updateScriptSource(id: string, source: string): Promise<UploadResult> {
+    const uploaded = await getUploadedSources();
+    const oldSource = uploaded[id];
+    if (oldSource === undefined) return { ok: false, reason: 'not an uploaded script' };
+
+    const wasActive = (await getActivationMap())[id] ?? true;
+    if (wasActive) {
+      try {
+        await chrome.userScripts.unregister({ ids: [id] });
+      } catch {
+        // Already unregistered somehow — best-effort, same posture as deactivate/delete.
+      }
+    }
+
+    try {
+      // Registers even when `wasActive` is false — this is the only way to validate syntax the same
+      // way upload does, since chrome.userScripts has no "just check, don't register" mode. Undone
+      // right below when the script was meant to stay inactive.
+      await registerUploadedScript(id, source);
+    } catch (err) {
+      if (wasActive) {
+        try {
+          await registerUploadedScript(id, oldSource);
+        } catch {
+          // Best-effort restore — if even the OLD source now fails to register (shouldn't happen,
+          // it registered successfully before), there's nothing more to do here than report the
+          // NEW source's rejection reason below; the entry will show as invalid until fixed.
+        }
+      }
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+    if (!wasActive) {
+      try {
+        await chrome.userScripts.unregister({ ids: [id] });
+      } catch {
+        // Shouldn't happen right after a successful register — best-effort regardless.
+      }
+    }
+
+    await setUploadedSource(id, source);
+    const meta = (await getScriptMetaMap())[id];
+    await setScriptMeta(id, { ...meta, createdAt: meta?.createdAt ?? Date.now(), updatedAt: Date.now() });
+
+    // §12.0: editing in Studio keeps the grant, just rehashes it — the ONE source-change path that
+    // doesn't reset to "no grant" the way every other mismatch does.
+    const existingGrant = (await getGrantsMap())[id];
+    if (existingGrant) {
+      await setGrantedScopes(id, existingGrant.scopes, await hashScriptSource(source));
+    }
+
+    const entries = await this.buildEntries();
+    const entry = entries.find((e) => e.id === id);
+    return entry ? { ok: true, entry } : { ok: true };
+  }
+
   /** "7 places, one function" (docs/ROADMAP.md §12.1) — deliberately gathered here rather than left
    * for the UI to call piecemeal, so no future caller can partially delete a script and leave ghost
    * state behind. A no-op for a bundled id: nothing here belongs to one. */

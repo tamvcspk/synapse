@@ -40,6 +40,7 @@ export interface RouterHandlers {
   onToggleUi(entry: RegistryEntry): void;
   onGrant(entry: RegistryEntry): void;
   onUpload(): void;
+  onNewScript(): void;
   onRefresh(): void;
   onOpenModule(entry: RegistryEntry, actionId?: string): void;
   onOpenSteps(entry: RegistryEntry): void;
@@ -47,6 +48,7 @@ export interface RouterHandlers {
   onConsentApprove(): void;
   onConsentDeny(): void;
   onRename(entry: RegistryEntry): void;
+  onEdit(entry: RegistryEntry): void;
   onDownload(entry: RegistryEntry): void;
   onDelete(entry: RegistryEntry): void;
   onRenameSave(label: string): void;
@@ -69,10 +71,12 @@ export async function render(
         onToggleUi: handlers.onToggleUi,
         onGrant: handlers.onGrant,
         onUpload: handlers.onUpload,
+        onNewScript: handlers.onNewScript,
         onRefresh: handlers.onRefresh,
         onOpenModule: handlers.onOpenModule,
         onOpenSteps: handlers.onOpenSteps,
         onRename: handlers.onRename,
+        onEdit: handlers.onEdit,
         onDownload: handlers.onDownload,
         onDelete: handlers.onDelete,
       },

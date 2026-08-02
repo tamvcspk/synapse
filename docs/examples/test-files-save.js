@@ -1,4 +1,4 @@
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'files-save-test',
   scopes: ['files.save'],
   async run(input, ctx) {

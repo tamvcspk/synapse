@@ -1,4 +1,4 @@
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'net-request-test',
   scopes: [{ scope: 'net.request', match: ['https://example.com/*'] }],
   async run(input, ctx) {

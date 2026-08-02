@@ -9,7 +9,7 @@
  * only covers that match pattern, and this script's own checks (including the deliberate-denial one
  * below) depend on it matching the tab you run it on.
  */
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'page-eval-test',
   scopes: [{ scope: 'page.eval', match: ['https://example.com/*'] }],
   async run(input, ctx) {

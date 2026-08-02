@@ -454,8 +454,8 @@ Không còn phụ thuộc cứng nào giữa phần còn lại của 11.6 và §
 
 1. **§12.1 — Vòng đời script** (đổi tên/tải về/xoá). — ✅ **Xong, ĐÃ xác nhận bằng browser thật** (rename/download/delete, xem §12.1's write-up).
 2. **Spike Monaco** (bước đầu của §12.2, tách riêng khỏi phần còn lại). — ✅ **Xong, XANH, ĐÃ xác nhận bằng Chrome thật** (xem §12.2's write-up + LESSONS.md).
-3. **§12.2 — Studio editor đầy đủ** (save = unregister+register lại, `.d.ts` autocomplete, hiện lỗi cú pháp). Phụ thuộc (1)+(2), cả hai đã xong. — **Bước tiếp theo.**
-4. **§12.3 — steps-view map ngược về code.** Phụ thuộc CỨNG (3) — không có editor thì không "nhảy tới dòng định nghĩa" được, không phải "dùng được một nửa".
+3. **§12.2 — Studio editor đầy đủ** (save = unregister+register lại, `.d.ts` autocomplete, hiện lỗi cú pháp). — ✅ **Xong, ĐÃ xác nhận bằng Chrome thật** (xem §12.2's write-up).
+4. **§12.3 — steps-view map ngược về code.** Phụ thuộc CỨNG (3), nay đã xong. — **Bước tiếp theo.**
 5. **§12.4 — template + Clone builtin.** Phụ thuộc (1)+(3). KHÔNG phụ thuộc track API bên dưới — chỉ dày hơn khi track đó xong thêm việc, không phải điều kiện để bắt đầu.
 
 **Track API (11.6 còn lại) — chạy song song với Studio, độc lập hoàn toàn với nó:**
@@ -510,15 +510,22 @@ Phase 2 làm script **chạy được** và **phân quyền được**. Nhưng v
 
 - **Phụ thuộc**: không (Phase 2 đã xong).
 
-### 12.2 Studio + Monaco — sửa script trong extension
+### 12.2 Studio + Monaco — sửa script trong extension — Đã implement, ĐÃ xác nhận bằng Chrome thật
 
-- **Spike — Đã xong, XANH, ĐÃ xác nhận bằng Chrome thật.** [`ui/studio/`](../src/adapters/browser-extension/ui/studio/) (entry Vite riêng, `vite.config.ts`'s `studio`) dựng Monaco + TS language-service worker, nạp `synapse-userscript.d.ts` qua `addExtraLib`, gõ script mẫu có lỗi cố ý (`ctx.api.storage.gett()`) — worker bắt đúng lỗi, gạch đỏ đúng chỗ trong editor. 2 gotcha thật (exports-map subpath cho worker file, `javascriptDefaults` default `noSemanticValidation:true` khiến `checkJs` một mình không đủ) ghi ở [LESSONS.md](LESSONS.md). Trang này CHỈ để chứng minh worker chạy — chưa phải Studio thật (chưa nối vào popup/dashboard, chưa save/load script thật).
-- **Lãi kép của việc sinh doc ở §11.3**: nạp [`docs/types/synapse-userscript.d.ts`](types/synapse-userscript.d.ts) vào editor (`addExtraLib`) → autocomplete cho `ctx.api.*`, tên scope, shape `__synapseModule`; bật diagnostics để `ctx.api.storage.gett()` bị gạch đỏ **trước khi save**. File đó đã được sinh + assert khỏi drift, nên đây gần như miễn phí.
-- **Save = unregister + register lại + rehash + cập nhật `updatedAt`.** Script mới có hiệu lực ở **lần load trang kế tiếp**, không hot-reload (không giả vờ làm được thứ `chrome.userScripts` không cho). Nói rõ điều này ngay trong UI.
-- **Lỗi cú pháp lúc save** → `chrome.userScripts.register` reject → hiện nguyên `reason` (đường surface lỗi này đã thông ở §11.3, sau khi popup từng nuốt êm kết quả upload).
-- **"New script" từ template** thành lối vào chính, thay cho việc bắt buộc phải có sẵn một file để upload. Template lấy từ ví dụ trong [user-scripts.md](user-scripts.md).
-- **Xong khi**: sửa một script trong Studio → save → reload trang → hành vi mới chạy; gõ `ctx.api.` ra gợi ý thật; script sai cú pháp không save được và hiện đúng lý do; grant KHÔNG bị hỏi lại nếu `scopes` không đổi.
-- **Phụ thuộc**: §12.1 (cần chỗ lưu meta + tên để hiển thị trong Studio).
+**Spike (bước 1)**: [`ui/studio/`](../src/adapters/browser-extension/ui/studio/) (entry Vite riêng, `vite.config.ts`'s `studio`) dựng Monaco + TS language-service worker dưới đúng CSP mặc định, không cần nới `content_security_policy`. 3 gotcha thật gặp phải, cả ba ghi ở [LESSONS.md](LESSONS.md): exports-map subpath cho worker file (bỏ tiền tố `esm/vs/`), `javascriptDefaults` default `noSemanticValidation: true` (khiến `checkJs` một mình không đủ để có gạch đỏ — phải tự `setDiagnosticsOptions`), và `declare let __synapseModule` trong `.d.ts` không gắn được lên `globalThis` (chỉ `__synapseModule = {...}` gán trực tiếp mới nhận đúng type khi soạn trong editor — xem mục dưới).
+
+**Studio thật (bước 2)** — [`ui/studio/main.ts`](../src/adapters/browser-extension/ui/studio/main.ts):
+
+- `?moduleId=<id>` mở đúng script đó để sửa; không có param = **"New script"** từ template ([`studio-template.ts`](../src/adapters/browser-extension/ui/studio/studio-template.ts), cùng nội dung ví dụ đầu tiên trong [user-scripts.md](user-scripts.md)) — lối vào chính thay cho việc bắt buộc phải có sẵn file để upload.
+- **Save = unregister + register lại + cập nhật `updatedAt`.** `ModuleRegistryService.updateScriptSource` (Port mới, [kernel/module-registry.ts](../src/kernel/module-registry.ts) + [chrome-module-registry.ts](../src/adapters/browser-extension/module-registry/chrome-module-registry.ts)) — validate bằng chính `chrome.userScripts.register` (như lúc upload); **lỗi cú pháp → reject → hiện nguyên `reason`, KHÔNG lưu, và bản đăng ký CŨ được khôi phục** (không bao giờ để script rơi vào trạng thái unregistered chỉ vì save hỏng). Giữ nguyên trạng thái active/inactive qua lần save (nếu script đang tắt, validate xong tự unregister lại, không vô tình bật nó lên).
+- **Grant KHÔNG bị hỏi lại** — khác MỌI đường đổi source khác (§11.3 ràng buộc D, nơi lệch hash = mất grant): sửa trong Studio thì grant cũ được **rehash theo source mới**, không bị xoá. Nếu script khai `scopes` rộng ra, phần chênh vẫn hiện "Grant" ở popup như bình thường (`ungrantedScopes` so `entry.scopes` với `entry.grantedScopes`, không cần logic riêng).
+- **`ctx.api.` gõ ra gợi ý thật** — nạp `synapse-userscript.d.ts` qua `addExtraLib` + `checkJs`. **Điều kiện bắt buộc: script phải khai `__synapseModule = {...}` (gán trực tiếp), KHÔNG `globalThis.__synapseModule = {...}`** — dạng `globalThis.` khiến tham số `ctx` rơi về `any`, không gợi ý gì (xem LESSONS.md). Vì vậy toàn bộ ví dụ trong `user-scripts.md` + `docs/examples/*.js` đã đổi sang dạng gán trực tiếp; `synapse-api.ts`'s doc comment (nguồn sinh `.d.ts`) cũng ghi rõ lý do.
+- **New script**: Save lần đầu gọi `uploadModule` (mint id mới), rồi Studio tự chuyển tab hiện tại sang chế độ edit cho id đó (`history.replaceState` cập nhật `?moduleId=`) — không mở tab mới, không mất context.
+- **UI popup**: nút "New script" (icon file-text) cạnh Upload/Refresh; icon "Edit in Studio" (square-pen) thêm vào hàng nút vòng đời script (Rename/Download/Delete) ở [list-view.ts](../src/adapters/browser-extension/ui/popup/views/list-view.ts), chỉ hiện cho `entry.source === 'uploaded'`.
+
+**Xong khi**: sửa một script trong Studio → save → reload trang → hành vi mới chạy; gõ `ctx.api.` ra gợi ý thật; script sai cú pháp không save được và hiện đúng lý do; grant KHÔNG bị hỏi lại nếu `scopes` không đổi. **Cả 4 điều kiện đã được user xác nhận bằng Chrome thật**, kèm luồng "New script" tạo script mới thành công.
+
+- **Phụ thuộc**: §12.1 (đã xong).
 
 ### 12.3 Bước (steps): code là nguồn sự thật duy nhất, UI map ngược về code
 

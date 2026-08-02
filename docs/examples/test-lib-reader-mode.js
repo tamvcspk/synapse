@@ -1,4 +1,4 @@
-globalThis.__synapseModule = {
+__synapseModule = {
   id: 'lib-reader-mode-test',
   // net.request's match is broad here for a quick manual test — a real script should scope this to
   // the actual domains it expects to download images from, not '*://*/*'.

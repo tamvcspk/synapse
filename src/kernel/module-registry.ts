@@ -89,6 +89,20 @@ export interface ModuleRegistryService {
    * only reason this exists on the Port is download (§12.1): the popup/Studio never otherwise need
    * the actual code, just the RegistryEntry's projection of it. */
   getUploadedSource(id: string): Promise<string | undefined>;
+  /** Saves edited source for an already-uploaded script from Studio (docs/ROADMAP.md §12.2):
+   * unregister + register again (the same validation `chrome.userScripts.register` does on
+   * upload — a syntax error rejects and the OLD registration is restored, never left unregistered),
+   * update `updatedAt`, and preserve the script's current active/inactive state either way.
+   *
+   * Unlike any other source-change path (§11.3 constraint D, where a source-hash mismatch means "no
+   * grant"), an existing grant is REHASHED to the new source rather than dropped — §12.0's decision
+   * that editing in the extension's own editor counts as "already reviewed". If the edited script
+   * now requests scopes beyond what's granted, those still show up as ungranted on the next report
+   * (`ungrantedScopes(entry.scopes, entry.grantedScopes)` in the popup already does this comparison;
+   * nothing extra is needed here for that half).
+   *
+   * Refuses ids that aren't uploaded scripts, same reasoning as `grantScopes`/`renameScript`. */
+  updateScriptSource(id: string, source: string): Promise<UploadResult>;
   /** Deletes an uploaded script's ENTIRE footprint — registration, source, meta, manifest report,
    * grant, activation, sub-state, and its own `storage.rw` namespace (docs/ROADMAP.md §12.1's "7
    * places, one function" — missing any one leaves ghost state, the same bug class as §8.12). A
