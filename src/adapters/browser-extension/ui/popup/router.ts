@@ -4,6 +4,8 @@ import { renderListView, type ListViewProps } from './views/list-view';
 import { renderActionResultView } from './views/action-result-view';
 import { renderScopeConsentView } from './views/scope-consent-view';
 import { renderBusyView } from './views/busy-view';
+import { renderRenameView } from './views/rename-view';
+import { renderConfirmDeleteView } from './views/confirm-delete-view';
 
 /**
  * The popup's single source of navigation state (docs/ROADMAP.md #2 Navigation Flow). Every kind
@@ -24,7 +26,11 @@ export type View =
    * second or two and this just flashes briefly, but a long-running one (Crawl & Convert Site)
    * updates `message` with progress pings so there's a clear signal to wait rather than click
    * away (closing the popup mid-request loses the response — see main.ts's progress listener). */
-  | { kind: 'busy'; message: string };
+  | { kind: 'busy'; message: string }
+  /** Vòng đời script (docs/ROADMAP.md §12.1) — rename and delete each get their own in-flow view
+   * for the same "no native dialog in this popup" reason as scope-consent above. */
+  | { kind: 'rename'; moduleId: string; currentLabel: string }
+  | { kind: 'confirm-delete'; moduleId: string; label: string };
 
 /** Handlers own all business logic (writes, state transitions) and are defined in main.ts, which
  * closes over `entries`/`view`/`load` — router.ts only decides "given state, what's on screen,"
@@ -40,6 +46,11 @@ export interface RouterHandlers {
   onNavigate(next: View): void;
   onConsentApprove(): void;
   onConsentDeny(): void;
+  onRename(entry: RegistryEntry): void;
+  onDownload(entry: RegistryEntry): void;
+  onDelete(entry: RegistryEntry): void;
+  onRenameSave(label: string): void;
+  onDeleteConfirm(): void;
 }
 
 export async function render(
@@ -61,6 +72,9 @@ export async function render(
         onRefresh: handlers.onRefresh,
         onOpenModule: handlers.onOpenModule,
         onOpenSteps: handlers.onOpenSteps,
+        onRename: handlers.onRename,
+        onDownload: handlers.onDownload,
+        onDelete: handlers.onDelete,
       },
       listProps,
     );
@@ -74,6 +88,24 @@ export async function render(
 
   if (view.kind === 'busy') {
     renderBusyView(root, view);
+    return;
+  }
+
+  if (view.kind === 'rename') {
+    renderRenameView(
+      root,
+      { currentLabel: view.currentLabel },
+      { onSave: handlers.onRenameSave, onCancel: () => handlers.onNavigate({ kind: 'list' }) },
+    );
+    return;
+  }
+
+  if (view.kind === 'confirm-delete') {
+    renderConfirmDeleteView(
+      root,
+      { label: view.label },
+      { onConfirm: handlers.onDeleteConfirm, onCancel: () => handlers.onNavigate({ kind: 'list' }) },
+    );
     return;
   }
 

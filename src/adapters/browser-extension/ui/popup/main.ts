@@ -3,6 +3,7 @@ import './popup.css';
 import type { RegistryEntry } from '../../../../kernel/module-registry';
 import { ungrantedScopes } from '../../../../kernel/scopes';
 import { isCollectionSchema } from '../../../../kernel/ui-schema';
+import { resolveScriptFileName } from '../../../../shared/resolve-script-label';
 import { ChromeModuleRegistryService } from '../../module-registry/chrome-module-registry';
 import { isUserScriptsPermissionGranted } from '../../module-registry/storage';
 import { listenForActionProgress } from '../action-progress';
@@ -33,7 +34,7 @@ fileInput.addEventListener('change', async () => {
   // `chrome.userScripts` is `undefined` and the property access throws) left the popup looking
   // exactly like a success: no new row, no message. That is the silent-failure shape this project
   // keeps paying for; the reason is now shown.
-  const result = await registry.uploadModule(await file.text());
+  const result = await registry.uploadModule(await file.text(), file.name);
   if (!result.ok) {
     navigate({ kind: 'action-result', title: `${file.name} — Upload failed`, content: result.reason ?? 'Unknown error', isError: true });
     return;
@@ -69,6 +70,11 @@ const handlers: RouterHandlers = {
   onNavigate: navigate,
   onConsentApprove: handleConsentApprove,
   onConsentDeny: () => navigate({ kind: 'list' }),
+  onRename: (entry) => navigate({ kind: 'rename', moduleId: entry.id, currentLabel: entry.label ?? entry.id }),
+  onDownload: handleDownload,
+  onDelete: (entry) => navigate({ kind: 'confirm-delete', moduleId: entry.id, label: entry.label ?? entry.id }),
+  onRenameSave: handleRenameSave,
+  onDeleteConfirm: handleDeleteConfirm,
 };
 
 // Navigation Flow (docs/ROADMAP.md #2, extended by #2.5): a Collection schema opens the Dashboard
@@ -183,6 +189,36 @@ async function handleConsentApprove(): Promise<void> {
 
 async function handleRefresh(): Promise<void> {
   await registry.refresh();
+  await load();
+}
+
+/** docs/ROADMAP.md §12.1 — Blob + chrome.downloads.download, not `output.offscreen.ts`'s `data:`
+ * URL trick: that trick exists only because an Offscreen Document lacks `chrome.downloads`, which
+ * the popup already has (see review-zip.ts's `<a download>` for the codebase's other "already in a
+ * real page" download, and files-save-host.ts's doc comment for why the `data:` route exists at all). */
+async function handleDownload(entry: RegistryEntry): Promise<void> {
+  const source = await registry.getUploadedSource(entry.id);
+  if (source === undefined) return;
+  const filename = resolveScriptFileName(entry.fileName, entry.label ?? entry.id);
+  const blobUrl = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
+  try {
+    await chrome.downloads.download({ url: blobUrl, filename });
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+}
+
+async function handleRenameSave(label: string): Promise<void> {
+  if (view.kind !== 'rename') return;
+  await registry.renameScript(view.moduleId, label);
+  view = { kind: 'list' };
+  await load();
+}
+
+async function handleDeleteConfirm(): Promise<void> {
+  if (view.kind !== 'confirm-delete') return;
+  await registry.deleteScript(view.moduleId);
+  view = { kind: 'list' };
   await load();
 }
 

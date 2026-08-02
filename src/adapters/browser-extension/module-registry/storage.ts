@@ -9,6 +9,7 @@ const KEYS = {
   userScriptsPermission: 'synapse:user-scripts-permission',
   subState: 'synapse:sub-state',
   uiMuted: 'synapse:ui-muted',
+  scriptMeta: 'synapse:script-meta',
 } as const;
 
 export const ACTIVATION_STORAGE_KEY = KEYS.activation;
@@ -38,6 +39,16 @@ export async function isModuleActive(id: string): Promise<boolean> {
 export async function setModuleActive(id: string, active: boolean): Promise<void> {
   const map = await getActivationMap();
   map[id] = active;
+  await setStored(KEYS.activation, map);
+}
+
+/** Removes the key entirely rather than setting it — for deleting a script (docs/ROADMAP.md
+ * §12.1), not for turning one off. `setModuleActive(id, false)` would leave a ghost entry behind
+ * forever; every uploaded id is a fresh uuid, so there's no reuse case where that entry could ever
+ * matter again. */
+export async function deleteActivation(id: string): Promise<void> {
+  const map = await getActivationMap();
+  delete map[id];
   await setStored(KEYS.activation, map);
 }
 
@@ -183,6 +194,16 @@ export async function setSubModuleActive(id: string, subId: string, active: bool
   await setStored(KEYS.subState, map);
 }
 
+/** Drops one module's entire sub-step bypass map — one of the 7 storage locations `deleteScript`
+ * (docs/ROADMAP.md §12.1) must clean, alongside `deleteActivation`/`deleteGrantRecord`/etc. Most
+ * uploaded scripts have no `subModules` yet (§12.3 is still ahead), but the key would otherwise
+ * sit as unreachable ghost state forever if one ever did. */
+export async function deleteSubState(id: string): Promise<void> {
+  const map = await getSubStateMap();
+  delete map[id];
+  await setStored(KEYS.subState, map);
+}
+
 /**
  * Whether chrome.userScripts.configureWorld({ messaging: true }) last succeeded — set once from
  * background/index.ts at startup. Defaults to true (assume ok) so the popup doesn't flash a
@@ -194,4 +215,34 @@ export async function isUserScriptsPermissionGranted(): Promise<boolean> {
 
 export async function setUserScriptsPermissionGranted(granted: boolean): Promise<void> {
   await setStored(KEYS.userScriptsPermission, granted);
+}
+
+/**
+ * Vòng đời script (docs/ROADMAP.md §12.1) — kept as its OWN record, separate from `synapse:uploaded`
+ * (which holds only source text): renaming a script must not touch its source, and a source update
+ * must not touch its display name. `fileName` is captured at upload time (`file.name` from the
+ * popup's file input) so the popup has something better than a raw uuid to show before the script
+ * has ever run; `userLabel`, once set, outranks everything (see `resolveScriptLabel`).
+ */
+export interface ScriptMeta {
+  fileName?: string;
+  userLabel?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export async function getScriptMetaMap(): Promise<Record<string, ScriptMeta>> {
+  return getStored(KEYS.scriptMeta, {});
+}
+
+export async function setScriptMeta(id: string, meta: ScriptMeta): Promise<void> {
+  const map = await getScriptMetaMap();
+  map[id] = meta;
+  await setStored(KEYS.scriptMeta, map);
+}
+
+export async function deleteScriptMeta(id: string): Promise<void> {
+  const map = await getScriptMetaMap();
+  delete map[id];
+  await setStored(KEYS.scriptMeta, map);
 }

@@ -23,6 +23,11 @@ export interface ListViewCallbacks {
    * an Action schema (triggers run() directly), independent of whether it also has sub-steps to
    * configure. Only shown when `entry.subModules` is non-empty. */
   onOpenSteps(entry: RegistryEntry): void;
+  /** Vòng đời script (docs/ROADMAP.md §12.1) — only ever shown for `entry.source === 'uploaded'`;
+   * a bundled Module's identity/code lives in the extension build, not here. */
+  onRename(entry: RegistryEntry): void;
+  onDownload(entry: RegistryEntry): void;
+  onDelete(entry: RegistryEntry): void;
 }
 
 export interface ListViewProps {
@@ -50,7 +55,7 @@ export function renderListView(
     nav(
       ul(li(strong('Synapse Modules'))),
       ul(
-        li(button({ title: 'Upload module', onclick: callbacks.onUpload }, '⬆')),
+        li(button({ title: 'Upload script', onclick: callbacks.onUpload }, '⬆')),
         li(button({ title: 'Refresh', onclick: callbacks.onRefresh }, '⟳')),
       ),
     ),
@@ -138,6 +143,7 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
       { class: 'row-actions' },
       stepsBtn,
       ...renderActionButtons(entry, callbacks),
+      ...lifecycleButtons(entry, callbacks),
       uiValveButton(entry, callbacks),
       input({
         type: 'checkbox',
@@ -148,4 +154,16 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
       }),
     ),
   );
+}
+
+/** Vòng đời script (docs/ROADMAP.md §12.1) — rename/download/delete, shown for every uploaded
+ * script regardless of `status`: an invalid script (bad syntax, rejected shape) is exactly the one
+ * a user most wants to rename-to-remember, download-to-fix-elsewhere, or delete. */
+function lifecycleButtons(entry: RegistryEntry, callbacks: ListViewCallbacks) {
+  if (entry.source !== 'uploaded') return [];
+  return [
+    button({ class: 'icon-btn', title: 'Rename', onclick: () => callbacks.onRename(entry) }, '✏️'),
+    button({ class: 'icon-btn', title: 'Download source', onclick: () => callbacks.onDownload(entry) }, '⬇️'),
+    button({ class: 'icon-btn', title: 'Delete', onclick: () => callbacks.onDelete(entry) }, '🗑️'),
+  ];
 }

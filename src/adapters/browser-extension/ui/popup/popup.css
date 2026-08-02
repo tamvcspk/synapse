@@ -64,6 +64,14 @@ body {
   opacity: 0.4;
 }
 
+/* Rename/download/delete (docs/ROADMAP.md §12.1) — plain icon buttons, same "no border/background"
+   treatment as .ui-valve, kept as a separate class since they don't share its grayscale/off state. */
+.icon-btn {
+  background: none;
+  border: none;
+  opacity: 0.75;
+}
+
 .row-actions button,
 .module-gear {
   width: auto;
@@ -88,6 +96,11 @@ body {
 
 .action-result-form.is-error p {
   color: var(--pico-del-color);
+}
+
+.delete-confirm {
+  background: var(--pico-del-color);
+  border-color: var(--pico-del-color);
 }
 
 .busy-view {

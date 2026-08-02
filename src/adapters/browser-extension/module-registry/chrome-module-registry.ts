@@ -2,6 +2,7 @@ import { validateModuleManifestShape } from '../../../kernel/manifest-validator'
 import type { ModuleRegistryService, RegistryEntry, UploadResult } from '../../../kernel/module-registry';
 import type { SynapseScopeGrant } from '../../../kernel/synapse-api';
 import { hashScriptSource } from '../../../shared/source-hash';
+import { resolveScriptLabel } from '../../../shared/resolve-script-label';
 import { BUNDLED_MODULES } from './bundled-modules';
 import { BACKGROUND_MODULES } from './background-modules';
 import { buildShimSource } from './user-script-shim';
@@ -9,10 +10,12 @@ import { buildShimSource } from './user-script-shim';
 // import: chrome.userScripts, like chrome.scripting, injects `js` entries as classic scripts, and a
 // raw ES module chunk throws a SyntaxError before a single line runs.
 import libPayloadPath from './user-script-lib-payload?script&iife';
+import { clearScriptStorage } from './script-storage';
 import {
   getActivationMap,
   getGrantsMap,
   getManifestReports,
+  getScriptMetaMap,
   getSubStateMap,
   getUploadedSources,
   setGrantedScopes,
@@ -21,6 +24,14 @@ import {
   setUiMuted as persistUiMuted,
   setSubModuleActive as persistSubModuleActive,
   setUploadedSource,
+  setScriptMeta,
+  deleteActivation,
+  deleteGrantRecord,
+  deleteManifestReport,
+  deleteScriptMeta,
+  deleteSubState,
+  deleteUploadedSource,
+  type ScriptMeta,
   type StoredGrantRecord,
   type StoredManifestReport,
 } from './storage';
@@ -110,7 +121,7 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     await persistUiMuted(id, hidden);
   }
 
-  async uploadModule(source: string): Promise<UploadResult> {
+  async uploadModule(source: string, fileName?: string): Promise<UploadResult> {
     const id = crypto.randomUUID();
     try {
       await registerUploadedScript(id, source);
@@ -119,24 +130,65 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     }
     await setUploadedSource(id, source);
     await setModuleActive(id, true);
+    const now = Date.now();
+    await setScriptMeta(id, { ...(fileName ? { fileName } : {}), createdAt: now, updatedAt: now });
 
     const entries = await this.buildEntries();
     const entry = entries.find((e) => e.id === id);
     return entry ? { ok: true, entry } : { ok: true };
   }
 
+  /** Refuses bundled ids — same reasoning as `grantScopes`: a bundled Module's label comes from its
+   * own build-time code, and writing here would put a first-party display name in a store scripts
+   * might one day reach. */
+  async renameScript(id: string, label: string): Promise<void> {
+    const uploaded = await getUploadedSources();
+    if (!(id in uploaded)) return;
+    const meta = (await getScriptMetaMap())[id];
+    await setScriptMeta(id, { ...meta, userLabel: label, createdAt: meta?.createdAt ?? Date.now(), updatedAt: Date.now() });
+  }
+
+  async getUploadedSource(id: string): Promise<string | undefined> {
+    return (await getUploadedSources())[id];
+  }
+
+  /** "7 places, one function" (docs/ROADMAP.md §12.1) — deliberately gathered here rather than left
+   * for the UI to call piecemeal, so no future caller can partially delete a script and leave ghost
+   * state behind. A no-op for a bundled id: nothing here belongs to one. */
+  async deleteScript(id: string): Promise<void> {
+    const uploaded = await getUploadedSources();
+    if (!(id in uploaded)) return;
+
+    try {
+      await chrome.userScripts.unregister({ ids: [id] });
+    } catch {
+      // Already unregistered (e.g. deleting a script that's currently deactivated) — best-effort.
+    }
+
+    await Promise.all([
+      deleteUploadedSource(id),
+      deleteScriptMeta(id),
+      deleteManifestReport(id),
+      deleteGrantRecord(id),
+      deleteActivation(id),
+      deleteSubState(id),
+      clearScriptStorage(id),
+    ]);
+  }
+
   private async buildEntries(): Promise<RegistryEntry[]> {
-    const [activation, grants, uploaded, reports, subStates, uiMuted] = await Promise.all([
+    const [activation, grants, uploaded, reports, subStates, uiMuted, scriptMeta] = await Promise.all([
       getActivationMap(),
       getGrantsMap(),
       getUploadedSources(),
       getManifestReports(),
       getSubStateMap(),
       getUiMutedMap(),
+      getScriptMetaMap(),
     ]);
 
     const bundled = this.buildBundledEntries(activation, subStates, uiMuted);
-    const uploadedEntries = await this.buildUploadedEntries(uploaded, reports, activation, grants, uiMuted);
+    const uploadedEntries = await this.buildUploadedEntries(uploaded, reports, activation, grants, uiMuted, scriptMeta);
     const entries = [...bundled, ...uploadedEntries];
 
     const idCounts = new Map<string, number>();
@@ -196,10 +248,11 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     activation: Record<string, boolean>,
     grants: Record<string, StoredGrantRecord>,
     uiMuted: Record<string, boolean>,
+    scriptMeta: Record<string, ScriptMeta>,
   ): Promise<RegistryEntry[]> {
     return Promise.all(
       Object.keys(uploaded).map((id) =>
-        this.buildUploadedEntry(id, uploaded[id]!, reports[id], activation, grants, uiMuted),
+        this.buildUploadedEntry(id, uploaded[id]!, reports[id], activation, grants, uiMuted, scriptMeta[id]),
       ),
     );
   }
@@ -211,6 +264,7 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     activation: Record<string, boolean>,
     grants: Record<string, StoredGrantRecord>,
     uiMuted: Record<string, boolean>,
+    meta: ScriptMeta | undefined,
   ): Promise<RegistryEntry> {
     // Same hash check the RPC handler enforces (storage.ts's getGrantedScopes): a grant approved
     // for different source code counts as no grant, so the UI shows what will actually happen.
@@ -219,27 +273,39 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
       record && record.sourceHash === (await hashScriptSource(source)) ? record.scopes : [];
     const active = activation[id] ?? true;
     const uiHidden = uiMuted[id] ?? false;
+    // docs/ROADMAP.md §12.0's 4-tier fallback — always resolves to SOMETHING displayable, even
+    // before a script has ever run (unlike the old report.id-only label, which left the popup
+    // showing a raw uuid until the first ManifestReport arrived).
+    const label = resolveScriptLabel(id, {
+      userLabel: meta?.userLabel,
+      reportLabel: typeof report?.id === 'string' && report.id.length > 0 ? report.id : undefined,
+      fileName: meta?.fileName,
+    });
+    // exactOptionalPropertyTypes: only spread `fileName` in when there's a real string to give it.
+    const fileNameField = meta?.fileName ? { fileName: meta.fileName } : {};
 
     // No report yet (script hasn't run on a matching page since upload) — optimistic 'ok',
     // graceful-fail layer 2/3 (run-time + shape) resolve once a report arrives.
     if (!report) {
-      return { id, source: 'uploaded', scopes: [], active, status: 'ok', grantedScopes, uiHidden };
+      return { id, label, ...fileNameField, source: 'uploaded', scopes: [], active, status: 'ok', grantedScopes, uiHidden };
     }
 
     if (report.runError) {
-      return { id, source: 'uploaded', scopes: [], active, status: 'invalid', reason: report.runError, grantedScopes, uiHidden };
+      return { id, label, ...fileNameField, source: 'uploaded', scopes: [], active, status: 'invalid', reason: report.runError, grantedScopes, uiHidden };
     }
     if (!report.hasRun) {
-      return { id, source: 'uploaded', scopes: [], active, status: 'invalid', reason: 'globalThis.__synapseModule.run is not a function', grantedScopes, uiHidden };
+      return { id, label, ...fileNameField, source: 'uploaded', scopes: [], active, status: 'invalid', reason: 'globalThis.__synapseModule.run is not a function', grantedScopes, uiHidden };
     }
 
     const shapeCheck = validateModuleManifestShape({ id, scopes: report.scopes });
     if (!shapeCheck.valid) {
-      return { id, source: 'uploaded', scopes: [], active, status: 'invalid', reason: shapeCheck.reason, grantedScopes, uiHidden };
+      return { id, label, ...fileNameField, source: 'uploaded', scopes: [], active, status: 'invalid', reason: shapeCheck.reason, grantedScopes, uiHidden };
     }
 
-    const entry: RegistryEntry = {
+    return {
       id,
+      label,
+      ...fileNameField,
       source: 'uploaded',
       scopes: shapeCheck.manifest.scopes,
       active,
@@ -247,8 +313,5 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
       grantedScopes,
       uiHidden,
     };
-    if (typeof report.id === 'string' && report.id.length > 0) entry.label = report.id;
-
-    return entry;
   }
 }
