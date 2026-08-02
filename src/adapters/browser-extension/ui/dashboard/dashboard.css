@@ -72,3 +72,19 @@ header h1 {
   color: var(--pico-del-color, #c00);
   margin: 0.5em 0;
 }
+
+/* docs/icon-inventory.md — Lucide PNGs replacing the old emoji glyphs. Black-stroke-on-transparent
+   by default: legible on Pico's light theme, invisible on its dark one, so dark mode inverts them
+   to white — same rule as popup.css's .syn-icon-img (no shared stylesheet between the two Vite
+   entry points to hang one copy off). */
+.syn-icon-img {
+  width: 16px;
+  height: 16px;
+  vertical-align: -3px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .syn-icon-img {
+    filter: invert(1);
+  }
+}

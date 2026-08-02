@@ -1,6 +1,7 @@
 import van from 'vanjs-core';
 import { showWhenConditions, type UICollectionSchema, type UIFieldDef } from '../../../../../kernel/ui-schema';
 import { bytesToBase64, putBlob } from '../../../utils/blob-store';
+import { icon, ICONS } from '../../icon';
 
 const { div, form, label, input, select, option, textarea, button, h2, details, summary, small, span, datalist } = van.tags;
 
@@ -193,11 +194,11 @@ function initialFieldValue(field: UIFieldDef | undefined, existing?: Record<stri
   return field.options?.[0] ?? '';
 }
 
-/** A field's longer explanation (`field.hint`) renders as a small hover-only "ⓘ" icon next to the
+/** A field's longer explanation (`field.hint`) renders as a small hover-only info icon next to the
  * label instead of being stuffed into the visible label text — the native `title` attribute gives
  * a tooltip on hover with zero extra markup/JS. Absent when there's no hint to show. */
 function infoIcon(hint: string): HTMLElement {
-  return span({ title: hint, style: 'cursor:help;opacity:0.6;margin-left:0.25em' }, 'ⓘ');
+  return span({ title: hint, style: 'cursor:help;opacity:0.6;margin-left:0.25em' }, icon(ICONS.info));
 }
 
 function renderField(

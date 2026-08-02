@@ -1,4 +1,5 @@
 import van from 'vanjs-core';
+import { icon, ICONS } from '../../icon';
 
 const { div, p, textarea, button } = van.tags;
 
@@ -43,7 +44,7 @@ export function renderActionResultView(
       textarea({ readonly: true, rows: 10 }, props.content),
       div(
         { class: 'form-actions' },
-        button({ type: 'button', class: 'secondary', onclick: callbacks.onBack }, '← Back'),
+        button({ type: 'button', class: 'secondary', onclick: callbacks.onBack }, icon(ICONS.arrowLeft), ' Back'),
         copyBtn,
       ),
     ),

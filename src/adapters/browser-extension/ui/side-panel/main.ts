@@ -11,7 +11,7 @@ import { deleteBlob } from '../../utils/blob-store';
 import type { DownloadEngineCommand, DownloadEngineEvent, DownloadEnginePhase, DownloadJobCheckpoint } from '../../../../shared/download-engine-protocol';
 import { listDownloadJobCheckpoints } from '../../features/media/download/checkpoints';
 import { describeResolution } from '../../../../shared/resolution-label';
-import downloadIconUrl from '../../../../assets/icon/download.png';
+import { icon, ICONS } from '../icon';
 
 /**
  * network-sniffer's Side Panel (docs/ROADMAP.md §6) — bespoke renderer, not
@@ -23,7 +23,7 @@ import downloadIconUrl from '../../../../assets/icon/download.png';
  * detected-media log unfiltered.
  */
 
-const { div, h1, p, span, select, option, button, img, label, input, progress: progressTag } = van.tags;
+const { div, h1, p, span, select, option, button, label, input, progress: progressTag } = van.tags;
 
 const root = document.getElementById('root')!;
 
@@ -287,8 +287,8 @@ function handleReaderModeOpenTab(reviewId: string, payload: ReviewPayload): void
 
 /** Shared by both sections so the two features read as clearly distinct parts of one panel
  * instead of blending into a single list (docs/ROADMAP.md §9.1). */
-function renderSectionHeader(icon: string, title: string) {
-  return div({ class: 'panel-section-header' }, span({ class: 'panel-section-icon' }, icon), span(title));
+function renderSectionHeader(iconSrc: string, title: string) {
+  return div({ class: 'panel-section-header' }, span({ class: 'panel-section-icon' }, icon(iconSrc)), span(title));
 }
 
 function renderReaderModeSection() {
@@ -302,7 +302,7 @@ function renderReaderModeSection() {
     const { done, total } = readerModeJob;
     return div(
       { class: 'reader-mode-section' },
-      renderSectionHeader('📄', 'Reader Mode'),
+      renderSectionHeader(ICONS.fileText, 'Reader Mode'),
       div(
         { class: 'media-item-progress' },
         total ? progressTag({ value: done ?? 0, max: total }) : progressTag(),
@@ -314,7 +314,7 @@ function renderReaderModeSection() {
   if (readerModeJob.status === 'error') {
     return div(
       { class: 'reader-mode-section' },
-      renderSectionHeader('📄', 'Reader Mode'),
+      renderSectionHeader(ICONS.fileText, 'Reader Mode'),
       span({ class: 'download-progress-text download-progress-error' }, `Failed: ${readerModeJob.message}`),
     );
   }
@@ -322,7 +322,7 @@ function renderReaderModeSection() {
   const { payload, reviewId } = readerModeJob;
   return div(
     { class: 'reader-mode-section' },
-    renderSectionHeader('📄', 'Reader Mode'),
+    renderSectionHeader(ICONS.fileText, 'Reader Mode'),
     p({ class: 'media-item-summary' }, `${payload.title} — ${payload.pages.length} page${payload.pages.length === 1 ? '' : 's'}`),
     div(
       { class: 'reader-mode-actions' },
@@ -463,7 +463,7 @@ function renderItem(item: DetectedMedia) {
           ? button({ class: 'resume-btn secondary', title: 'Resume download', onclick: () => handleResume(item, checkpoint) }, 'Resume')
           : button(
               { class: 'download-btn', title: 'Download', 'aria-label': 'Download', onclick: () => handleDownload(item) },
-              img({ src: downloadIconUrl, alt: '' }),
+              icon(ICONS.download),
             ),
     ),
     // Which resolution is actually downloading — shown once a job is running so a video with
@@ -498,7 +498,7 @@ function renderItem(item: DetectedMedia) {
                 // RESUME on a job that hasn't actually stopped yet is confusing) before the engine has
                 // even reported it settled. Disabled and inert until the real 'paused' phase arrives.
                 downloadProgress.phase === 'pausing'
-                  ? button({ class: 'secondary', disabled: true, title: 'Pausing…', 'aria-label': 'Pausing' }, '⏸')
+                  ? button({ class: 'secondary', disabled: true, title: 'Pausing…', 'aria-label': 'Pausing' }, icon(ICONS.pause))
                   : button(
                       {
                         class: 'secondary',
@@ -506,7 +506,7 @@ function renderItem(item: DetectedMedia) {
                         'aria-label': downloadProgress.phase === 'paused' ? 'Resume' : 'Pause',
                         onclick: () => sendEngineCommand(downloadProgress.phase === 'paused' ? 'RESUME' : 'PAUSE', item.id),
                       },
-                      downloadProgress.phase === 'paused' ? '▶' : '⏸',
+                      icon(downloadProgress.phase === 'paused' ? ICONS.play : ICONS.pause),
                     ),
                 // docs/ROADMAP.md §10.1 — Stop is live-only and distinct from Cancel: it finalizes
                 // (remuxes) whatever's been captured so far instead of discarding it, the same
@@ -514,12 +514,12 @@ function renderItem(item: DetectedMedia) {
                 downloadProgress.live
                   ? button(
                       { class: 'secondary', title: 'Stop (save what was captured)', 'aria-label': 'Stop', onclick: () => sendEngineCommand('STOP_LIVE', item.id) },
-                      '⏹',
+                      icon(ICONS.square),
                     )
                   : null,
                 button(
                   { class: 'secondary', title: 'Cancel', 'aria-label': 'Cancel', onclick: () => sendEngineCommand('CANCEL', item.id) },
-                  '✕',
+                  icon(ICONS.x),
                 ),
               )
             : null,
@@ -540,18 +540,19 @@ function render(): void {
     div(
       { class: 'panel-header' },
       h1('Synapse'),
-      button({ class: 'secondary', title: 'Media Sniffer settings', onclick: openDashboard }, '⚙'),
+      button({ class: 'secondary', title: 'Media Sniffer settings', 'aria-label': 'Media Sniffer settings', onclick: openDashboard }, icon(ICONS.settings)),
     ),
     renderReaderModeSection(),
     // docs/ROADMAP.md §9.1 — its own labeled section, same as Reader Mode above, now that this
     // panel hosts more than one module's content — the two shouldn't read as one blended list.
-    renderSectionHeader('🎬', 'Media Sniffer'),
+    renderSectionHeader(ICONS.clapperboard, 'Media Sniffer'),
     // docs/ROADMAP.md §8.2 — off by default; only affects the video/audio Download branch (streams
     // never used chrome.downloads to begin with).
     label(
       { class: 'turbo-toggle', title: 'Multi-connection downloader for direct video/audio files — off by default; only helps on servers that throttle per connection.' },
       input({ type: 'checkbox', checked: turboEnabled, onchange: toggleTurbo }),
-      ' ⚡ Turbo downloads',
+      icon(ICONS.zap),
+      ' Turbo downloads',
     ),
     items.length === 0 ? p('No media detected on this page yet.') : div({ class: 'media-list' }, ...items.map(renderItem)),
   );

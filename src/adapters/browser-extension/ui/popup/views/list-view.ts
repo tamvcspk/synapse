@@ -1,6 +1,7 @@
 import van from 'vanjs-core';
 import type { RegistryEntry } from '../../../../../kernel/module-registry';
 import { ungrantedScopes } from '../../../../../kernel/scopes';
+import { icon, ICONS } from '../../icon';
 
 const { div, nav, ul, li, strong, button, span, input } = van.tags;
 
@@ -55,8 +56,8 @@ export function renderListView(
     nav(
       ul(li(strong('Synapse Modules'))),
       ul(
-        li(button({ title: 'Upload script', onclick: callbacks.onUpload }, '⬆')),
-        li(button({ title: 'Refresh', onclick: callbacks.onRefresh }, '⟳')),
+        li(button({ title: 'Upload script', 'aria-label': 'Upload script', onclick: callbacks.onUpload }, icon(ICONS.upload))),
+        li(button({ title: 'Refresh', 'aria-label': 'Refresh', onclick: callbacks.onRefresh }, icon(ICONS.refreshCw))),
       ),
     ),
     ul({ class: 'module-list' }, ...entries.map((entry) => renderModuleRow(entry, callbacks))),
@@ -76,15 +77,17 @@ function uiValveButton(entry: RegistryEntry, callbacks: ListViewCallbacks): HTML
     entry.uiParadigm === 'float-widget' || entry.scopes.some((grant) => grant.scope === 'ui.render');
   if (!drawsOnPage || entry.status !== 'ok') return null;
 
+  const label = entry.uiHidden
+    ? 'On-page UI hidden — the module still runs. Click to show it again.'
+    : 'Hide this module’s on-page UI (it keeps running)';
   return button(
     {
       class: 'ui-valve' + (entry.uiHidden ? ' off' : ''),
-      title: entry.uiHidden
-        ? 'On-page UI hidden — the module still runs. Click to show it again.'
-        : 'Hide this module’s on-page UI (it keeps running)',
+      title: label,
+      'aria-label': label,
       onclick: () => callbacks.onToggleUi(entry),
     },
-    entry.uiHidden ? '🙈' : '👁',
+    icon(entry.uiHidden ? ICONS.eyeOff : ICONS.eye),
   );
 }
 
@@ -95,7 +98,7 @@ function uiValveButton(entry: RegistryEntry, callbacks: ListViewCallbacks): HTML
 function renderActionButtons(entry: RegistryEntry, callbacks: ListViewCallbacks) {
   if (entry.status !== 'ok' || !entry.uiSchema) return [];
   if (entry.uiSchema.kind === 'collection') {
-    return [button({ class: 'module-gear', title: 'Manage', onclick: () => callbacks.onOpenModule(entry) }, '⚙')];
+    return [button({ class: 'module-gear', title: 'Manage', 'aria-label': 'Manage', onclick: () => callbacks.onOpenModule(entry) }, icon(ICONS.settings))];
   }
   return entry.uiSchema.actions.map((action) =>
     button({ title: action.actionLabel, onclick: () => callbacks.onOpenModule(entry, action.id) }, action.actionLabel),
@@ -162,8 +165,8 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
 function lifecycleButtons(entry: RegistryEntry, callbacks: ListViewCallbacks) {
   if (entry.source !== 'uploaded') return [];
   return [
-    button({ class: 'icon-btn', title: 'Rename', onclick: () => callbacks.onRename(entry) }, '✏️'),
-    button({ class: 'icon-btn', title: 'Download source', onclick: () => callbacks.onDownload(entry) }, '⬇️'),
-    button({ class: 'icon-btn', title: 'Delete', onclick: () => callbacks.onDelete(entry) }, '🗑️'),
+    button({ class: 'icon-btn', title: 'Rename', 'aria-label': 'Rename', onclick: () => callbacks.onRename(entry) }, icon(ICONS.pencil)),
+    button({ class: 'icon-btn', title: 'Download source', 'aria-label': 'Download source', onclick: () => callbacks.onDownload(entry) }, icon(ICONS.download)),
+    button({ class: 'icon-btn', title: 'Delete', 'aria-label': 'Delete', onclick: () => callbacks.onDelete(entry) }, icon(ICONS.trash)),
   ];
 }

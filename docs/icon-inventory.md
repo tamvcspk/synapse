@@ -1,64 +1,83 @@
-# Icon inventory — emoji placeholders to replace with Lucide PNG icons
+# Icon inventory — emoji placeholders replaced with Lucide PNG icons
 
-Ghi lại tất cả icon đang là **emoji ký tự** (không phải PNG) trong UI, để sau này tải PNG tương ứng
-từ [Lucide](https://lucide.dev) thay thế. Cột "Lucide" là gợi ý tên icon, chưa chốt — chọn lúc thực
-sự làm, không phải bây giờ.
+Trạng thái: **popup/dashboard/side-panel (extension pages) đã xong** — icon nạp qua
+[`ui/icon.ts`](../src/adapters/browser-extension/ui/icon.ts), một registry `import` tĩnh duy nhất
+từ `src/assets/icon/*.png` dùng chung cho cả ba. **Icon nổi/badge trên trang (network-sniffer,
+reader-mode) vẫn còn emoji** — xem phần cuối, đây là quyết định riêng chưa chốt vì nó đụng bề mặt
+công khai `synapseApi.ui.*`.
 
-## Popup (`ui/popup/views/list-view.ts`)
+## Popup (`ui/popup/views/list-view.ts`) — ✅ xong
 
-| Emoji | Dùng ở đâu | Ý nghĩa | Lucide gợi ý |
+| Trước | Lucide dùng | Ở đâu | Ý nghĩa |
 |---|---|---|---|
-| ⬆ | nav, nút Upload script | Tải script lên | `upload` |
-| ⟳ | nav, nút Refresh | Làm mới danh sách | `refresh-cw` |
-| ⚙ | `module-gear` | Mở Management View (Collection schema) | `settings` |
-| 👁 / 🙈 | `ui-valve` | Hiện/ẩn UI của module (§11.4) | `eye` / `eye-off` |
-| ✏️ | lifecycle, nút Rename | Đổi tên script (§12.1) | `pencil` |
-| ⬇️ | lifecycle, nút Download | Tải source script về (§12.1) | `download` |
-| 🗑️ | lifecycle, nút Delete | Xoá script (§12.1) | `trash-2` |
+| ⬆ | `upload` | nav, nút Upload script | Tải script lên |
+| ⟳ | `refresh-cw` | nav, nút Refresh | Làm mới danh sách |
+| ⚙ | `settings` | `module-gear` | Mở Management View (Collection schema) |
+| 👁 / 🙈 | `eye` / `eye-off` | `ui-valve` | Hiện/ẩn UI của module (§11.4) |
+| ✏️ | `pencil` | lifecycle, nút Rename | Đổi tên script (§12.1) |
+| ⬇️ | `download` | lifecycle, nút Download | Tải source script về (§12.1) |
+| 🗑️ | `trash` | lifecycle, nút Delete | Xoá script (§12.1) |
 
-## Popup (`ui/popup/views/action-result-view.ts`)
+## Popup (`ui/popup/views/action-result-view.ts`) — ✅ xong
 
-| Emoji | Dùng ở đâu | Ý nghĩa | Lucide gợi ý |
+| Trước | Lucide dùng | Ở đâu | Ý nghĩa |
 |---|---|---|---|
-| ← | nút "← Back" | Quay lại danh sách | `arrow-left` |
+| ← | `arrow-left` | nút "Back" | Quay lại danh sách (giữ text "Back" cạnh icon) |
 
-## Dashboard (`ui/dashboard/views/management-view.ts`)
+## Dashboard (`ui/dashboard/views/management-view.ts`) — ✅ xong
 
-| Emoji | Dùng ở đâu | Ý nghĩa | Lucide gợi ý |
+| Trước | Lucide dùng | Ở đâu | Ý nghĩa |
 |---|---|---|---|
-| ✎ | nút Edit mỗi row | Sửa item | `pencil` |
-| ✕ | nút Delete mỗi row | Xoá item | `x` |
+| ✎ | `square-pen` | nút Edit mỗi row | Sửa item |
+| ✕ | `x` | nút Delete mỗi row | Xoá item |
 
-## Dashboard (`ui/dashboard/views/item-form-view.ts`)
+## Dashboard (`ui/dashboard/views/item-form-view.ts`) — ✅ xong
 
-| Emoji | Dùng ở đâu | Ý nghĩa | Lucide gợi ý |
+| Trước | Lucide dùng | Ở đâu | Ý nghĩa |
 |---|---|---|---|
-| ⓘ | hover hint cạnh field có `field.hint` | Giải thích thêm | `info` |
+| ⓘ | `info` | hover hint cạnh field có `field.hint` | Giải thích thêm |
 
-## Side Panel (`ui/side-panel/main.ts`)
+## Side Panel (`ui/side-panel/main.ts`) — ✅ xong
 
-| Emoji | Dùng ở đâu | Ý nghĩa | Lucide gợi ý |
+| Trước | Lucide dùng | Ở đâu | Ý nghĩa |
 |---|---|---|---|
-| 📄 | section header "Reader Mode" | | `file-text` |
-| 🎬 | section header "Media Sniffer" | | `clapperboard` |
-| ⚙ | nút "Media Sniffer settings" | Mở Dashboard | `settings` |
-| ▶ / ⏸ | nút Resume/Pause download | | `play` / `pause` |
-| ⏹ | nút Stop (live capture) | | `square` |
-| ✕ | nút đóng/dismiss | | `x` |
-| ⚡ | prefix text "Turbo downloads" | Trang trí, không phải nút bấm | `zap` |
+| 📄 | `file-text` | section header "Reader Mode" | |
+| 🎬 | `clapperboard` | section header "Media Sniffer" | |
+| ⚙ | `settings` | nút "Media Sniffer settings" | Mở Dashboard |
+| ▶ / ⏸ | `play` / `pause` | nút Resume/Pause download | |
+| ⏹ | `square` | nút Stop (live capture) | |
+| ✕ | `x` | nút Cancel | |
+| ⚡ | `zap` | prefix "Turbo downloads" | Trang trí, không phải nút bấm |
 
-## On-page floating icon/badge (content scripts, world ISOLATED)
+`download.png` (đã dùng từ trước) giờ nạp qua registry chung thay vì import riêng.
+
+## On-page floating icon/badge (content scripts, world ISOLATED) — quyết định: giữ nguyên emoji
+
+`utils/ui-compositor.ts`'s `IconOptions.label`/`BadgeOptions.label` là `string`, render bằng
+`el.textContent` — cố ý chỉ nhận "Glyph or emoji" theo đúng doc comment gốc. Đây là API **công khai**
+đứng sau `synapseApi.ui.icon`/`ui.badge` mà **user script tự upload cũng gọi được**
+(`rpc-client.ts`'s `buildDomModuleApi`, và bản tương đương trong `user-script-shim.ts` cho USER_SCRIPT
+world) — không phải nội bộ builtin-only.
 
 | Emoji | File | Ý nghĩa | Lucide gợi ý |
 |---|---|---|---|
 | ⬇ | `content-scripts/index.ts` (`showNetworkSnifferIcon`) | Icon nổi mở Side Panel khi phát hiện media | `download` |
 | ⬇ | `features/media/dom-media-observer.content.ts` | Badge neo vào `<video>`/`<audio>` đã phát hiện | `download` |
 | 📄 | `content-scripts/index.ts` (reader-mode icon `convert`) | Convert trang → Markdown | `file-text` |
-| 🕸️ | `content-scripts/index.ts` (reader-mode icon `crawl`) | Crawl & convert cả site | `spider` (Lucide không có — cân nhắc `globe` hoặc `waypoints`) |
+| 🕸️ | `content-scripts/index.ts` (reader-mode icon `crawl`) | Crawl & convert cả site | không có "spider" — đã tải cả `globe` và `waypoints` để chọn |
 
-## Lưu ý khi thay
+**Vì sao chưa đổi**: thêm ảnh vào đây nghĩa là mở rộng `IconOptions`/`BadgeOptions` (thêm field kiểu
+`iconUrl?: string`), và field đó **cùng lúc thành khả dụng cho mọi script upload gọi `ctx.api.ui.icon`**
+— khác hẳn popup/dashboard/side-panel (chỉ code của extension chạy ở đó). Cần chọn giữa:
+1. Field mới chỉ dùng nội bộ (builtin tự truyền `chrome.runtime.getURL(...)` tới asset của chính nó) —
+   nhưng `IconOptions` không phân biệt được "ai gọi", nên không chặn được user script làm y hệt trừ khi
+   thêm logic riêng.
+2. Cho phép user script tự truyền `iconUrl` bất kỳ — mở khả năng nạp ảnh từ domain ngoài (tracking
+   pixel, icon giả mạo UI trình duyệt) — cần nghĩ kỹ trước khi mở, đúng tinh thần thận trọng đã áp cho
+   `page.eval`/`net.mock`.
+3. Giữ nguyên `label` là glyph/emoji, không đổi gì — network-sniffer/reader-mode tiếp tục dùng emoji
+   như builtin đã luôn làm.
 
-- PNG là file asset thật (không phải inline như emoji) → cần một đường dẫn thật (`chrome-extension://…/assets/icons/…`). `web_accessible_resources` đã có sẵn entry `assets/*` cho `<all_urls>` (xem `manifest.config.ts`) nên không cần khai thêm, miễn file nằm dưới `assets/`.
-- Icon nổi/badge trên trang (`snifferUi.icon`/`ui.badge`, world ISOLATED, Shadow DOM qua `in-page-ui-engine`) dùng chung được `<img src="chrome-extension://…">` với icon trong popup/dashboard/side-panel (extension pages) — cùng một file PNG, không cần bản riêng cho từng context.
-- PNG không tự scale theo DPI như SVG — cân nhắc tải kèm bản @2x (hoặc thẳng kích thước lớn rồi set `width`/`height` qua CSS) để không vỡ nét trên màn hình retina; Lucide cho chọn size lúc export.
-- `title`/`aria-label` hiện tại đã có ở hầu hết chỗ dùng (bảng trên) — giữ nguyên khi đổi sang PNG (`<img alt="...">` hoặc `title` trên `button`), đừng để mất accessibility label chỉ vì đổi từ emoji (vốn tự có nghĩa) sang ảnh (cần alt text tường minh).
+**Đã chọn hướng 3 — giữ nguyên emoji, không đụng `ui-compositor.ts`.** Lý do: an toàn nhất, không mở
+rộng bề mặt `synapseApi.ui.*` chỉ để đổi 4 icon nội bộ; `IconOptions`/`BadgeOptions.label` vẫn đúng
+như doc comment gốc ("Glyph or emoji"). Nếu sau này cần đổi, quay lại 2 hướng còn lại ở trên.

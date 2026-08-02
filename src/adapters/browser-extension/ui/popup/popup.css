@@ -56,7 +56,6 @@ body {
 .ui-valve {
   background: none;
   border: none;
-  filter: grayscale(1);
   opacity: 0.75;
 }
 
@@ -106,4 +105,20 @@ body {
 .busy-view {
   text-align: center;
   padding: 1.5rem 0;
+}
+
+/* docs/icon-inventory.md — Lucide PNGs replacing the old emoji glyphs. Black-stroke-on-transparent
+   by default: legible on Pico's light theme, invisible on its dark one, so dark mode inverts them
+   to white. A button with its own solid colored background (none in this popup today) would need
+   an explicit always-white filter instead, the way side-panel.css's .download-btn img does. */
+.syn-icon-img {
+  width: 16px;
+  height: 16px;
+  vertical-align: -3px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .syn-icon-img {
+    filter: invert(1);
+  }
 }

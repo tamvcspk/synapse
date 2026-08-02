@@ -186,8 +186,7 @@
 }
 
 .panel-section-icon {
-  font-size: 1rem;
-  line-height: 1;
+  display: flex;
 }
 
 /* docs/ROADMAP.md §9.1 — Reader Mode Converter's in-page-icon-triggered job status, shown above
@@ -221,4 +220,21 @@
      <img>-loaded raster has no `currentColor` to lean on the way an inline SVG would, so it's
      forced to white via filter to read against Pico's colored button background. */
   filter: brightness(0) invert(1);
+}
+
+/* Every other Lucide PNG in this panel (docs/icon-inventory.md) — settings/pause/play/stop/cancel/
+   section headers/turbo — sits on Pico's `.secondary` button background or no button at all, both
+   of which follow the page's light/dark theme, unlike .download-btn's fixed colored background
+   above. Same rule as popup.css/dashboard.css's .syn-icon-img (no shared stylesheet to hang one
+   copy off across the three Vite entry points). */
+.syn-icon-img {
+  width: 16px;
+  height: 16px;
+  vertical-align: -3px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .syn-icon-img {
+    filter: invert(1);
+  }
 }

@@ -1,6 +1,7 @@
 import van from 'vanjs-core';
 import type { RegistryEntry } from '../../../../../kernel/module-registry';
 import type { UICollectionSchema, UIRowAction } from '../../../../../kernel/ui-schema';
+import { icon, ICONS } from '../../icon';
 
 const { div, h1, button, input, label, table, thead, tbody, tr, th, td, p, header, section, ul, li, a } = van.tags;
 
@@ -159,8 +160,8 @@ export function renderManagementView(
             action.label,
           ),
         ),
-        schema.readOnly ? null : button({ title: 'Edit', onclick: () => callbacks.onEdit(item) }, '✎'),
-        button({ title: 'Delete', onclick: () => callbacks.onDelete(item) }, '✕'),
+        schema.readOnly ? null : button({ title: 'Edit', 'aria-label': 'Edit', onclick: () => callbacks.onEdit(item) }, icon(ICONS.squarePen)),
+        button({ title: 'Delete', 'aria-label': 'Delete', onclick: () => callbacks.onDelete(item) }, icon(ICONS.x)),
       ),
     );
   }
