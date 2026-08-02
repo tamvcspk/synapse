@@ -204,6 +204,70 @@ describe('buildShimSource', () => {
     });
   });
 
+  describe('lib (static-injected namespace)', () => {
+    /**
+     * In production, `globalThis.__synapseLib` is set by a SEPARATE `{ file }` entry
+     * (`user-script-lib-payload.ts`, built via `?script&iife`) that `chrome-module-registry.ts`
+     * lists BEFORE this shim's own `{ code }` entry in the same `chrome.userScripts.register` call
+     * — Chrome runs a script's `js` array entries in order, in one execution, the same guarantee
+     * `content_scripts.js` arrays give. This harness has no build step, so it stands in for that
+     * entry by assigning the global directly, right before evaluating the shim — reproducing the
+     * ordering the real two-entry registration guarantees, not the mechanism that produces it.
+     */
+    const FAKE_LIB = { hls: { parse: (text: string, baseUrl: string) => ({ kind: 'unknown', text, baseUrl }) } };
+
+    async function captureApiWithLib(moduleId: string, context = sharedRealm()): Promise<any> {
+      (context as any).__synapseLib = FAKE_LIB;
+      vm.runInContext(
+        buildShimSource(
+          moduleId,
+          `globalThis.__synapseModule = { id: ${JSON.stringify(moduleId)}, run: (input, ctx) => { globalThis['captured_' + ${JSON.stringify(moduleId)}] = ctx.api; } };`,
+        ),
+        context,
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      return (context as any)[`captured_${moduleId}`];
+    }
+
+    it('hands the script exactly what user-script-lib-payload.ts set, via ctx.api.lib', async () => {
+      const api = await captureApiWithLib('uuid-lib');
+      expect(api.lib.hls.parse).toBe(FAKE_LIB.hls.parse);
+      expect(api.lib.hls.parse('#EXTM3U', 'https://x.test/a.m3u8')).toEqual({
+        kind: 'unknown',
+        text: '#EXTM3U',
+        baseUrl: 'https://x.test/a.m3u8',
+      });
+    });
+
+    it('deletes globalThis.__synapseLib immediately, so it never leaks to a second script', async () => {
+      const context = sharedRealm();
+      await captureApiWithLib('uuid-a', context);
+      expect((context as any).__synapseLib).toBeUndefined();
+    });
+
+    it('does not silently fall back to a previous script’s lib if this script’s own { file } entry is missing', async () => {
+      // Models a registration bug (the { file } entry dropped) rather than the happy path: nothing
+      // set __synapseLib before this shim ran, so ctx.api.lib must be undefined, not stale data
+      // some earlier script in the same vm context happened to leave behind.
+      const context = sharedRealm();
+      await captureApiWithLib('uuid-a', context); // leaves __synapseLib deleted afterward
+      vm.runInContext(
+        buildShimSource('uuid-b', `globalThis.__synapseModule = { id: 'uuid-b', run: (input, ctx) => { globalThis.captured_b = ctx.api; } };`),
+        context,
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      expect((context as any).captured_b.lib).toBeUndefined();
+    });
+
+    it('makes the global guard THROW for lib.hls.parse rather than return a promise', async () => {
+      const context = sharedRealm();
+      await captureApiWithLib('uuid-a', context);
+      const guard = (context as any).synapseApi;
+
+      expect(() => guard.lib.hls.parse('#EXTM3U', 'https://x.test/')).toThrow(/not a global/);
+    });
+  });
+
   it('clears __synapseModule around the user’s code, so a script that declares none cannot inherit the previous one', () => {
     const context = evaluateAll([
       buildShimSource('a', USER_SOURCE),

@@ -259,6 +259,15 @@ function __synapseCall(namespace, method, args) {
 
 ${uiSource()}
 
+// lib.* (docs/api-inventory.md §3.0) — set by user-script-lib-payload.ts, registered as a separate
+// { file } entry BEFORE this code (chrome-module-registry.ts's registerUploadedScript), so it is
+// already present here by the time this line runs. Captured and deleted immediately, same reason
+// __synapseModule is below: every uploaded script's own registration lists that same file, so on a
+// page running several scripts it runs once per script — each run must hand its result only to the
+// script that triggered it, never leak into the shared USER_SCRIPT world past this point.
+const __synapseLib = globalThis.__synapseLib;
+delete globalThis.__synapseLib;
+
 const synapseApi = {
   storage: {
     get: function (key) { return __synapseCall('storage', 'get', [key]); },
@@ -267,6 +276,18 @@ const synapseApi = {
     keys: function () { return __synapseCall('storage', 'keys', []); },
   },
   ui: __synapseUi,
+  net: {
+    request: function (options) { return __synapseCall('net', 'request', [options]); },
+    mock: {
+      add: function (options) { return __synapseCall('net', 'mock.add', [options]); },
+      remove: function (id) { return __synapseCall('net', 'mock.remove', [id]); },
+      list: function () { return __synapseCall('net', 'mock.list', []); },
+    },
+  },
+  files: {
+    save: function (options) { return __synapseCall('files', 'save', [options]); },
+  },
+  lib: __synapseLib,
 };
 
 // This object is per-script (it closes over __SYNAPSE_MODULE_ID__) and is handed to run() as
@@ -306,6 +327,23 @@ if (!globalThis.synapseApi) {
       badge: __synapseWrongHandleSync,
       dismiss: __synapseWrongHandleSync,
       clear: __synapseWrongHandleSync,
+    },
+    net: {
+      request: __synapseWrongHandle,
+      mock: {
+        add: __synapseWrongHandle,
+        remove: __synapseWrongHandle,
+        list: __synapseWrongHandle,
+      },
+    },
+    files: {
+      save: __synapseWrongHandle,
+    },
+    lib: {
+      hls: { parse: __synapseWrongHandleSync },
+      readable: __synapseWrongHandleSync,
+      toMarkdown: __synapseWrongHandleSync,
+      zip: __synapseWrongHandleSync,
     },
   };
 }

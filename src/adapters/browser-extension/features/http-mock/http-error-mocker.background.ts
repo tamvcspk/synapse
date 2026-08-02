@@ -261,7 +261,17 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
   },
 };
 
-async function syncRegistration(cache: CacheService): Promise<void> {
+/** Exported so `module-registry/net-mock-host.ts` can re-sync interception after a script's own
+ * `mock.add`/`mock.remove` mutates the SAME shared collection (`getMockConfigs`/`setMockConfigs`) —
+ * deliberately NOT gated behind `isModuleActive('http-error-mocker')` (that gate lives in `run()`
+ * below, for the Management View's own toggle) since a script's `net.mock` grant is a separate
+ * permission from that UI panel. One real coupling worth knowing: turning the "HTTP Mock & Rewrite"
+ * panel off tears down ALL interception via `run()`'s early return (main-world script, debugger
+ * attachment, DNR rules are shared infrastructure, not per-owner) — including any script-created
+ * rules, since there is only one of each mechanism per extension. Not a bug to fix here; a documented
+ * v1 trade-off (docs/api-inventory.md §3.2) from reusing this Module's plumbing instead of building
+ * a second, fully independent interception stack. */
+export async function syncRegistration(cache: CacheService): Promise<void> {
   const [configs, registered] = await Promise.all([getMockConfigs(cache), isMainWorldScriptRegistered(MAIN_WORLD_SCRIPT_ID)]);
 
   // Always (re-)register while active, not just when nothing is registered yet — registerMainWorldScript

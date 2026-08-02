@@ -105,6 +105,141 @@ script's data, and you cannot reach the extension's own records — every key yo
 inside your namespace, so `storage.get('synapse:grants')` reads *your* `'synapse:grants'` key
 (almost certainly `undefined`) and never the extension's.
 
+### Cross-origin requests under the extension's identity
+
+`page.fetch` (disclosed) is just `fetch`/`XMLHttpRequest` from the page — subject to the page's own
+CORS policy, same as any other script running there. `net.request` is different: it runs in the
+background, under the *extension's* identity, so it reaches any origin regardless of what that
+origin's CORS headers say. This is the delta a page script cannot close on its own, and it's why
+`net.request` is **enforced**, not disclosed — and always requires `match`:
+
+```javascript
+globalThis.__synapseModule = {
+  id: 'weather-widget',
+  scopes: [{ scope: 'net.request', match: ['https://api.weather.example/*'] }],
+  async run(input, ctx) {
+    const res = await ctx.api.net.request({ url: 'https://api.weather.example/today' });
+    if (res.status !== 200) throw new Error(`weather API returned ${res.status}`);
+    console.log(JSON.parse(res.body));
+  },
+};
+```
+
+- **`match` is required, not optional.** A grant is (action × origin) — `{ scope, match: [...] }`,
+  the same shape Tampermonkey's `@connect` uses. `options.url` must fall under one of the granted
+  patterns or the call rejects, even if `net.request` itself was granted.
+- **A non-2xx status resolves normally**, it doesn't throw — check `res.status` yourself, the same
+  way `fetch()` itself only rejects on a network failure.
+- **Binary responses**: pass `responseType: 'arraybuffer'` and decode `res.body` from base64
+  (`bodyEncoding` on the response tells you which encoding you got, so don't assume).
+- **Binary request bodies**: base64-encode them yourself and pass `bodyEncoding: 'base64'` alongside
+  `body` — `body` must be a string, since it crosses the same structured-clone boundary as every
+  other argument here.
+
+### Saving a file to disk
+
+`files.save` writes to your Downloads folder — the `GM_download` delta, since there's no page API
+that reaches the filesystem:
+
+```javascript
+globalThis.__synapseModule = {
+  id: 'export-notes',
+  scopes: ['files.save'],
+  async run(input, ctx) {
+    const notes = { exportedAt: new Date().toISOString(), text: document.body.innerText };
+    await ctx.api.files.save({
+      filename: 'notes/export.json',
+      content: JSON.stringify(notes, null, 2),
+    });
+  },
+};
+```
+
+- **No `match` needed** — unlike `net.request`, a file you write can't itself exfiltrate anything,
+  so there's no origin to scope the grant to.
+- **`filename` is relative to the Downloads folder**, and may include subfolders. It can never be
+  absolute, use a drive letter, or contain a `..` segment — those are rejected before anything is
+  written, not sanitized silently.
+- **Binary content**: base64-encode it yourself and pass `contentEncoding: 'base64'` alongside
+  `content` — same convention `net.request` uses for binary bodies/responses.
+- **Size cap**: 10MB. Above that, generate the file server-side or split it — this call encodes
+  synchronously, so a much larger file would block the extension's background for the whole call.
+
+### Faking network responses
+
+`net.mock` answers matching requests with a canned response instead of letting them reach the
+network — for testing error handling, or working against an API that doesn't exist yet:
+
+```javascript
+globalThis.__synapseModule = {
+  id: 'offline-demo',
+  scopes: [{ scope: 'net.mock', match: ['https://api.example.com/*'] }],
+  async run(input, ctx) {
+    const { id } = await ctx.api.net.mock.add({
+      endpointPattern: 'https://api.example.com/users/*',
+      fakeStatus: 200,
+      fakeResponse: { users: [] },
+    });
+    await ctx.api.net.mock.remove(id); // stop faking it
+  },
+};
+```
+
+- **`endpointPattern` needs a literal scheme and host** — `https://api.example.com/*` is fine,
+  `*://*.example.com/*` is not. Only the path may use `*`, and it must fall under one of the
+  `match` patterns this call was granted, the same (action × origin) check `net.request` does.
+- **Only fakes responses, for now.** There's no way to block a request or rewrite it before it goes
+  out from this API — those, and a rule visible in DevTools' Network tab, are still Management
+  View-only (the "HTTP Mock & Rewrite" panel), configured by hand.
+- **`.list()`/`.remove()` only ever see your own script's rules** — never another script's, and
+  never one a person set up by hand in the Management View.
+- **It only ever intercepts the PAGE's own `fetch`/`XMLHttpRequest` — never yours.** The rule works
+  by patching `window.fetch`/XHR in the page's MAIN world. Your script runs in a *separate* world
+  (USER_SCRIPT) that shares the page's DOM but not its JS globals, so **your own script calling
+  `fetch(...)` is calling the real, unpatched one** — it just reaches the real network (and can hit
+  a real CORS error for a cross-origin URL, the same as any ordinary page script would). This isn't
+  a bug to work around — if you want to see the fake response yourself, either read it off the page
+  after the page's own code fetches it, or check it manually from the page's own DevTools console
+  (not your script's). `ctx.api.net.request` is unrelated to all of this too — a separate call under
+  the extension's own identity, never intercepted by a `net.mock` rule either way.
+
+### `lib` — pure helpers, no scope, no `await`
+
+`ctx.api.lib` is different from everything above it: it costs nothing to grant because it grants
+nothing. It's computation on data you already have in hand — nothing privileged, nothing that
+leaves your script — so there's no scope to declare and no message crosses to the background:
+
+```javascript
+globalThis.__synapseModule = {
+  id: 'hls-inspector',
+  // No `scopes` entry needed for lib.hls.parse itself.
+  async run(input, ctx) {
+    const res = await fetch('https://example.com/stream.m3u8'); // page.fetch, disclosed
+    const manifest = ctx.api.lib.hls.parse(await res.text(), res.url);
+    console.log(manifest.kind); // 'master' | 'media' | 'unknown'
+  },
+};
+```
+
+Like `ui`, `lib` methods are synchronous — no `await`, no dropped-function surprises, because
+nothing ever crosses the RPC boundary.
+
+- **`lib.hls.parse(text, baseUrl)`** — parses an `.m3u8` playlist you've already fetched, the same
+  parser the `network-sniffer` builtin uses.
+- **`lib.readable(doc?)`** — runs Mozilla's Readability (the engine behind Firefox's Reader View,
+  and what the `reader-mode-converter` builtin uses) and returns `{ title, root, text }`, or
+  `undefined` if the page isn't an article. **Mutates `doc`**; omit it and Synapse clones the
+  current page's `document` for you so your own page is left untouched.
+- **`lib.toMarkdown(root, { baseUrl, resolveImageUrl? })`** — converts a DOM subtree to Markdown.
+  `resolveImageUrl` lets you point `<img>` links at local copies you've already downloaded via
+  `net.request` instead of the original remote URL.
+- **`lib.zip(entries)`** — builds an uncompressed `.zip` from `{ name, data: Uint8Array }[]`. Hand
+  the result to `files.save` with `contentEncoding: 'base64'`.
+
+Put together, these plus `net.request` (image fetch) and `files.save` (writing the result) are
+enough to recreate the shape of the `reader-mode-converter` builtin entirely from user-script level
+— see [`docs/examples/test-lib-reader-mode.js`](examples/test-lib-reader-mode.js).
+
 ### On-page UI is yours alone
 
 `ui.render` gives you toasts, up to two icons in the shared top-right column, and badges pinned to

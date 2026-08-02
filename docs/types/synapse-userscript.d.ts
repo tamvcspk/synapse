@@ -16,6 +16,24 @@
  * - `storage.rw` — Store this script's own data.
  *   Read and write a key/value store private to this script. Keys are namespaced by the
  *   platform: this script cannot see another script's data, nor the extension's own settings.
+ * - `net.request` — Make network requests, under this extension's identity, to {domains}.
+ *   Fetch cross-origin under the extension's own identity rather than the page's — not subject
+ *   to the page's CORS policy, the delta a page script cannot close on its own
+ *   (docs/api-inventory.md §2, "priority #1"). Always carries `match`: a grant is (action ×
+ *   origin), the same shape as Tampermonkey's `@connect`, so a script can only reach the origins
+ *   it declared.
+ *   Requires a `match` list: `{ scope, match: [...] }`.
+ * - `files.save` — Save files to disk.
+ *   Write a file into the Downloads folder — the `GM_download` delta a page script has no way to
+ *   close on its own. No resource dimension: unlike `net.request`, a written file cannot itself
+ *   exfiltrate anything, so there is no origin to scope it to.
+ * - `net.mock` — Fake network responses on {domains}.
+ *   Answer matching requests to {domains} with a canned response instead of letting them reach
+ *   the network — for testing error handling or working against an API that is not up yet
+ *   (docs/api-inventory.md §3.2). v1 only ever fakes a response (no block/rewrite) and always
+ *   runs under the cheapest mechanism (a MAIN-world fetch/XHR patch, no DevTools "being
+ *   debugged" banner) — a script cannot request `debugger` or `dnr` directly.
+ *   Requires a `match` list: `{ scope, match: [...] }`.
  *
  * ### Disclosed — the script can do this anyway; declaring it is transparency, not a gate
  *
@@ -34,7 +52,7 @@
  * - `page.fetch` — Make its own network requests from the page.
  *   The script calls `fetch`/`XMLHttpRequest` itself, subject to the page's CORS rules.
  *   Disclosed for the same reason as `page.dom` — the script already has these globals. It is
- *   NOT the same as making requests under the extension's identity, which no scope grants yet.
+ *   NOT the same as making requests under the extension's identity, which `net.request` grants.
  *
  * ## Methods
  *
@@ -58,6 +76,33 @@
  *   Remove one of your own surfaces. Ids are local to your script.
  * - `synapseApi.ui.clear(): void` — requires `ui.render` (runs in your own world — synchronous).
  *   Remove everything this script has drawn.
+ * - `synapseApi.net.request(options: SynapseNetRequestOptions): Promise<SynapseNetResponse>` — requires `net.request`.
+ *   Fetch a URL under the extension's identity, not the page's — bypasses the page's CORS
+ *   policy. `options.url` must fall under one of this call's granted `match` patterns.
+ * - `synapseApi.files.save(options: SynapseFilesSaveOptions): Promise<SynapseFilesSaveResult>` — requires `files.save`.
+ *   Write `options.content` to `options.filename` inside the Downloads folder.
+ * - `synapseApi.net.mock.add(options: SynapseMockRuleOptions): Promise<{ id: string }>` — requires `net.mock`.
+ *   Fake matching requests with a canned response. `options.endpointPattern` must have a literal
+ *   (non-wildcard) scheme and host falling under one of this call's granted `match` patterns —
+ *   only the path may use `*`; the mechanism (always the cheapest one) is chosen by the
+ *   platform, not requested.
+ * - `synapseApi.net.mock.remove(id: string): Promise<void>` — requires `net.mock`.
+ *   Remove one of this script's own rules. Ids from another script or from the Management View
+ *   are refused.
+ * - `synapseApi.net.mock.list(): Promise<SynapseMockRule[]>` — requires `net.mock`.
+ *   List this script's own rules — never another script's or the user's manually-created ones.
+ * - `synapseApi.lib.hls.parse(text: string, baseUrl: string): SynapseHlsManifest` — no scope required — pure computation (runs in your own world — synchronous).
+ *   Parse an HLS (.m3u8) manifest already fetched by the script. No scope: pure computation on
+ *   data the caller already has, granted no privilege (docs/api-inventory.md §3.0).
+ * - `synapseApi.lib.readable(doc?: Document): { title, root, text } | undefined` — no scope required — pure computation (runs in your own world — synchronous).
+ *   Extract the readable article from a Document via Mozilla Readability. Mutates `doc`; clones
+ *   the page's own document when omitted. No scope — only meaningful where a page DOM exists,
+ *   same as `ui`, but fails with a plain error rather than a crafted stub elsewhere.
+ * - `synapseApi.lib.toMarkdown(root: Node, options: { baseUrl, resolveImageUrl? }): string` — no scope required — pure computation (runs in your own world — synchronous).
+ *   Convert a DOM subtree to Markdown. No scope: pure computation on a Node the caller already
+ *   has.
+ * - `synapseApi.lib.zip(entries: { name, data }[]): Uint8Array` — no scope required — pure computation (runs in your own world — synchronous).
+ *   Build an uncompressed .zip archive from named byte buffers. No scope: pure computation.
  */
 
 /**
@@ -66,7 +111,7 @@
  * deliberately absent and can never become a scope: `bus.emit(moduleId, …)` reaches every bundled
  * Module's own listener, which is a god-capability no consent prompt can describe honestly.
  */
-type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch' | 'ui.render';
+type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch' | 'ui.render' | 'net.request' | 'files.save' | 'net.mock';
 
 /**
  * One entry in a script's `scopes` declaration. `match` is the resource dimension: a grant is
@@ -119,6 +164,202 @@ interface SynapseUiApi {
   clear(): void;
 }
 
+/** One outbound request for `net.request`. `match` in the granted scope is checked against `url`
+ * before this ever reaches the network — a URL that doesn't fall under one of the script's granted
+ * patterns fails at the call site, same as any other denied scope. */
+interface SynapseNetRequestOptions {
+  url: string;
+  /** Defaults to `'GET'`. */
+  method?: string;
+  headers?: Record<string, string>;
+  /** Must survive structured clone: a string, never a live body stream. Binary payloads go through
+   * `bodyEncoding: 'base64'`, the same convention `shared/http-mock.ts`'s `bodyEncoding` uses. */
+  body?: string;
+  /** How `body` is encoded. Defaults to `'utf8'`. */
+  bodyEncoding?: 'utf8' | 'base64';
+  /** `'text'` (default) decodes the response as UTF-8 text; `'arraybuffer'` returns it
+   * base64-encoded in the response's `body`, for binary responses (images, zips). */
+  responseType?: 'text' | 'arraybuffer';
+  /** Defaults to 30s, capped at 120s. */
+  timeoutMs?: number;
+}
+
+/** What `net.request` resolves to on any HTTP response, including 4xx/5xx — those are not thrown,
+ * the same way `fetch()` itself only rejects on a network failure, never a non-2xx status. */
+interface SynapseNetResponse {
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  /** Encoded per `responseType`: UTF-8 text when `'text'`, base64 when `'arraybuffer'` — check
+   * `bodyEncoding` rather than assuming, since it reflects what was actually requested. */
+  body: string;
+  bodyEncoding: 'utf8' | 'base64';
+  /** The final URL after any redirects. */
+  url: string;
+}
+
+/** One rule for `synapseApi.mock.add` (docs/api-inventory.md §3.2). `endpointPattern` must have a
+ * literal (non-wildcard) scheme and host under one of this call's granted `net.mock` `match`
+ * patterns — only the path may use `*` (`https://api.example.com/*`, never `*://*.example.com/*`);
+ * a wildcarded scheme/host is rejected at the grant check, the same fail-closed answer a mismatched
+ * origin gets. `method` mirrors `shared/http-mock.ts`'s `HttpMethod`, duplicated (not imported) per
+ * this file's own import-free constraint — `'ALL'` (the default) matches every method. */
+interface SynapseMockRuleOptions {
+  endpointPattern: string;
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'ALL';
+  /** HTTP status to answer with. Defaults to 200. */
+  fakeStatus?: number;
+  /** The response body. A string is sent as-is; anything else is JSON-serialized. */
+  fakeResponse?: unknown;
+  /** Answers this many milliseconds late, to test loading states. */
+  delayMs?: number;
+}
+
+/** What `mock.list()` returns for one of this script's own rules — the same fields `add` accepted,
+ * echoed back with the id it was assigned and its mechanism/action fixed for v1 (always a
+ * MAIN-world fake-response, docs/api-inventory.md §3.2 — see `SynapseNetMockApi`'s doc comment). */
+interface SynapseMockRule {
+  id: string;
+  endpointPattern: string;
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'ALL';
+  fakeStatus: number;
+  fakeResponse?: unknown;
+  delayMs?: number;
+}
+
+/**
+ * Fakes matching requests instead of letting them reach the network — for testing error handling
+ * or working against an API that doesn't exist yet. Scope: `net.mock`, always carries `match`.
+ *
+ * **v1 is deliberately narrow**: only `action: 'fake-response'`, and the interception mechanism is
+ * always the platform's cheapest choice (a MAIN-world `fetch`/`XMLHttpRequest` patch — no DevTools
+ * "being debugged" banner, no `chrome.declarativeNetRequest` rule budget spent). A script declares
+ * *what* it wants (the endpoint, the fake response); it never picks *how* that's intercepted — see
+ * docs/api-inventory.md §3.2 for why. Blocking/rewriting a real request, or a rule visible in the
+ * Network tab, is only available today through the Management View's own "HTTP Mock & Rewrite"
+ * panel, by hand.
+ */
+interface SynapseNetMockApi {
+  add(options: SynapseMockRuleOptions): Promise<{ id: string }>;
+  /** Removes one of your own rules. An id belonging to another script, or to a rule created by hand
+   * in the Management View, is refused — ids are not a capability, ownership is checked server-side. */
+  remove(id: string): Promise<void>;
+  /** Every rule this script has added, never another script's or the user's own. */
+  list(): Promise<SynapseMockRule[]>;
+}
+
+/** Fetches under the extension's own identity — not the page's — so it is not subject to the
+ * page's CORS policy (that's `page.fetch`, disclosed, unchanged). Scope: `net.request`, and every
+ * grant carries `match`: a script can only reach the origins it declared, the same (action × origin)
+ * shape as Tampermonkey's `@connect`. */
+interface SynapseNetApi {
+  request(options: SynapseNetRequestOptions): Promise<SynapseNetResponse>;
+  mock: SynapseNetMockApi;
+}
+
+/** One file to write to disk. Scope: `files.save` — the delta a script cannot close on its own
+ * (`GM_download` in the Tampermonkey world; there is no page API that writes to the filesystem). */
+interface SynapseFilesSaveOptions {
+  /** Relative to the browser's Downloads folder; may include subfolders (`'exports/x.json'`).
+   * Never an absolute path or a `..` segment — rejected before this reaches `chrome.downloads`. */
+  filename: string;
+  /** Must survive structured clone: a string, never a live Blob/stream. Binary content goes through
+   * `contentEncoding: 'base64'`, the same convention `net.request`'s body/response use. */
+  content: string;
+  /** Defaults to `'utf8'`. */
+  contentEncoding?: 'utf8' | 'base64';
+  /** Defaults to `'text/plain;charset=utf-8'` for utf8 content, `'application/octet-stream'` for
+   * base64 content. */
+  mimeType?: string;
+  /** Prompts the user for a save location instead of writing straight to `filename`. Defaults to
+   * `false`. */
+  saveAs?: boolean;
+}
+
+interface SynapseFilesSaveResult {
+  /** Chrome's own download id — usable with `chrome://downloads` but not with any `synapseApi`
+   * method today; there is no `files.*` follow-up call yet (no progress/cancel). */
+  downloadId: number;
+}
+
+interface SynapseFilesApi {
+  save(options: SynapseFilesSaveOptions): Promise<SynapseFilesSaveResult>;
+}
+
+/** One variant listed by an HLS master playlist — itself another manifest URL, not a video. */
+interface SynapseHlsManifestVariant {
+  url: string;
+  /** From `RESOLUTION=WxH`. Absent when the playlist doesn't advertise one (e.g. audio-only). */
+  resolution?: string;
+}
+
+/** One `#EXT-X-KEY` tag's worth of info. `method !== 'AES-128'`, or any `keyFormat` other than
+ * absent/`'identity'`, means real DRM (Widevine/PlayReady/FairPlay) — not something to decrypt. */
+interface SynapseHlsSegmentKey {
+  method: string;
+  uri: string;
+  iv?: string;
+  keyFormat?: string;
+}
+
+interface SynapseHlsManifestSegment {
+  url: string;
+  key?: SynapseHlsSegmentKey;
+  byteRange?: string;
+}
+
+/** What `lib.hls.parse` returns — mirrors `shared/media-manifest-parser.ts`'s `ParsedManifest`
+ * exactly (duplicated here, not imported: this file must stay import-free, see the file banner). */
+type SynapseHlsManifest =
+  | { kind: 'master'; variants: SynapseHlsManifestVariant[] }
+  | {
+      kind: 'media';
+      segments: SynapseHlsManifestSegment[];
+      /** The init segment of a fragmented-MP4 (CMAF) stream — `undefined` for MPEG-TS. */
+      initSegment?: SynapseHlsManifestSegment;
+      encrypted: boolean;
+      isLive: boolean;
+      mediaSequence: number;
+      targetDurationSec?: number;
+    }
+  | { kind: 'unknown' };
+
+/**
+ * Pure computation on data the caller already has in hand — no privilege granted, no scope, no
+ * message ever sent (docs/api-inventory.md §3.0). `lib.*` exists purely to save a script from
+ * re-implementing something Synapse's own builtins already had to get right (here: the HLS
+ * media-playlist parser `download`'s decrypt/remux engine relies on, docs/ROADMAP.md §8.4).
+ *
+ * Reachable from every context — unlike `ui`, which needs a page. Synchronous, like `ui`, for the
+ * same reason: there is no transport boundary to cross, so there is nothing to `await`.
+ */
+interface SynapseLibApi {
+  hls: {
+    /** `baseUrl` resolves the manifest's relative URIs (segments, variants, keys) to absolute
+     * ones — pass the URL the manifest text was fetched from. */
+    parse(text: string, baseUrl: string): SynapseHlsManifest;
+  };
+  /** Extracts the readable article from a page-like `Document`, via Mozilla's Readability — the
+   * same engine behind Firefox's Reader View, and the same one `reader-mode-converter`'s builtin
+   * uses. **Mutates `doc`**; pass a clone if the original must stay untouched. Omit `doc` to have
+   * Synapse operate on a clone of the current page's own `document` for you. Returns `undefined`
+   * when Readability decides the page isn't an article — same "no privilege, honest primitive"
+   * posture as the rest of `lib.*`: this never guesses a fallback for you. Only meaningful where a
+   * `Document` exists; calling with no `doc` from a context with no page (a background Module)
+   * fails with a plain `ReferenceError`, not a crafted message — there is nothing privileged being
+   * denied, just a missing input. */
+  readable(doc?: Document): { title: string; root: Element; text: string } | undefined;
+  /** Converts a DOM subtree to Markdown (mixmark-io/turndown under the hood) — the same converter
+   * `reader-mode-converter` uses. `root` is typically `lib.readable(...)`'s `root`, but any Node
+   * works; `options.resolveImageUrl` lets you point image links at local copies you've already
+   * `net.request`-ed instead of the original remote URL. */
+  toMarkdown(root: Node, options: { baseUrl: string; resolveImageUrl?: (absoluteUrl: string) => string }): string;
+  /** Builds an uncompressed (STORE method) `.zip` archive from named byte buffers — hand-rolled,
+   * no dependency (docs/ROADMAP.md §1). Pass the result to `files.save` with
+   * `contentEncoding: 'base64'` to write it to disk. */
+  zip(entries: { name: string; data: Uint8Array }[]): Uint8Array;
+}
+
 /** The facade every caller programs against, delivered as `ctx.api`: to bundled Modules from the
  * Kernel, to uploaded user scripts from the shim. One interface, three transports (in-process /
  * content-script RPC / user script shim) — a method reachable from one but not another is a
@@ -129,6 +370,9 @@ interface SynapseApi {
   /** Only usable from code that runs on a page. A background Module gets a stub whose every method
    * throws with that explanation — there is no DOM in a service worker to render into. */
   ui: SynapseUiApi;
+  net: SynapseNetApi;
+  files: SynapseFilesApi;
+  lib: SynapseLibApi;
 }
 
 /** What an uploaded user script assigns to `globalThis.__synapseModule` to declare itself. */

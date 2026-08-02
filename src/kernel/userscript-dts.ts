@@ -65,7 +65,10 @@ function scopeReference(): string {
     // Whether a call leaves the page matters to an author: in-world methods are synchronous and
     // take callbacks, RPC ones are async and drop every function they are handed.
     const note = method.transport === 'in-world' ? ' (runs in your own world — synchronous)' : '';
-    lines.push(` * - \`synapseApi.${method.namespace}.${method.signature}\` — requires \`${method.scope}\`${note}.`);
+    // lib.* carries no scope at all (docs/api-inventory.md §3.0) — say so plainly rather than
+    // rendering "requires `undefined`", which would read as a doc-generator bug, not a real answer.
+    const gate = method.scope ? `requires \`${method.scope}\`` : 'no scope required — pure computation';
+    lines.push(` * - \`synapseApi.${method.namespace}.${method.signature}\` — ${gate}${note}.`);
     for (const line of wrap(method.description, 92)) lines.push(` *   ${line}`);
   }
   lines.push(' */');

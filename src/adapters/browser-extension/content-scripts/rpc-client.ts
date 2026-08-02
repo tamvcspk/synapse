@@ -1,6 +1,23 @@
 import type { RpcRequest, RpcResponse } from '../../../kernel/rpc';
-import type { SynapseApi } from '../../../kernel/synapse-api';
+import type {
+  SynapseApi,
+  SynapseFilesSaveOptions,
+  SynapseFilesSaveResult,
+  SynapseMockRule,
+  SynapseMockRuleOptions,
+  SynapseNetRequestOptions,
+  SynapseNetResponse,
+} from '../../../kernel/synapse-api';
+import { htmlToMarkdown } from '../../../shared/html-to-markdown';
+import { parseM3u8 } from '../../../shared/media-manifest-parser';
+import { buildZip } from '../../../shared/zip';
+import { readable } from '../module-registry/lib-readable';
 import { createUiSurface } from '../utils/ui-compositor';
+
+// lib.* (docs/api-inventory.md §3.0) — this is the extension's own ISOLATED-world bundle, an
+// ordinary ESM context, so it imports the real functions directly rather than needing the
+// `?script&iife` + `{file}` delivery the USER_SCRIPT-world shim requires (user-script-shim.ts).
+const lib = { hls: { parse: parseM3u8 }, readable, toMarkdown: htmlToMarkdown, zip: buildZip };
 
 /**
  * Content-script-side transport for `synapseApi` (docs/ROADMAP.md §11.3) — the counterpart to
@@ -50,5 +67,19 @@ export function buildDomModuleApi(moduleId: string): SynapseApi {
       keys: () => call(moduleId, 'storage', 'keys', []) as Promise<string[]>,
     },
     ui: createUiSurface(moduleId),
+    net: {
+      request: (options: SynapseNetRequestOptions) =>
+        call(moduleId, 'net', 'request', [options]) as Promise<SynapseNetResponse>,
+      mock: {
+        add: (options: SynapseMockRuleOptions) => call(moduleId, 'net', 'mock.add', [options]) as Promise<{ id: string }>,
+        remove: (id: string) => call(moduleId, 'net', 'mock.remove', [id]).then(() => undefined),
+        list: () => call(moduleId, 'net', 'mock.list', []) as Promise<SynapseMockRule[]>,
+      },
+    },
+    files: {
+      save: (options: SynapseFilesSaveOptions) =>
+        call(moduleId, 'files', 'save', [options]) as Promise<SynapseFilesSaveResult>,
+    },
+    lib,
   };
 }

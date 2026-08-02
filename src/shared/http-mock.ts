@@ -132,6 +132,15 @@ export interface MockConfig {
    * `{...existing}` on every save like any other field the form doesn't touch. */
   matchCount?: number;
   active: boolean;
+  /** Set only for a rule created through `synapseApi.mock.add` (docs/api-inventory.md §3.2) —
+   * absent means the rule was authored by hand in the Management View. The one thing this field
+   * gates: `net-mock-host.ts`'s `.remove()`/`.list()` filter the shared collection down to a
+   * script's own rules by this field, so one script can never see or delete another's (or the
+   * user's own manually-created rules). Copied through as an opaque string by `validateMockConfig`
+   * (never form-editable, same treatment `matchCount` gets) — the Management View form's
+   * `{...existing}` spread already preserves it across an edit, but the validator has to know to
+   * carry it forward or that edit would silently un-scope the rule. */
+  ownerModuleId?: string;
 }
 
 /** Back-compat accessor for configs persisted before `mechanism` existed. */
@@ -315,6 +324,9 @@ export function validateMockConfig(candidate: unknown): MockConfigValidation {
   // Never form-editable — carried over from whatever the previous save already had (0/undefined
   // for a brand-new rule), so a hit-count keeps counting across unrelated edits to the same rule.
   if (typeof c.matchCount === 'number') config.matchCount = c.matchCount;
+  // Same "carried over, never form-editable" treatment as matchCount — see the field's own doc
+  // comment on MockConfig for why dropping it silently would be a scoping bug, not a cosmetic one.
+  if (typeof c.ownerModuleId === 'string' && c.ownerModuleId.length > 0) config.ownerModuleId = c.ownerModuleId;
   return { valid: true, config };
 }
 

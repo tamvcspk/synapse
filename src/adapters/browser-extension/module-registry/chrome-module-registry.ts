@@ -5,6 +5,10 @@ import { hashScriptSource } from '../../../shared/source-hash';
 import { BUNDLED_MODULES } from './bundled-modules';
 import { BACKGROUND_MODULES } from './background-modules';
 import { buildShimSource } from './user-script-shim';
+// `&iife`, not `&module` — same reason as network-sniffer.background.ts's MAIN-world payload
+// import: chrome.userScripts, like chrome.scripting, injects `js` entries as classic scripts, and a
+// raw ES module chunk throws a SyntaxError before a single line runs.
+import libPayloadPath from './user-script-lib-payload?script&iife';
 import {
   getActivationMap,
   getGrantsMap,
@@ -36,8 +40,11 @@ function pingBusModule(id: string): void {
 
 async function registerUploadedScript(id: string, source: string): Promise<void> {
   const shimmed = buildShimSource(id, source);
+  // `lib.*`'s payload (docs/api-inventory.md §3.0) is listed FIRST — same ordering guarantee
+  // `content_scripts.js` arrays give, entries run in order in one execution — so by the time the
+  // shim's own header runs, globalThis.__synapseLib is already set for it to capture.
   await chrome.userScripts.register([
-    { id, js: [{ code: shimmed }], matches: ['<all_urls>'], world: 'USER_SCRIPT' },
+    { id, js: [{ file: libPayloadPath }, { code: shimmed }], matches: ['<all_urls>'], world: 'USER_SCRIPT' },
   ]);
 }
 

@@ -1,5 +1,21 @@
 import type { SynapseApi, SynapseUiApi } from '../../../kernel/synapse-api';
+import { htmlToMarkdown } from '../../../shared/html-to-markdown';
+import { parseM3u8 } from '../../../shared/media-manifest-parser';
+import { buildZip } from '../../../shared/zip';
+import { performFilesSave } from './files-save-host';
+import { readable } from './lib-readable';
+import { performMockAdd, performMockList, performMockRemove } from './net-mock-host';
+import { performNetRequest } from './net-request-host';
 import { createScriptStorage } from './script-storage';
+
+/** `lib.*` (docs/api-inventory.md §3.0) needs no injection trick here — this context is a plain
+ * ESM module (the background service worker), so it just imports the real functions directly. The
+ * `?script&iife` + `{file}` dance in `user-script-lib-payload.ts` exists ONLY for the USER_SCRIPT
+ * world, which has no module loader; this transport was never that world. `readable`/`toMarkdown`
+ * are real here too, not stubbed — a background Module calling `readable()` with no `doc` (there is
+ * no page `document` in a service worker) fails with a plain `ReferenceError`, an honest failure for
+ * a missing input rather than a crafted "unavailable" message. */
+const lib = { hls: { parse: parseM3u8 }, readable, toMarkdown: htmlToMarkdown, zip: buildZip };
 
 /**
  * The one real implementation of `synapseApi` (docs/ROADMAP.md §11.3). All three transports funnel
@@ -47,5 +63,15 @@ export function createSynapseApi(moduleId: string): SynapseApi {
   return {
     storage: createScriptStorage(moduleId),
     ui: backgroundUiStub(),
+    net: {
+      request: performNetRequest,
+      mock: {
+        add: (options) => performMockAdd(moduleId, options),
+        remove: (id) => performMockRemove(moduleId, id),
+        list: () => performMockList(moduleId),
+      },
+    },
+    files: { save: performFilesSave },
+    lib,
   };
 }

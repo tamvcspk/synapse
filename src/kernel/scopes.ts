@@ -1,3 +1,4 @@
+import { isValidMatchPattern, matchesAnyPattern } from '../shared/match-pattern';
 import type { SynapseApi, SynapseScope, SynapseScopeGrant } from './synapse-api';
 
 /**
@@ -80,8 +81,41 @@ export const SCOPE_CATALOG: Record<SynapseScope, ScopeDefinition> = {
     description:
       "The script calls `fetch`/`XMLHttpRequest` itself, subject to the page's CORS rules. " +
       'Disclosed for the same reason as `page.dom` — the script already has these globals. It is ' +
-      'NOT the same as making requests under the extension\'s identity, which no scope grants yet.',
+      'NOT the same as making requests under the extension\'s identity, which `net.request` grants.',
     requiresMatch: false,
+  },
+  'net.request': {
+    scope: 'net.request',
+    enforcement: 'enforced',
+    consentLine: 'Make network requests, under this extension\'s identity, to {domains}',
+    description:
+      "Fetch cross-origin under the extension's own identity rather than the page's — not subject " +
+      "to the page's CORS policy, the delta a page script cannot close on its own (docs/api-inventory.md " +
+      '§2, "priority #1"). Always carries `match`: a grant is (action × origin), the same shape as ' +
+      "Tampermonkey's `@connect`, so a script can only reach the origins it declared.",
+    requiresMatch: true,
+  },
+  'files.save': {
+    scope: 'files.save',
+    enforcement: 'enforced',
+    consentLine: 'Save files to disk',
+    description:
+      'Write a file into the Downloads folder — the `GM_download` delta a page script has no way to ' +
+      'close on its own. No resource dimension: unlike `net.request`, a written file cannot itself ' +
+      'exfiltrate anything, so there is no origin to scope it to.',
+    requiresMatch: false,
+  },
+  'net.mock': {
+    scope: 'net.mock',
+    enforcement: 'enforced',
+    consentLine: 'Fake network responses on {domains}',
+    description:
+      'Answer matching requests to {domains} with a canned response instead of letting them reach ' +
+      'the network — for testing error handling or working against an API that is not up yet ' +
+      '(docs/api-inventory.md §3.2). v1 only ever fakes a response (no block/rewrite) and always ' +
+      'runs under the cheapest mechanism (a MAIN-world fetch/XHR patch, no DevTools "being debugged" ' +
+      'banner) — a script cannot request `debugger` or `dnr` directly.',
+    requiresMatch: true,
   },
 };
 
@@ -95,9 +129,29 @@ export interface ApiMethodDefinition {
    * its methods here is a type error rather than an undocumented, unreachable API. */
   namespace: keyof SynapseApi;
   method: string;
-  scope: SynapseScope;
+  /** Absent ONLY for `lib.*` (docs/api-inventory.md §3.0): pure computation on data the caller
+   * already holds, granted no privilege, so there is nothing for a scope to gate. Every other
+   * namespace must carry one — `isSynapseScope` failing on a real scope name is a bug, not a
+   * legitimate absence. */
+  scope?: SynapseScope;
   signature: string;
   description: string;
+  /** For a method whose scope `requiresMatch` (§11.3 constraint B): pulls the resource URL out of
+   * the call's own arguments, so the boundary can check it against the grant's `match` patterns
+   * without knowing each namespace's argument shape. Absent for every method whose scope doesn't
+   * require one — `grantsAllow` only consults it when `SCOPE_CATALOG[scope].requiresMatch`. */
+  resourceUrl?: (args: unknown[]) => string | undefined;
+  /** True for a method gated by a `requiresMatch` scope that does NOT itself introduce a new
+   * resource — it only reads or removes something the caller already owns, whose origin was
+   * already checked against `match` at the moment it was *created* (e.g. `mock.remove`/`mock.list`
+   * next to `mock.add`, which does carry a `resourceUrl`). Without this, `grantsAllow`'s fail-closed
+   * "no resourceUrl ⇒ deny" rule (correct for a call that DOES touch a new resource but couldn't
+   * say which) would make these methods permanently unusable — there is no per-call URL to extract
+   * for "list everything I already made". `resolveScopeCheck` below is the one place this is read;
+   * ownership (moduleId) is still what actually isolates one caller's resources from another's, this
+   * flag only says the match dimension isn't the right check for THIS method. Absent (false) for
+   * everything else, including every method on a scope that isn't `requiresMatch` at all. */
+  matchExempt?: boolean;
   /**
    * How the call reaches its implementation.
    *
@@ -189,6 +243,95 @@ export const API_METHODS: ApiMethodDefinition[] = [
     description: 'Remove everything this script has drawn.',
     transport: 'in-world',
   },
+  {
+    namespace: 'net',
+    method: 'request',
+    scope: 'net.request',
+    signature: 'request(options: SynapseNetRequestOptions): Promise<SynapseNetResponse>',
+    description:
+      "Fetch a URL under the extension's identity, not the page's — bypasses the page's CORS " +
+      'policy. `options.url` must fall under one of this call\'s granted `match` patterns.',
+    resourceUrl: (args) => {
+      const options = args[0] as { url?: unknown } | undefined;
+      return typeof options?.url === 'string' ? options.url : undefined;
+    },
+    transport: 'rpc',
+  },
+  {
+    namespace: 'files',
+    method: 'save',
+    scope: 'files.save',
+    signature: 'save(options: SynapseFilesSaveOptions): Promise<SynapseFilesSaveResult>',
+    description: 'Write `options.content` to `options.filename` inside the Downloads folder.',
+    transport: 'rpc',
+  },
+  {
+    namespace: 'net',
+    method: 'mock.add',
+    scope: 'net.mock',
+    signature: 'mock.add(options: SynapseMockRuleOptions): Promise<{ id: string }>',
+    description:
+      'Fake matching requests with a canned response. `options.endpointPattern` must have a ' +
+      'literal (non-wildcard) scheme and host falling under one of this call\'s granted `match` ' +
+      'patterns — only the path may use `*`; the mechanism (always the cheapest one) is chosen by ' +
+      'the platform, not requested.',
+    resourceUrl: (args) => {
+      const options = args[0] as { endpointPattern?: unknown } | undefined;
+      return typeof options?.endpointPattern === 'string' ? options.endpointPattern : undefined;
+    },
+    transport: 'rpc',
+  },
+  {
+    namespace: 'net',
+    method: 'mock.remove',
+    scope: 'net.mock',
+    signature: 'mock.remove(id: string): Promise<void>',
+    description: 'Remove one of this script\'s own rules. Ids from another script or from the Management View are refused.',
+    matchExempt: true,
+    transport: 'rpc',
+  },
+  {
+    namespace: 'net',
+    method: 'mock.list',
+    scope: 'net.mock',
+    signature: 'mock.list(): Promise<SynapseMockRule[]>',
+    description: 'List this script\'s own rules — never another script\'s or the user\'s manually-created ones.',
+    matchExempt: true,
+    transport: 'rpc',
+  },
+  {
+    namespace: 'lib',
+    method: 'hls.parse',
+    signature: 'hls.parse(text: string, baseUrl: string): SynapseHlsManifest',
+    description:
+      'Parse an HLS (.m3u8) manifest already fetched by the script. No scope: pure computation ' +
+      'on data the caller already has, granted no privilege (docs/api-inventory.md §3.0).',
+    transport: 'in-world',
+  },
+  {
+    namespace: 'lib',
+    method: 'readable',
+    signature: 'readable(doc?: Document): { title, root, text } | undefined',
+    description:
+      'Extract the readable article from a Document via Mozilla Readability. Mutates `doc`; ' +
+      'clones the page\'s own document when omitted. No scope — only meaningful where a page DOM ' +
+      'exists, same as `ui`, but fails with a plain error rather than a crafted stub elsewhere.',
+    transport: 'in-world',
+  },
+  {
+    namespace: 'lib',
+    method: 'toMarkdown',
+    signature: 'toMarkdown(root: Node, options: { baseUrl, resolveImageUrl? }): string',
+    description: 'Convert a DOM subtree to Markdown. No scope: pure computation on a Node the caller already has.',
+    transport: 'in-world',
+  },
+  {
+    namespace: 'lib',
+    method: 'zip',
+    signature: 'zip(entries: { name, data }[]): Uint8Array',
+    description: 'Build an uncompressed .zip archive from named byte buffers. No scope: pure computation.',
+    transport: 'in-world',
+  },
 ];
 
 export function isSynapseScope(value: unknown): value is SynapseScope {
@@ -204,6 +347,22 @@ export function isSynapseScope(value: unknown): value is SynapseScope {
  */
 export function scopeForApiMethod(namespace: string, method: string): SynapseScope | undefined {
   return API_METHODS.find((m) => m.namespace === namespace && m.method === method && m.transport === 'rpc')?.scope;
+}
+
+/** The resource URL (if any) a call is about, per that method's own `resourceUrl` extractor — the
+ * boundary needs this to check a `requiresMatch` scope's `match` patterns without special-casing
+ * each namespace. Returns `undefined` for a method with no extractor, same as one with none named. */
+export function resourceUrlForCall(namespace: string, method: string, args: unknown[]): string | undefined {
+  const def = API_METHODS.find((m) => m.namespace === namespace && m.method === method && m.transport === 'rpc');
+  return def?.resourceUrl?.(args);
+}
+
+/** Whether this call should skip the `requiresMatch` resource check even though its scope carries
+ * one — see `ApiMethodDefinition.matchExempt`'s doc comment for why that's a legitimate answer and
+ * not a hole: it only ever applies to a method that reads/removes something already scoped at
+ * creation, never one that reaches a new resource. */
+export function isMatchExemptMethod(namespace: string, method: string): boolean {
+  return API_METHODS.find((m) => m.namespace === namespace && m.method === method && m.transport === 'rpc')?.matchExempt ?? false;
 }
 
 export type ScopeGrantValidation =
@@ -234,6 +393,12 @@ export function normalizeScopeGrants(raw: unknown): ScopeGrantValidation {
     if (SCOPE_CATALOG[scope].requiresMatch && (!match || match.length === 0)) {
       return { valid: false, reason: `scope "${scope}" requires a non-empty match list` };
     }
+    if (match) {
+      const invalid = (match as string[]).find((m) => !isValidMatchPattern(m));
+      if (invalid !== undefined) {
+        return { valid: false, reason: `scope "${scope}": "${invalid}" is not a valid match pattern` };
+      }
+    }
 
     grants.push(match ? { scope, match: match as string[] } : { scope });
   }
@@ -243,9 +408,18 @@ export function normalizeScopeGrants(raw: unknown): ScopeGrantValidation {
 /**
  * The single funnel for "is this call allowed" — every enforcement point goes through here so the
  * resource dimension (`match`) has exactly one place to be checked once a scope needs it.
+ *
+ * `resourceUrl` is what the call is actually about (`resourceUrlForCall`'s result) — required only
+ * for a `requiresMatch` scope, and its absence there is a deny, not a pass: a scope that carries a
+ * resource dimension is meaningless without one to check, and failing open on a missing URL would
+ * turn "I couldn't tell what this call touches" into "allow it anyway".
  */
-export function grantsAllow(grants: SynapseScopeGrant[], scope: SynapseScope): boolean {
-  return grants.some((g) => g.scope === scope);
+export function grantsAllow(grants: SynapseScopeGrant[], scope: SynapseScope, resourceUrl?: string): boolean {
+  const matching = grants.filter((g) => g.scope === scope);
+  if (matching.length === 0) return false;
+  if (!SCOPE_CATALOG[scope].requiresMatch) return true;
+  if (!resourceUrl) return false;
+  return matching.some((g) => matchesAnyPattern(resourceUrl, g.match ?? []));
 }
 
 /** Consent text for one grant, with `{domains}` filled in from its `match` patterns. */

@@ -1,5 +1,5 @@
 import type { ManifestReport, RpcRequest, RpcResponse } from '../../../kernel/rpc';
-import { grantsAllow, scopeForApiMethod } from '../../../kernel/scopes';
+import { grantsAllow, isMatchExemptMethod, resourceUrlForCall, scopeForApiMethod } from '../../../kernel/scopes';
 import type { SynapseApi, SynapseScopeGrant } from '../../../kernel/synapse-api';
 import { hashScriptSource } from '../../../shared/source-hash';
 import { getActivationMap, getGrantedScopes, getUploadedSources, setManifestReport } from './storage';
@@ -64,6 +64,20 @@ export function registerRpcHandler(trustedScopes: TrustedScopeMap = {}): void {
   chrome.runtime.onMessage.addListener(listener);
 }
 
+/** Walks a possibly-dotted method name ('request' or 'mock.add') down from a namespace object —
+ * `scopes.ts`'s catalog has always allowed dotted method names (`lib.hls.parse`), but until
+ * `net.mock` every dotted entry was `transport: 'in-world'` and never reached this file at all.
+ * `net.mock.add/remove/list` is the first RPC-dispatched one, so a single-level property lookup
+ * stops being enough — this generalizes it rather than special-casing `net.mock`. */
+function resolveMethodHandler(namespaceObj: Record<string, unknown>, method: string): ((...args: unknown[]) => unknown) | undefined {
+  let cur: unknown = namespaceObj;
+  for (const part of method.split('.')) {
+    if (typeof cur !== 'object' || cur === null) return undefined;
+    cur = (cur as Record<string, unknown>)[part];
+  }
+  return typeof cur === 'function' ? (cur as (...args: unknown[]) => unknown) : undefined;
+}
+
 function isRpcRequest(msg: unknown): msg is RpcRequest {
   return typeof msg === 'object' && msg !== null && (msg as { type?: unknown }).type === 'synapse:rpc';
 }
@@ -122,14 +136,38 @@ async function handleRpc(req: RpcRequest, trustedScopes: TrustedScopeMap): Promi
     if (granted === undefined) {
       return fail(`Unknown module "${req.moduleId}"`);
     }
-    if (!grantsAllow(granted, requiredScope)) {
+    // matchExempt (kernel/scopes.ts) covers a method that reads/removes something already
+    // resource-checked when it was CREATED (e.g. net.mock.remove/list next to mock.add) — for those,
+    // grantsAllow's generic "no resourceUrl ⇒ deny" would make the method permanently unusable, so
+    // the check drops to "is the scope granted at all", the same bar files.save (no resource
+    // dimension) already clears. Ownership (moduleId), not match, is what isolates callers there.
+    const scopeOk = isMatchExemptMethod(req.namespace, req.method)
+      ? granted.some((g) => g.scope === requiredScope)
+      : grantsAllow(granted, requiredScope, resourceUrlForCall(req.namespace, req.method, req.args));
+    if (!scopeOk) {
       return fail(`Scope "${requiredScope}" is not granted for module "${req.moduleId}"`);
     }
 
     const api = createSynapseApi(req.moduleId);
-    const namespace = api[req.namespace] as unknown as Record<string, (...args: unknown[]) => unknown>;
-    const result = await namespace[req.method]!(...req.args);
-    return { type: 'synapse:rpc-result', callId: req.callId, result };
+    const namespace = api[req.namespace] as unknown as Record<string, unknown>;
+    const handler = resolveMethodHandler(namespace, req.method);
+    if (!handler) {
+      return fail(`Unknown method "${String(req.namespace)}.${req.method}"`);
+    }
+    try {
+      const result = await handler(...req.args);
+      return { type: 'synapse:rpc-result', callId: req.callId, result };
+    } catch (err) {
+      // Unlike the fail(...) calls above (expected denials — inactive module, ungranted scope,
+      // unknown method — deliberately silent, see ROADMAP.md §11.6's write-up on why), a throw from
+      // the IMPLEMENTATION itself is never expected. Logged here, with the stack, specifically
+      // because it wasn't: `response.error` only ever carries `err.message` back to the caller (it
+      // has to survive structured clone), so without this the service worker console shows nothing
+      // at all for a real bug — the caller sees just the message, at a call site inside its own
+      // wrapped source, with no way to point back at where in the extension it actually happened.
+      console.error(`Synapse: ${req.namespace}.${req.method} threw`, err);
+      throw err;
+    }
   } catch (err) {
     return fail(err instanceof Error ? err.message : String(err));
   }
