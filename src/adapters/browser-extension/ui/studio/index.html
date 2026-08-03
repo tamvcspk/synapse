@@ -8,10 +8,16 @@
     <div id="root">
       <header id="header">
         <h1 id="title">Studio</h1>
-        <button id="save-btn" type="button">Save</button>
+        <div class="header-actions">
+          <button id="toggle-steps-btn" class="icon-btn" type="button" style="display: none"></button>
+          <button id="save-btn" class="icon-btn" type="button"></button>
+        </div>
       </header>
       <p id="message"></p>
-      <div id="editor"></div>
+      <div id="body">
+        <div id="editor"></div>
+        <aside id="steps-sidebar"></aside>
+      </div>
     </div>
     <script type="module" src="./main.ts"></script>
   </body>

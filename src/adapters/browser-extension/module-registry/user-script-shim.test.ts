@@ -474,4 +474,127 @@ describe('buildShimSource', () => {
 
     expect((context as { __synapseModule?: unknown }).__synapseModule).toBeUndefined();
   });
+
+  describe('steps (docs/ROADMAP.md §12.3)', () => {
+    /** Runs one script and hands back every message it sent plus the realm, once settled — the
+     * realm lets a test read back a value a step stashed on `globalThis` to prove what input it
+     * actually received, not just that it reported `ok`. */
+    async function runAndCollect(
+      userSource: string,
+      subState: Record<string, boolean> = {},
+    ): Promise<{ sent: any[]; ctx: vm.Context }> {
+      const sent: any[] = [];
+      const ctx = sharedRealm((m: any) => {
+        sent.push(m);
+        if (m.type === 'synapse:sub-state-query') return Promise.resolve({ subState });
+        return Promise.resolve();
+      });
+      evaluateAll([buildShimSource('uuid-steps', userSource)], ctx);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return { sent, ctx };
+    }
+
+    function reports(sent: any[]): any[] {
+      return sent.filter((m) => m.type === 'synapse:manifest-report');
+    }
+
+    it('normalizes a bare run to a single "main" step, reported before it ever runs', async () => {
+      const { sent } = await runAndCollect(`globalThis.__synapseModule = { id: 'x', async run() { return 1; } };`);
+      const [first] = reports(sent);
+      expect(first).toMatchObject({ hasRun: true, steps: [{ id: 'main' }] });
+      expect(first.runError).toBeUndefined();
+    });
+
+    it('is invalid when both run and steps are declared', async () => {
+      const { sent } = await runAndCollect(`
+        globalThis.__synapseModule = {
+          id: 'x',
+          async run() { return 1; },
+          steps: [{ id: 'a', async run(input) { return input; } }],
+        };
+      `);
+      const [first] = reports(sent);
+      expect(first).toMatchObject({ hasRun: false });
+      expect(first.runError).toMatch(/either run or steps, not both/);
+    });
+
+    it('is invalid on a duplicate step id', async () => {
+      const { sent } = await runAndCollect(`
+        globalThis.__synapseModule = {
+          id: 'x',
+          steps: [
+            { id: 'dup', async run(input) { return input; } },
+            { id: 'dup', async run(input) { return input; } },
+          ],
+        };
+      `);
+      const [first] = reports(sent);
+      expect(first.hasRun).toBe(false);
+      expect(first.runError).toMatch(/duplicate step id "dup"/);
+    });
+
+    it('runs steps in declared order, each one’s output feeding the next', async () => {
+      const { sent } = await runAndCollect(`
+        globalThis.__synapseModule = {
+          id: 'x',
+          steps: [
+            { id: 'seed', async run() { return 10; } },
+            { id: 'double', async run(input) { return input * 2; } },
+            { id: 'observe', async run(input) { globalThis.finalValue = input; return input; } },
+          ],
+        };
+      `);
+      const final = reports(sent).find((r) => r.stepResults);
+      expect(final.stepResults.map((r: any) => r.id)).toEqual(['seed', 'double', 'observe']);
+      expect(final.stepResults.every((r: any) => r.ok)).toBe(true);
+    });
+
+    it('bypasses a step via subState — its value passes through unchanged to the next step', async () => {
+      const { sent, ctx } = await runAndCollect(
+        `
+        globalThis.__synapseModule = {
+          id: 'x',
+          steps: [
+            { id: 'seed', async run() { return 10; } },
+            { id: 'skip-me', async run(input) { return input * 100; } },
+            { id: 'observe', async run(input) { globalThis.finalValue = input; return input; } },
+          ],
+        };
+      `,
+        { 'skip-me': false },
+      );
+      const final = reports(sent).find((r) => r.stepResults);
+      expect(final.stepResults.find((r: any) => r.id === 'skip-me')).toMatchObject({ ok: true, skipped: true });
+      // seed() returns 10; skip-me is bypassed, so observe() still receives 10, not 1000.
+      expect((ctx as any).finalValue).toBe(10);
+    });
+
+    it('keeps running later steps after one throws, and surfaces the failure both per-step and at the top level', async () => {
+      const { sent } = await runAndCollect(`
+        globalThis.__synapseModule = {
+          id: 'x',
+          steps: [
+            { id: 'ok-step', async run() { return 'seed'; } },
+            { id: 'boom', async run() { throw new Error('kaboom'); } },
+            { id: 'after', async run(input) { globalThis.afterInput = input; return input; } },
+          ],
+        };
+      `);
+      const final = reports(sent).find((r) => r.stepResults);
+      expect(final.stepResults).toEqual([
+        { id: 'ok-step', ok: true, durationMs: expect.any(Number) },
+        { id: 'boom', ok: false, durationMs: expect.any(Number), error: 'kaboom' },
+        { id: 'after', ok: true, durationMs: expect.any(Number) },
+      ]);
+      // The step after the failure still ran (no rollback, same as createCompositeModule) — with
+      // the PREVIOUS value ('seed'), since 'boom' never resolved one of its own.
+      expect(final.runError).toBe('kaboom');
+    });
+
+    it('queries the background for its own subState before running any step', async () => {
+      const { sent } = await runAndCollect(`globalThis.__synapseModule = { id: 'x', async run() { return 1; } };`);
+      const query = sent.find((m) => m.type === 'synapse:sub-state-query');
+      expect(query).toMatchObject({ moduleId: 'uuid-steps' });
+    });
+  });
 });

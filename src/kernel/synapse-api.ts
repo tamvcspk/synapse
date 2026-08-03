@@ -465,6 +465,22 @@ export interface SynapseApi {
   page: SynapsePageApi;
 }
 
+/** One step of a multi-step script (docs/ROADMAP.md §12.3) — the uploaded-script equivalent of a
+ * bundled Composite Module's sub-module (`kernel/composite-module.ts`). Steps run in array order,
+ * each one's resolved value becoming the next one's `input`, exactly like `createCompositeModule`:
+ * sequential only, no rollback — a step that throws is reported (Studio's sidebar shows which one
+ * and why) and the NEXT step still runs with the previous value unchanged. */
+export interface SynapseUserScriptStep {
+  /** Stable identity for this step. Prefer a short literal string constant (e.g. `'load-dom'`):
+   * the Studio sidebar locates a step's definition by searching your saved source text for this
+   * exact literal to jump the editor to it, so an id computed at runtime can be listed but never
+   * jumped to. Also the key for this step's per-run bypass toggle (`RegistryEntry.subState`). */
+  id: string;
+  /** Shown in the Studio sidebar and the popup's tooltip instead of the raw id. */
+  label?: string;
+  run(input: unknown, ctx: { api: SynapseApi }): Promise<unknown>;
+}
+
 /** What an uploaded user script assigns to `__synapseModule` to declare itself. Assign the bare
  * name, not `globalThis.__synapseModule` — both create the same global at runtime (the shim wraps
  * user source in a non-strict IIFE, so a bare undeclared assignment becomes an implicit global same
@@ -478,5 +494,17 @@ export interface SynapseUserScriptManifest {
   /** Requested scopes. This is a *request*: the grant record the user approved is the authority,
    * and it is re-checked in the background on every single call. */
   scopes?: (SynapseScope | SynapseScopeGrant)[];
-  run(input: unknown, ctx: { api: SynapseApi }): Promise<unknown>;
+  /**
+   * Declare exactly one of `run`/`steps` (docs/ROADMAP.md §12.3) — declaring both, or neither, is
+   * `invalid`. A bare `run` is really `steps: [{ id: 'main', run }]` in disguise: the platform
+   * normalizes it to that shape internally, so every uploaded script is "a pipeline of N≥1 steps"
+   * from the Registry's point of view, and the single-step case is not a special case anywhere
+   * downstream. Declare `steps` directly once your script grows past one logical stage — the
+   * Studio sidebar then shows each step's last run status and lets the user bypass it individually,
+   * without touching this file's `run`.
+   */
+  run?(input: unknown, ctx: { api: SynapseApi }): Promise<unknown>;
+  /** Two or more steps, each with a unique `id`. See `run`'s doc comment above — declare one or
+   * the other, never both. */
+  steps?: SynapseUserScriptStep[];
 }

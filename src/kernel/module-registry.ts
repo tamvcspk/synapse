@@ -42,6 +42,13 @@ export interface RegistryEntry {
    * means that step is skipped (docs/ROADMAP.md #3). A step missing from this map is treated as
    * active (not bypassed). Absent entirely when `subModules` is absent. */
   subState?: Record<string, boolean>;
+  /** Outcome of each step's MOST RECENT run — keyed by step id (docs/ROADMAP.md §12.3). Sourced
+   * from an uploaded script's `ManifestReport.stepResults`; a bundled Composite Module never
+   * populates this (its `onSubFailure` still just `console.error`s — observability was only
+   * rebuilt for the Studio sidebar's case, not `steps-view.ts`'s). A step id present in
+   * `subModules` but missing here just hasn't reported a run yet, which is not the same thing as
+   * `skipped: true` (that means the bypass excluded it from the last run that DID happen). */
+  subStepStatus?: Record<string, { ok: boolean; durationMs: number; error?: string; skipped?: boolean }>;
   /** Mirrors Module.uiParadigm (docs/ROADMAP.md §4.2) — presence of `'float-widget'` is what
    * drives the popup's on-page-alerts hint. Absent for a Module that declares no paradigm. */
   uiParadigm?: 'none' | 'dedicated-page' | 'float-widget' | 'action-button';

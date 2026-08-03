@@ -1,8 +1,8 @@
-import type { ManifestReport, RpcRequest, RpcResponse } from '../../../kernel/rpc';
+import type { ManifestReport, RpcRequest, RpcResponse, SubStateQuery, SubStateQueryResponse } from '../../../kernel/rpc';
 import { SCOPE_CATALOG, grantsAllow, isMatchExemptMethod, resourceUrlForCall, scopeForApiMethod } from '../../../kernel/scopes';
 import type { SynapseApi, SynapseScopeGrant } from '../../../kernel/synapse-api';
 import { hashScriptSource } from '../../../shared/source-hash';
-import { getActivationMap, getGrantedScopes, getUploadedSources, setManifestReport } from './storage';
+import { getActivationMap, getGrantedScopes, getSubStateMap, getUploadedSources, setManifestReport } from './storage';
 import { createSynapseApi } from './synapse-api-host';
 
 /**
@@ -31,6 +31,10 @@ export function registerRpcHandler(trustedScopes: TrustedScopeMap = {}): void {
     if (isManifestReport(msg)) {
       void handleManifestReport(msg);
       return;
+    }
+    if (isSubStateQuery(msg)) {
+      handleSubStateQuery(msg).then(sendResponse);
+      return true;
     }
     if (!isRpcRequest(msg)) return;
     handleRpc(msg, trustedScopes, sender).then(sendResponse);
@@ -89,6 +93,19 @@ function isManifestReport(msg: unknown): msg is ManifestReport {
 async function handleManifestReport(report: ManifestReport): Promise<void> {
   const { type: _type, ...stored } = report;
   await setManifestReport(report.moduleId, stored);
+}
+
+function isSubStateQuery(msg: unknown): msg is SubStateQuery {
+  return typeof msg === 'object' && msg !== null && (msg as { type?: unknown }).type === 'synapse:sub-state-query';
+}
+
+/** Answers an uploaded script's pre-run request for its own per-step bypass map (docs/ROADMAP.md
+ * §12.3) — read directly from storage, no scope/activation check: this is the script reading its
+ * OWN already-declared steps' toggle state, the same data `createCompositeModule`'s `getSubState`
+ * callback reads directly for a bundled Module, not a capability that needs gating. */
+async function handleSubStateQuery(msg: SubStateQuery): Promise<SubStateQueryResponse> {
+  const map = await getSubStateMap();
+  return { subState: map[msg.moduleId] ?? {} };
 }
 
 /** Hashing every uploaded source on every call would be wasteful, and the service worker's memory

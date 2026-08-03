@@ -48,5 +48,45 @@ export interface ManifestReport {
    * UI. Never authorization on its own (the stored grant record is). */
   scopes?: unknown;
   hasRun: boolean;
+  /** Set either when the manifest's `run`/`steps` shape fails the shim's structural check (see
+   * `user-script-shim.ts`'s `normalizeManifestSteps`, e.g. "declare either run or steps, not
+   * both"), or when at least one step's `run()` threw during the most recent execution — either
+   * way, `chrome-module-registry.ts`'s `buildUploadedEntry` surfaces this as the entry's `reason`
+   * and marks it `invalid`. */
   runError?: string;
+  /**
+   * The pipeline's steps, normalized to one shape (docs/ROADMAP.md §12.3): a bare `run` becomes
+   * `[{ id: 'main' }]`. Present only once the manifest passed the structural check (i.e. whenever
+   * `hasRun` is `true`) — `chrome-module-registry.ts` projects this onto `RegistryEntry.subModules`,
+   * reusing the same field the Studio sidebar and the bundled Composite Module's Dashboard Steps
+   * view both already read.
+   */
+  steps?: { id: string; label?: string }[];
+  /**
+   * Outcome of the MOST RECENT run, one entry per step in `steps`' order — reported once the whole
+   * pipeline settles, separately from the `hasRun`/`steps` report sent right after evaluation
+   * (before any step has run). A step skipped via the per-step bypass (`RegistryEntry.subState`)
+   * still gets an entry here (`skipped: true`) so the Studio sidebar can show it as skipped rather
+   * than silently missing, exactly like a bundled Composite Module's bypass.
+   */
+  stepResults?: { id: string; ok: boolean; durationMs: number; error?: string; skipped?: boolean }[];
+}
+
+/**
+ * Sent by an uploaded module's shim right before running its pipeline, to read the per-step
+ * bypass map a user has set from the Studio sidebar (docs/ROADMAP.md §12.3) — the same
+ * `RegistryEntry.subState` a bundled Composite Module's `createCompositeModule` already reads
+ * directly from storage. An uploaded script's code runs in a page's USER_SCRIPT world with no
+ * direct `chrome.storage` access, so this is a small request/response pair of its own rather than
+ * a `synapseApi` namespace: it carries no user-facing permission, only the script's own opt-out of
+ * its own already-declared steps, so it doesn't belong behind a scope check the way `synapse:rpc`
+ * methods do.
+ */
+export interface SubStateQuery {
+  type: 'synapse:sub-state-query';
+  moduleId: string;
+}
+
+export interface SubStateQueryResponse {
+  subState: Record<string, boolean>;
 }

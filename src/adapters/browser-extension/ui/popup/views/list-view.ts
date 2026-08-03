@@ -136,8 +136,11 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
   // fixed-width window, and "Steps" reads clearer than an ambiguous glyph) opening the Dashboard's
   // per-step toggle view (docs/ROADMAP.md #1's rebuild) — kept independent of the action buttons
   // since a Composite Module can also have its own Action/Collection uiSchema at the same time.
+  // `source === 'bundled'` only: an uploaded script also gets `subModules` now (docs/ROADMAP.md
+  // §12.3's normalized "N≥1 steps" report), but its per-step sidebar lives in Studio next to the
+  // code it belongs to, not in this Dashboard view — that's the whole point of §12.3's redirect.
   const stepsBtn =
-    entry.status === 'ok' && entry.subModules && entry.subModules.length > 0
+    entry.source === 'bundled' && entry.status === 'ok' && entry.subModules && entry.subModules.length > 0
       ? button({ title: 'Configure steps', onclick: () => callbacks.onOpenSteps(entry) }, 'Steps')
       : null;
 
@@ -145,7 +148,12 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
     { class: 'module-row' + (entry.status !== 'ok' ? ' disabled' : '') },
     label,
     entry.status !== 'ok' ? span({ class: 'reason', title: entry.reason ?? '' }, 'invalid') : null,
-    entry.status === 'ok' && ungranted.length > 0
+    // NOT gated on `entry.status === 'ok'` — a script's very first run is exactly the one most
+    // likely to throw on an ungranted call (see chrome-module-registry.ts's doc comment on
+    // `requestedScopes`), which marks it `invalid` for the reason "scope not granted". Hiding
+    // Grant on `invalid` would make that case unrecoverable from the popup: the only script that
+    // NEEDS the button is the one currently showing this exact reason.
+    ungranted.length > 0
       ? button({ title: `Requests: ${ungranted.map((g) => g.scope).join(', ')}`, onclick: () => callbacks.onGrant(entry) }, 'Grant')
       : null,
     // Action button(s) + toggle grouped together, visually adjacent, separate from label/reason/grant.

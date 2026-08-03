@@ -17,7 +17,12 @@ import { renderConfirmDeleteView } from './views/confirm-delete-view';
  */
 export type View =
   | { kind: 'list' }
-  | { kind: 'action-result'; title: string; content: string; isError: boolean }
+  /** `showReloadExtension` (docs/ROADMAP.md §12.1) — an extra "Reload extension" button, shown
+   * only for the "Allow User Scripts" was just enabled but chrome.userScripts is still unavailable
+   * to THIS running extension instance" case: Chrome doesn't always pick up a just-granted
+   * permission for an already-running service worker, and `chrome.runtime.reload()` is the cheap
+   * first thing to try before resorting to restarting the whole browser. */
+  | { kind: 'action-result'; title: string; content: string; isError: boolean; showReloadExtension?: boolean }
   /** docs/ROADMAP.md §11.3 — scope consent, replacing the old capability consent. `scopes` is what
    * still needs approving (not everything the Module declared), and the view splits it into
    * Enforced vs Disclosed itself. */
@@ -53,6 +58,7 @@ export interface RouterHandlers {
   onDelete(entry: RegistryEntry): void;
   onRenameSave(label: string): void;
   onDeleteConfirm(): void;
+  onReloadExtension(): void;
 }
 
 export async function render(
@@ -86,7 +92,10 @@ export async function render(
   }
 
   if (view.kind === 'action-result') {
-    renderActionResultView(root, view, { onBack: () => handlers.onNavigate({ kind: 'list' }) });
+    renderActionResultView(root, view, {
+      onBack: () => handlers.onNavigate({ kind: 'list' }),
+      onReloadExtension: handlers.onReloadExtension,
+    });
     return;
   }
 

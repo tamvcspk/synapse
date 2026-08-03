@@ -15,10 +15,13 @@ import eye from '../../../assets/icon/eye.png';
 import eyeOff from '../../../assets/icon/eye-off.png';
 import fileText from '../../../assets/icon/file-text.png';
 import info from '../../../assets/icon/info.png';
+import panelRightClose from '../../../assets/icon/panel-right-close.png';
+import panelRightOpen from '../../../assets/icon/panel-right-open.png';
 import pause from '../../../assets/icon/pause.png';
 import pencil from '../../../assets/icon/pencil.png';
 import play from '../../../assets/icon/play.png';
 import refreshCw from '../../../assets/icon/refresh-cw.png';
+import save from '../../../assets/icon/save.png';
 import settings from '../../../assets/icon/settings.png';
 import square from '../../../assets/icon/square.png';
 import squarePen from '../../../assets/icon/square-pen.png';
@@ -36,10 +39,13 @@ export const ICONS = {
   eyeOff,
   fileText,
   info,
+  panelRightClose,
+  panelRightOpen,
   pause,
   pencil,
   play,
   refreshCw,
+  save,
   settings,
   square,
   squarePen,

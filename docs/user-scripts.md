@@ -40,6 +40,50 @@ __synapseModule = {
 };
 ```
 
+### Multiple steps (pipeline)
+
+A script grows past one logical stage by declaring `steps` instead of `run` — never both:
+
+```javascript
+__synapseModule = {
+  id: 'crawl-and-summarize',
+  scopes: ['storage.rw'],
+  steps: [
+    {
+      id: 'load-dom',
+      async run() {
+        return document.body.innerText;
+      },
+    },
+    {
+      id: 'word-count',
+      label: 'Count words',
+      async run(text, ctx) {
+        const words = text.trim().split(/\s+/).length;
+        await ctx.api.storage.set('last-word-count', words);
+        return words;
+      },
+    },
+  ],
+};
+```
+
+Steps run in array order, each one's return value becoming the next one's `input` — exactly the
+bundled Composite Module pipeline (`createCompositeModule`) uses internally. Declaring `run` is
+really shorthand for a single step named `'main'`; the platform normalizes it that way internally,
+so every uploaded script is "a pipeline of N≥1 steps" from the extension's point of view.
+
+- **`id` should be a literal string**, not one computed at runtime. Studio's Steps sidebar
+  (docs/ROADMAP.md §12.3) locates a step's definition by searching your saved source for that exact
+  quoted literal and scrolling the editor to it — an id built from a variable can still be listed
+  there, just never jumped to.
+- **No rollback.** A step that throws is recorded (Studio's sidebar shows which one and why, and the
+  popup still shows the script as invalid with that reason) but does **not** stop the pipeline — the
+  next step still runs, receiving whatever the previous SUCCESSFUL step returned.
+- **Bypassing a step** is a Studio sidebar checkbox, not something your code controls — a bypassed
+  step's input passes to the next step completely unchanged, as if it were never declared.
+- **Two steps sharing one `id` is invalid**, same as declaring `run` and `steps` at once.
+
 **`ctx.api` is the only handle — there is no `synapseApi` global.** Every uploaded script shares one
 execution world, so a global name has a single binding for all of them and cannot tell the platform
 which script is calling: the last script loaded would own it, and everyone else's calls would run

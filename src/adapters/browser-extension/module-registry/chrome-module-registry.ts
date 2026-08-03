@@ -247,7 +247,7 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     ]);
 
     const bundled = this.buildBundledEntries(activation, subStates, uiMuted);
-    const uploadedEntries = await this.buildUploadedEntries(uploaded, reports, activation, grants, uiMuted, scriptMeta);
+    const uploadedEntries = await this.buildUploadedEntries(uploaded, reports, activation, grants, uiMuted, scriptMeta, subStates);
     const entries = [...bundled, ...uploadedEntries];
 
     const idCounts = new Map<string, number>();
@@ -308,10 +308,11 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     grants: Record<string, StoredGrantRecord>,
     uiMuted: Record<string, boolean>,
     scriptMeta: Record<string, ScriptMeta>,
+    subStates: Record<string, Record<string, boolean>>,
   ): Promise<RegistryEntry[]> {
     return Promise.all(
       Object.keys(uploaded).map((id) =>
-        this.buildUploadedEntry(id, uploaded[id]!, reports[id], activation, grants, uiMuted, scriptMeta[id]),
+        this.buildUploadedEntry(id, uploaded[id]!, reports[id], activation, grants, uiMuted, scriptMeta[id], subStates),
       ),
     );
   }
@@ -324,6 +325,7 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     grants: Record<string, StoredGrantRecord>,
     uiMuted: Record<string, boolean>,
     meta: ScriptMeta | undefined,
+    subStates: Record<string, Record<string, boolean>>,
   ): Promise<RegistryEntry> {
     // Same hash check the RPC handler enforces (storage.ts's getGrantedScopes): a grant approved
     // for different source code counts as no grant, so the UI shows what will actually happen.
@@ -343,22 +345,56 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     // exactOptionalPropertyTypes: only spread `fileName` in when there's a real string to give it.
     const fileNameField = meta?.fileName ? { fileName: meta.fileName } : {};
 
+    // §12.3: subModules/subState/subStepStatus — reusing the exact fields a bundled Composite
+    // Module's entry already carries (docs/ROADMAP.md §12.3 "KHÔNG phát minh field mới" for the
+    // structural half). Attached below regardless of which status branch returns: a script whose
+    // most recent run threw partway through should still show which OTHER steps ran fine, same
+    // reasoning `buildBundledEntries` never conditions `subModules` on the Module's own status.
+    const subStepFields: Pick<RegistryEntry, 'subModules' | 'subState' | 'subStepStatus'> = {};
+    if (report?.steps && report.steps.length > 0) {
+      subStepFields.subModules = report.steps;
+      subStepFields.subState = subStates[id] ?? {};
+      if (report.stepResults && report.stepResults.length > 0) {
+        subStepFields.subStepStatus = Object.fromEntries(
+          report.stepResults.map((r) => [
+            r.id,
+            {
+              ok: r.ok,
+              durationMs: r.durationMs,
+              ...(r.error ? { error: r.error } : {}),
+              ...(r.skipped ? { skipped: true } : {}),
+            },
+          ]),
+        );
+      }
+    }
+
     // No report yet (script hasn't run on a matching page since upload) — optimistic 'ok',
     // graceful-fail layer 2/3 (run-time + shape) resolve once a report arrives.
     if (!report) {
       return { id, label, ...fileNameField, source: 'uploaded', scopes: [], active, status: 'ok', grantedScopes, uiHidden };
     }
 
+    // Computed once, ahead of the runError check below, and reused by it: a script's `scopes` are
+    // requested at DECLARATION time (they're part of `manifest.scopes`, reported before a single
+    // step ever runs), independent of whether the run that just happened actually succeeded. A
+    // script's very FIRST run — the whole reason it needs Grant at all — is exactly the run most
+    // likely to throw on an ungranted call (docs/user-scripts.md's documented "first execution can
+    // have its calls rejected"); returning `scopes: []` for that case (as this used to) meant
+    // `ungrantedScopes` always came back empty and the popup's Grant button could never appear,
+    // even though the reason shown WAS "scope not granted" — a script would loop forever between
+    // "invalid, please grant" and "no Grant button to press".
+    const shapeCheck = validateModuleManifestShape({ id, scopes: report.scopes });
+    const requestedScopes = shapeCheck.valid ? shapeCheck.manifest.scopes : [];
+
     if (report.runError) {
-      return { id, label, ...fileNameField, source: 'uploaded', scopes: [], active, status: 'invalid', reason: report.runError, grantedScopes, uiHidden };
+      return { id, label, ...fileNameField, source: 'uploaded', scopes: requestedScopes, active, status: 'invalid', reason: report.runError, grantedScopes, uiHidden, ...subStepFields };
     }
     if (!report.hasRun) {
       return { id, label, ...fileNameField, source: 'uploaded', scopes: [], active, status: 'invalid', reason: 'globalThis.__synapseModule.run is not a function', grantedScopes, uiHidden };
     }
-
-    const shapeCheck = validateModuleManifestShape({ id, scopes: report.scopes });
     if (!shapeCheck.valid) {
-      return { id, label, ...fileNameField, source: 'uploaded', scopes: [], active, status: 'invalid', reason: shapeCheck.reason, grantedScopes, uiHidden };
+      return { id, label, ...fileNameField, source: 'uploaded', scopes: [], active, status: 'invalid', reason: shapeCheck.reason, grantedScopes, uiHidden, ...subStepFields };
     }
 
     return {
@@ -366,11 +402,12 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
       label,
       ...fileNameField,
       source: 'uploaded',
-      scopes: shapeCheck.manifest.scopes,
+      scopes: requestedScopes,
       active,
       status: 'ok',
       grantedScopes,
       uiHidden,
+      ...subStepFields,
     };
   }
 }

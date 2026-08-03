@@ -44,6 +44,41 @@ fileInput.addEventListener('change', async () => {
 });
 document.body.append(fileInput);
 
+/**
+ * Checked BEFORE the file dialog opens, not after — without "Allow User Scripts",
+ * `chrome.userScripts` is `undefined` (not a rejected promise) and `registerUploadedScript`'s
+ * `.register()` call throws synchronously (docs/user-scripts.md's "Enabling uploads"). Letting the
+ * user pick a file first just to land on that raw property-access message ("Cannot read
+ * properties of undefined (reading 'register')") is a worse experience than telling them up front,
+ * before they've done anything. Routed through the existing `action-result` view rather than
+ * `window.alert()` — the same reason `confirm-delete-view.ts` exists instead of
+ * `window.confirm()`: a native blocking dialog in an MV3 popup isn't reliable (can lose focus and
+ * auto-close the popup mid-dialog).
+ *
+ * Confirmed by real testing: enabling "Allow User Scripts" does NOT always make
+ * `chrome.userScripts` available to THIS already-running service worker right away — the
+ * background only checks once, at its own startup (`background/index.ts`), and Chrome doesn't
+ * reliably restart it just because the toggle changed. `showReloadExtension` offers the cheap fix
+ * (`chrome.runtime.reload()`, restarts just this extension) before telling anyone to close the
+ * whole browser, which is what actually worked when this was hit.
+ */
+function handleUploadClick(): void {
+  if (!userScriptsPermissionGranted) {
+    navigate({
+      kind: 'action-result',
+      title: 'Cannot upload a script yet',
+      content:
+        'Enable "Allow User Scripts" for Synapse in chrome://extensions (Details → Allow User Scripts) if you haven\'t. ' +
+        'Already enabled it and still seeing this? Click "Reload extension" below — Chrome doesn\'t always pick up the ' +
+        'change for an extension that was already running. If that still doesn\'t help, fully close and reopen the browser.',
+      isError: true,
+      showReloadExtension: true,
+    });
+    return;
+  }
+  fileInput.click();
+}
+
 async function load(): Promise<void> {
   const [nextEntries, granted] = await Promise.all([registry.list(), isUserScriptsPermissionGranted()]);
   entries = nextEntries;
@@ -64,7 +99,7 @@ const handlers: RouterHandlers = {
   onToggle: handleToggle,
   onToggleUi: handleToggleUi,
   onGrant: handleGrant,
-  onUpload: () => fileInput.click(),
+  onUpload: handleUploadClick,
   onNewScript: () => openStudio(),
   onRefresh: handleRefresh,
   onOpenModule: handleOpenModule,
@@ -78,6 +113,7 @@ const handlers: RouterHandlers = {
   onDelete: (entry) => navigate({ kind: 'confirm-delete', moduleId: entry.id, label: entry.label ?? entry.id }),
   onRenameSave: handleRenameSave,
   onDeleteConfirm: handleDeleteConfirm,
+  onReloadExtension: () => chrome.runtime.reload(),
 };
 
 // Navigation Flow (docs/ROADMAP.md #2, extended by #2.5): a Collection schema opens the Dashboard

@@ -14,10 +14,14 @@ export interface ActionResultViewProps {
   title: string;
   content: string;
   isError: boolean;
+  /** See `router.ts`'s `View` doc comment — only ever set for the "just enabled Allow User
+   * Scripts, still blocked" message. */
+  showReloadExtension?: boolean;
 }
 
 export interface ActionResultViewCallbacks {
   onBack(): void;
+  onReloadExtension(): void;
 }
 
 export function renderActionResultView(
@@ -45,7 +49,9 @@ export function renderActionResultView(
       div(
         { class: 'form-actions' },
         button({ type: 'button', class: 'secondary', onclick: callbacks.onBack }, icon(ICONS.arrowLeft), ' Back'),
-        copyBtn,
+        props.showReloadExtension
+          ? button({ type: 'button', onclick: callbacks.onReloadExtension }, 'Reload extension')
+          : copyBtn,
       ),
     ),
   );

@@ -1,8 +1,8 @@
 # Icon inventory — emoji placeholders replaced with Lucide PNG icons
 
-Trạng thái: **popup/dashboard/side-panel (extension pages) đã xong** — icon nạp qua
+Trạng thái: **popup/dashboard/side-panel/Studio (extension pages) đã xong** — icon nạp qua
 [`ui/icon.ts`](../src/adapters/browser-extension/ui/icon.ts), một registry `import` tĩnh duy nhất
-từ `src/assets/icon/*.png` dùng chung cho cả ba. **Icon nổi/badge trên trang (network-sniffer,
+từ `src/assets/icon/*.png` dùng chung cho cả bốn. **Icon nổi/badge trên trang (network-sniffer,
 reader-mode) vẫn còn emoji** — xem phần cuối, đây là quyết định riêng chưa chốt vì nó đụng bề mặt
 công khai `synapseApi.ui.*`.
 
@@ -36,6 +36,15 @@ công khai `synapseApi.ui.*`.
 | Trước | Lucide dùng | Ở đâu | Ý nghĩa |
 |---|---|---|---|
 | ⓘ | `info` | hover hint cạnh field có `field.hint` | Giải thích thêm |
+
+## Studio (`ui/studio/main.ts`) — ✅ xong
+
+Không phải thay emoji (Studio chưa từng dùng emoji) — 2 icon mới thêm cùng đợt sidebar bước (docs/ROADMAP.md §12.3). `.syn-icon-img` tự viết riêng trong `studio.css` (invert không điều kiện, khác popup/dashboard/side-panel: Studio luôn dark, không theo `prefers-color-scheme`).
+
+| Trước | Lucide dùng | Ở đâu | Ý nghĩa |
+|---|---|---|---|
+| (text "Save") | `save` | `#save-btn` | Lưu script — icon-only, `title`/`aria-label="Save"` (đổi từ icon+text ban đầu theo phản hồi user) |
+| (không có) | `panel-right-open` / `panel-right-close` | `#toggle-steps-btn` | Đóng/mở sidebar bước — icon phản ánh trạng thái HIỆN TẠI (mở/đóng), cùng quy ước `eye`/`eye-off` ở popup, không phải hành động sẽ xảy ra |
 
 ## Side Panel (`ui/side-panel/main.ts`) — ✅ xong
 

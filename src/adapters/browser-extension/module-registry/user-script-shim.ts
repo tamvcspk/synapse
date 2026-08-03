@@ -435,36 +435,152 @@ delete globalThis.__synapseModule;
 `.trim();
 }
 
+/**
+ * Normalizes `__synapseModule` to "an ordered list of steps" (docs/ROADMAP.md §12.3), the same
+ * shape `createCompositeModule` gives a bundled Composite Module — a bare `run` becomes a single
+ * `'main'` step, so everything downstream (execution, reporting, the Studio sidebar) only ever
+ * deals with "a pipeline of N≥1 steps", never a special-cased single-script branch. Written as a
+ * plain function (not a class/module) for the same reason every other helper in this file is:
+ * this is JS text embedded in a template string, not TypeScript that gets compiled.
+ *
+ * Cannot validate that `run`/each step's `run` is *correct*, only that it's a function — the same
+ * limitation `manifest-validator.ts`'s doc comment notes for scopes: function values don't survive
+ * `chrome.runtime` messaging, so this check has to happen here, client-side, not in the background.
+ */
+function normalizerSource(): string {
+  return `
+function normalizeManifestSteps(m) {
+  if (!m) return { valid: false, reason: 'globalThis.__synapseModule was not assigned' };
+  var hasRunFn = typeof m.run === 'function';
+  var hasSteps = Array.isArray(m.steps);
+  if (hasRunFn && hasSteps) {
+    return { valid: false, reason: 'globalThis.__synapseModule must declare either run or steps, not both' };
+  }
+  if (hasRunFn) {
+    return { valid: true, steps: [{ id: 'main', label: m.label, run: m.run }] };
+  }
+  if (!hasSteps) {
+    return { valid: false, reason: 'globalThis.__synapseModule.run is not a function' };
+  }
+  if (m.steps.length === 0) {
+    return { valid: false, reason: 'globalThis.__synapseModule.steps must not be empty' };
+  }
+  var seenIds = {};
+  for (var i = 0; i < m.steps.length; i++) {
+    var step = m.steps[i];
+    if (!step || typeof step.id !== 'string' || step.id.length === 0 || typeof step.run !== 'function') {
+      return { valid: false, reason: 'each step needs a non-empty string id and a run function' };
+    }
+    if (Object.prototype.hasOwnProperty.call(seenIds, step.id)) {
+      return { valid: false, reason: 'duplicate step id "' + step.id + '"' };
+    }
+    seenIds[step.id] = true;
+  }
+  return { valid: true, steps: m.steps };
+}
+`.trim();
+}
+
 function trailer(): string {
   return `
 const manifest = globalThis.__synapseModule;
 delete globalThis.__synapseModule;
-const hasRun = !!(manifest && typeof manifest.run === 'function');
 
-chrome.runtime.sendMessage({
-  type: 'synapse:manifest-report',
-  moduleId: __SYNAPSE_MODULE_ID__,
-  id: manifest && manifest.id,
-  scopes: manifest && manifest.scopes,
-  hasRun: hasRun,
-});
+${normalizerSource()}
+
+const __synapseNormalized = normalizeManifestSteps(manifest);
+const hasRun = __synapseNormalized.valid;
+// exactOptionalPropertyTypes-friendly on the receiving TS side: omit rather than pass literal
+// undefined, same convention every other optional field in this shim already follows.
+const __synapseStepsReport = hasRun
+  ? __synapseNormalized.steps.map(function (s) { return s.label ? { id: s.id, label: s.label } : { id: s.id }; })
+  : undefined;
+
+function __synapseBaseReport() {
+  var report = {
+    type: 'synapse:manifest-report',
+    moduleId: __SYNAPSE_MODULE_ID__,
+    id: manifest && manifest.id,
+    scopes: manifest && manifest.scopes,
+    hasRun: hasRun,
+  };
+  if (__synapseStepsReport) report.steps = __synapseStepsReport;
+  return report;
+}
+
+chrome.runtime.sendMessage(
+  hasRun ? __synapseBaseReport() : Object.assign(__synapseBaseReport(), { runError: __synapseNormalized.reason }),
+);
 
 if (!hasRun) return;
 
 function reportRunError(err) {
-  chrome.runtime.sendMessage({
-    type: 'synapse:manifest-report',
-    moduleId: __SYNAPSE_MODULE_ID__,
-    id: manifest.id,
-    scopes: manifest.scopes,
-    hasRun: hasRun,
+  chrome.runtime.sendMessage(Object.assign(__synapseBaseReport(), {
     runError: err instanceof Error ? err.message : String(err),
-  });
+  }));
 }
 
-Promise.resolve()
-  .then(function () { return manifest.run(undefined, { api: synapseApi }); })
-  .catch(reportRunError);
+function reportStepResults(stepResults, runError) {
+  var report = Object.assign(__synapseBaseReport(), { stepResults: stepResults });
+  if (runError) report.runError = runError;
+  chrome.runtime.sendMessage(report);
+}
+
+/**
+ * Runs every declared step in order, output feeding the next step's input — exactly
+ * \`createCompositeModule\`'s own \`run()\` (docs/ROADMAP.md #3/§12.3): no rollback, a step that
+ * throws does not stop the chain and does not undo \`value\`, it just carries the PREVIOUS value
+ * forward unchanged while the failure is recorded in \`results\`. Also mirrors it in reading the
+ * bypass map first — \`createCompositeModule\` gets \`RegistryEntry.subState\` straight from
+ * storage since a bundled Module runs in the extension's own process; this code runs inside a
+ * page's USER_SCRIPT world with no direct \`chrome.storage\` access, so it asks the background for
+ * the same map over one small round trip instead (\`synapse:sub-state-query\`).
+ *
+ * Unlike a bundled Composite Module (whose \`onSubFailure\` only \`console.error\`s, docs/ROADMAP.md
+ * §12.3's "Phạm vi CHỈ áp dụng cho script upload"), a failing step's message is ALSO surfaced as
+ * this report's top-level \`runError\` — the same "script shows invalid with a reason" visibility a
+ * plain single-\`run\` script already had before steps existed, so declaring \`steps\` never makes a
+ * crashing script LESS visible in the popup than a crashing plain \`run\` was.
+ */
+function runPipeline(input) {
+  return chrome.runtime.sendMessage({ type: 'synapse:sub-state-query', moduleId: __SYNAPSE_MODULE_ID__ })
+    .then(function (response) {
+      var subState = (response && response.subState) || {};
+      var value = input;
+      var results = [];
+      var chain = Promise.resolve();
+      __synapseNormalized.steps.forEach(function (step) {
+        chain = chain.then(function () {
+          if (subState[step.id] === false) {
+            results.push({ id: step.id, ok: true, durationMs: 0, skipped: true });
+            return;
+          }
+          var startedAt = Date.now();
+          return Promise.resolve()
+            .then(function () { return step.run(value, { api: synapseApi }); })
+            .then(function (out) {
+              value = out;
+              results.push({ id: step.id, ok: true, durationMs: Date.now() - startedAt });
+            })
+            .catch(function (err) {
+              results.push({
+                id: step.id,
+                ok: false,
+                durationMs: Date.now() - startedAt,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+        });
+      });
+      return chain.then(function () {
+        var firstFailure = results.filter(function (r) { return r.ok === false; })[0];
+        reportStepResults(results, firstFailure ? firstFailure.error : undefined);
+        return value;
+      });
+    });
+}
+
+runPipeline(undefined).catch(reportRunError);
 
 // UNVERIFIED, and suspected dead: this is the "call an uploaded module's run() with an input"
 // dispatcher, and nothing in the extension sends to it today. Chrome routes user-script→extension
@@ -474,8 +590,7 @@ Promise.resolve()
 // ever added, verify end-to-end on real Chrome FIRST (docs/ROADMAP.md Open Points).
 chrome.runtime.onMessage.addListener(function (message, _sender, sendResponse) {
   if (!message || message.moduleId !== __SYNAPSE_MODULE_ID__ || message.type) return;
-  Promise.resolve()
-    .then(function () { return manifest.run(message.input, { api: synapseApi }); })
+  runPipeline(message.input)
     .then(sendResponse)
     .catch(function (err) {
       reportRunError(err);
