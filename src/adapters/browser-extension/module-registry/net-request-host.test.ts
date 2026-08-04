@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SecretRecord } from '../../../shared/secrets';
 import { performNetRequest } from './net-request-host';
 
 /**
@@ -106,5 +107,139 @@ describe('performNetRequest', () => {
 
     const result = await performNetRequest({ url: 'https://api.example.com/x', timeoutMs: 999_999_999 });
     expect(result.body).toBe('ok');
+  });
+});
+
+/**
+ * docs/ROADMAP.md §11.6 — the `secrets.use` SCOPE gate (may this script reference a secret at all)
+ * is checked one layer up, in rpc-handler.ts, NOT here (see this file's own header comment). These
+ * tests only cover what performNetRequest itself does once a call has already cleared that gate: a
+ * secret's own `allowedHost` binding, resolving `{secretRef}` into the actual fetch, and never
+ * leaking the resolved value back out. `secretLookup` is injected (default: the real
+ * chrome.storage-backed lookup) so none of this touches chrome.storage.local, same DI pattern
+ * net-mock-host.ts's `MockRuleStore` uses for the same reason.
+ */
+describe('performNetRequest — secretRef headers (docs/ROADMAP.md §11.6)', () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const secret: SecretRecord = {
+    id: 's1',
+    name: 'my-openai-key',
+    value: 'sk-secret-value',
+    allowedHost: 'https://api.openai.com/*',
+    createdAt: 0,
+    updatedAt: 0,
+  };
+  const lookup = (name: string): Promise<SecretRecord | undefined> => Promise.resolve(name === secret.name ? secret : undefined);
+
+  it('substitutes a plain {secretRef} header with the resolved value', async () => {
+    const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) => new Response('ok'));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    await performNetRequest(
+      { url: 'https://api.openai.com/v1/models', headers: { Authorization: { secretRef: 'my-openai-key' } } },
+      lookup,
+    );
+
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    expect((init.headers as Record<string, string>).Authorization).toBe('sk-secret-value');
+  });
+
+  it('substitutes into a format template ("Bearer {}")', async () => {
+    const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) => new Response('ok'));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    await performNetRequest(
+      {
+        url: 'https://api.openai.com/v1/models',
+        headers: { Authorization: { secretRef: 'my-openai-key', format: 'Bearer {}' } },
+      },
+      lookup,
+    );
+
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer sk-secret-value');
+  });
+
+  it('leaves plain string headers untouched alongside a resolved secretRef header', async () => {
+    const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) => new Response('ok'));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    await performNetRequest(
+      {
+        url: 'https://api.openai.com/v1/models',
+        headers: { Authorization: { secretRef: 'my-openai-key' }, 'x-plain': 'value' },
+      },
+      lookup,
+    );
+
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    expect((init.headers as Record<string, string>)['x-plain']).toBe('value');
+  });
+
+  it('rejects, before ever calling fetch, when the referenced secret does not exist', async () => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    await expect(
+      performNetRequest({ url: 'https://api.openai.com/v1/models', headers: { Authorization: { secretRef: 'nope' } } }, lookup),
+    ).rejects.toThrow(/secret "nope" does not exist/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects, before ever calling fetch, when the request url falls outside the secret\'s own allowedHost — independent of any scope match', async () => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    await expect(
+      performNetRequest(
+        { url: 'https://evil.example/steal', headers: { Authorization: { secretRef: 'my-openai-key' } } },
+        lookup,
+      ),
+    ).rejects.toThrow(/is bound to "https:\/\/api\.openai\.com\/\*"/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a format with no {} placeholder rather than silently dropping the secret', async () => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    await expect(
+      performNetRequest(
+        { url: 'https://api.openai.com/v1/models', headers: { Authorization: { secretRef: 'my-openai-key', format: 'Bearer TOKEN' } } },
+        lookup,
+      ),
+    ).rejects.toThrow(/format must contain "\{\}"/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('never leaks the resolved secret value into the thrown error for a downstream failure', async () => {
+    globalThis.fetch = vi.fn(async () => new Response('unauthorized', { status: 401 })) as unknown as typeof fetch;
+
+    const result = await performNetRequest(
+      { url: 'https://api.openai.com/v1/models', headers: { Authorization: { secretRef: 'my-openai-key' } } },
+      lookup,
+    );
+
+    // A non-2xx status resolves normally (matching fetch() itself) — the point of this test is that
+    // nothing anywhere in the returned value contains the raw secret.
+    expect(JSON.stringify(result)).not.toContain('sk-secret-value');
+  });
+
+  it('rejects a malformed header value that is neither a string nor {secretRef}', async () => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    await expect(
+      performNetRequest(
+        { url: 'https://api.example.com/x', headers: { Authorization: 42 as unknown as string } },
+        lookup,
+      ),
+    ).rejects.toThrow(/must be a string or \{ secretRef \}/);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

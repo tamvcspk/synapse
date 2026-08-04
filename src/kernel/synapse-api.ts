@@ -34,7 +34,7 @@
  * deliberately absent and can never become a scope: `bus.emit(moduleId, …)` reaches every bundled
  * Module's own listener, which is a god-capability no consent prompt can describe honestly.
  */
-export type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch' | 'ui.render' | 'net.request' | 'files.save' | 'net.mock' | 'media' | 'page.eval';
+export type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch' | 'ui.render' | 'net.request' | 'files.save' | 'net.mock' | 'media' | 'page.eval' | 'secrets.use';
 
 /**
  * One entry in a script's `scopes` declaration. `match` is the resource dimension: a grant is
@@ -87,6 +87,19 @@ export interface SynapseUiApi {
   clear(): void;
 }
 
+/** A `net.request` header value naming a secret by reference instead of carrying it directly
+ * (docs/ROADMAP.md §11.6's Secret Service) — the script declares which secret it wants and how to
+ * shape the header around it, and never receives the resolved value in any form. `format` lets the
+ * header be more than the bare secret (`'Bearer {}'`); `{}` is replaced with the resolved value at
+ * the network boundary. Defaults to `'{}'` (the raw value). Requires the `secrets.use` scope in
+ * addition to `net.request` itself — and even then, the referenced secret's own `allowedHost`
+ * (bound once, at creation, in the Dashboard) must independently match `url`, regardless of what
+ * `net.request`'s own `match` grant allows. */
+export interface SynapseNetSecretHeaderValue {
+  secretRef: string;
+  format?: string;
+}
+
 /** One outbound request for `net.request`. `match` in the granted scope is checked against `url`
  * before this ever reaches the network — a URL that doesn't fall under one of the script's granted
  * patterns fails at the call site, same as any other denied scope. */
@@ -94,7 +107,9 @@ export interface SynapseNetRequestOptions {
   url: string;
   /** Defaults to `'GET'`. */
   method?: string;
-  headers?: Record<string, string>;
+  /** A value may be a plain string, or `{ secretRef, format? }` to have the platform inject a named
+   * secret (`secrets.use`) without this script ever seeing it. */
+  headers?: Record<string, string | SynapseNetSecretHeaderValue>;
   /** Must survive structured clone: a string, never a live body stream. Binary payloads go through
    * `bodyEncoding: 'base64'`, the same convention `shared/http-mock.ts`'s `bodyEncoding` uses. */
   body?: string;

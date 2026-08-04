@@ -151,7 +151,12 @@ export function renderItemFormView(
         // written from a stale <input> the user never got to see, let alone edit.
         for (const field of visibleFields()) {
           const fieldInput = fieldEntries.get(field.key)!.fieldInput;
-          item[field.key] = readFieldValue(field, fieldInput);
+          const value = readFieldValue(field, fieldInput);
+          // A 'secret' field is never prefilled with its real value (see renderField's 'secret'
+          // branch), so a blank submit on an EDIT means "leave it alone", not "clear it" — skipping
+          // the assignment here leaves whatever `existing` already spread onto `item` above.
+          if (field.type === 'secret' && value === '' && existing) continue;
+          item[field.key] = value;
         }
 
         errorBanner.textContent = '';
@@ -272,6 +277,23 @@ function renderField(
       { required: Boolean(field.required) },
       ...(field.options ?? []).map((opt) => option({ value: opt, selected: existingValue === opt }, opt)),
     );
+    const fieldLabel = label(field.label, ...labelSuffix, fieldInput);
+    return { fieldLabel, fieldInput };
+  }
+
+  if (field.type === 'secret') {
+    // Deliberately never prefilled with `existingValue` — unlike every other field type, putting a
+    // secret's real value into the DOM just to let the user re-save it unchanged is a needless echo
+    // of it (docs/ROADMAP.md §11.6). `isEditingExisting` (not `field.required`) decides whether a
+    // blank submit is acceptable: required-but-blank is fine here on an edit (it means "keep the
+    // current value", see the Save handler above), never on a create.
+    const isEditingExisting = existingValue !== undefined;
+    const fieldInput = input({
+      type: 'password',
+      autocomplete: 'off',
+      required: Boolean(field.required) && !isEditingExisting,
+      placeholder: isEditingExisting ? 'Leave blank to keep the current value' : '',
+    });
     const fieldLabel = label(field.label, ...labelSuffix, fieldInput);
     return { fieldLabel, fieldInput };
   }

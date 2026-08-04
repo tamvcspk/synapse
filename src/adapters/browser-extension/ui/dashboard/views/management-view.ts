@@ -47,6 +47,11 @@ export function renderManagementView(
   // one) names a companion field holding the file's actual name, which is what a reader wants to
   // see here instead.
   function cellText(field: (typeof columns)[number], item: Record<string, unknown>): string {
+    // Always masked, regardless of the underlying value (or even its length) — this table is the
+    // one place a secret's value must never render as text, no matter what listCollection() itself
+    // returned (docs/ROADMAP.md §11.6). The edit form (item-form-view.ts) handles this field
+    // separately and never prefills the real value into the DOM either.
+    if (field.type === 'secret') return item[field.key] ? '••••••••' : '';
     if (field.type === 'file' && field.fileNameKey) {
       const fileName = item[field.fileNameKey];
       if (typeof fileName === 'string' && fileName) return fileName;

@@ -183,6 +183,50 @@ __synapseModule = {
   `body` — `body` must be a string, since it crosses the same structured-clone boundary as every
   other argument here.
 
+### Using a secret without ever seeing it
+
+Some APIs need a key (`Authorization: Bearer sk-...`) that you don't want sitting in your script's
+source — anyone you share the script with would get the key too. `secretRef` solves this: you
+reference a secret **by name**, and the platform substitutes the real value into the header at the
+network boundary. Your script never receives it, in any form.
+
+```javascript
+__synapseModule = {
+  id: 'ask-openai',
+  scopes: [
+    { scope: 'net.request', match: ['https://api.openai.com/*'] },
+    'secrets.use',
+  ],
+  async run(input, ctx) {
+    const res = await ctx.api.net.request({
+      url: 'https://api.openai.com/v1/models',
+      headers: { Authorization: { secretRef: 'my-openai-key', format: 'Bearer {}' } },
+    });
+    console.log(res.status);
+  },
+};
+```
+
+- **Create the secret first, in the Dashboard's Secrets panel** (popup → gear icon on "Secrets" →
+  Dashboard) — never from a script. Give it the name you'll reference (`my-openai-key`), the value,
+  and the one host it's allowed to reach (a match pattern, e.g. `https://api.openai.com/*`).
+- **`secrets.use` is required in addition to `net.request` itself** — declaring only one of the two
+  scopes gets you a clear rejection, not a partial success.
+- **Three checks, all independent, all have to pass**: your `net.request` grant's own `match` must
+  cover `url` (same as any other `net.request` call); your script must have `secrets.use` granted at
+  all; and the secret's own `allowedHost` (set once, in the Dashboard, never by a script) must also
+  cover `url`. A secret bound to `api.openai.com` cannot be pointed at a different host by widening
+  your `net.request` grant — the two checks are unrelated.
+- **`format` defaults to `'{}'`** (the bare value) — use it to wrap the secret, e.g.
+  `'Bearer {}'`. It must contain `{}` somewhere, or the call is rejected rather than silently
+  sending a header with no secret in it.
+- **There is no `secrets.read` scope, and no way to list secrets.** A script can only reference a
+  name it already knows — reading one back, or discovering what secrets exist, is not something any
+  scope can grant. If you need the value for something other than a `net.request` header, this API
+  isn't the tool for it.
+- **Sharing your script is safe by construction**: the script only ever contains the *name*
+  `my-openai-key`, never the value. Whoever runs it creates their own secret under that name.
+
 ### Saving a file to disk
 
 `files.save` writes to your Downloads folder — the `GM_download` delta, since there's no page API

@@ -235,6 +235,28 @@ async function handleRpc(req: RpcRequest, trustedScopes: TrustedScopeMap, sender
       );
     }
 
+    // net.request's `secrets.use` gate (docs/ROADMAP.md §11.6) can't be expressed through the
+    // generic one-method-one-scope dispatch above: it only applies when THIS call's own headers
+    // reference a secret by name, an argument-shape condition scopeForApiMethod/grantsAllow have no
+    // way to see (they only know a method's OWN fixed scope, resolved before any argument is
+    // inspected). Checked here instead, at the same trust boundary as every other scope check in
+    // this function — the actual per-secret host-binding check (independent of any grant, since a
+    // secret is bound to a host once at creation, not per script) happens one layer down, in
+    // net-request-host.ts, uniformly for every transport (see that file's own doc comment).
+    if (req.namespace === 'net' && req.method === 'request' && !granted.some((g) => g.scope === 'secrets.use')) {
+      const requestOptions = req.args[0] as { headers?: Record<string, unknown> } | undefined;
+      const referencesSecret = requestOptions?.headers
+        ? Object.values(requestOptions.headers).some(
+            (v) => typeof v === 'object' && v !== null && typeof (v as { secretRef?: unknown }).secretRef === 'string',
+          )
+        : false;
+      if (referencesSecret) {
+        return fail(
+          `Scope "secrets.use" is not granted for module "${req.moduleId}" — required to reference a secret by name in net.request headers`,
+        );
+      }
+    }
+
     // tabId likewise comes only from `sender`, never from `req.args` — it's what lets
     // synapse-api-host.ts's page.eval implementation know WHICH tab's MAIN world to run in.
     const apiContext = sender.tab?.id !== undefined ? { tabId: sender.tab.id } : {};

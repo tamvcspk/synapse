@@ -6,7 +6,7 @@
  * to decide "open Management View" vs "trigger run() directly" — not a boolean flag.
  */
 
-export type UIFieldType = 'string' | 'number' | 'boolean' | 'enum' | 'file';
+export type UIFieldType = 'string' | 'number' | 'boolean' | 'enum' | 'file' | 'secret';
 
 export interface UIShowWhenCondition {
   field: string;
@@ -21,6 +21,12 @@ export interface UIFieldDef {
    * and the Management View table header. Rendered by item-form-view.ts/management-view.ts; not
    * meaningful on its own without `label`. */
   hint?: string;
+  /** `'secret'` (docs/ROADMAP.md §11.6, first use: Secrets management) renders
+   * `<input type="password">`, always masked in the Management View table regardless of the
+   * underlying value, and left BLANK in the edit form rather than prefilled —
+   * item-form-view.ts never puts the real value into the DOM on an edit open. A blank submit on
+   * an edit means "keep the current value", not "clear it"; only a create (no existing item)
+   * requires a non-blank value. */
   type: UIFieldType;
   required?: boolean;
   /** Only meaningful when type === 'enum'. */

@@ -144,6 +144,24 @@ export const SCOPE_CATALOG: Record<SynapseScope, ScopeDefinition> = {
       'which page it is calling from.',
     requiresMatch: true,
   },
+  'secrets.use': {
+    scope: 'secrets.use',
+    enforcement: 'enforced',
+    consentLine: 'Use named secrets it declares, inside network requests it makes',
+    description:
+      'Lets `net.request` substitute a header value from a secret this script references by name ' +
+      '(`secretRef`) — the script never receives the secret itself, only the ability to have the ' +
+      'platform inject it at the network boundary (docs/ROADMAP.md §11.6). No scope named ' +
+      '`secrets.read` exists, and none ever will: reading a secret back out is not a capability any ' +
+      'script can be granted, and there is no way to list secrets either — a script must already ' +
+      'know the exact name it wants. Each secret is independently bound to one host at creation ' +
+      'time (Dashboard-only, never scriptable) — this scope only gates whether the script may ' +
+      'reference a secret AT ALL; which host it may reach with it is that secret\'s own binding, ' +
+      'checked regardless of this grant. No `match` here: the resource dimension already belongs ' +
+      "to `net.request`'s own grant and to the secret's binding — a third, independent match list " +
+      'on this scope would just be a second place for the same fact to drift out of sync.',
+    requiresMatch: false,
+  },
 };
 
 export const ALL_SCOPES: SynapseScope[] = Object.keys(SCOPE_CATALOG) as SynapseScope[];
@@ -291,7 +309,8 @@ export const API_METHODS: ApiMethodDefinition[] = [
     signature: 'request(options: SynapseNetRequestOptions): Promise<SynapseNetResponse>',
     description:
       "Fetch a URL under the extension's identity, not the page's — bypasses the page's CORS " +
-      'policy. `options.url` must fall under one of this call\'s granted `match` patterns.',
+      'policy. `options.url` must fall under one of this call\'s granted `match` patterns. A ' +
+      'header value may reference a named secret instead of a plain string — see `secrets.use`.',
     resourceUrl: (args) => {
       const options = args[0] as { url?: unknown } | undefined;
       return typeof options?.url === 'string' ? options.url : undefined;

@@ -51,6 +51,18 @@
  *   platform's own record of the call, so a script cannot widen its own reach by lying about
  *   which page it is calling from.
  *   Requires a `match` list: `{ scope, match: [...] }`.
+ * - `secrets.use` — Use named secrets it declares, inside network requests it makes.
+ *   Lets `net.request` substitute a header value from a secret this script references by name
+ *   (`secretRef`) — the script never receives the secret itself, only the ability to have the
+ *   platform inject it at the network boundary (docs/ROADMAP.md §11.6). No scope named
+ *   `secrets.read` exists, and none ever will: reading a secret back out is not a capability any
+ *   script can be granted, and there is no way to list secrets either — a script must already
+ *   know the exact name it wants. Each secret is independently bound to one host at creation
+ *   time (Dashboard-only, never scriptable) — this scope only gates whether the script may
+ *   reference a secret AT ALL; which host it may reach with it is that secret's own binding,
+ *   checked regardless of this grant. No `match` here: the resource dimension already belongs to
+ *   `net.request`'s own grant and to the secret's binding — a third, independent match list on
+ *   this scope would just be a second place for the same fact to drift out of sync.
  *
  * ### Disclosed — the script can do this anyway; declaring it is transparency, not a gate
  *
@@ -95,7 +107,8 @@
  *   Remove everything this script has drawn.
  * - `synapseApi.net.request(options: SynapseNetRequestOptions): Promise<SynapseNetResponse>` — requires `net.request`.
  *   Fetch a URL under the extension's identity, not the page's — bypasses the page's CORS
- *   policy. `options.url` must fall under one of this call's granted `match` patterns.
+ *   policy. `options.url` must fall under one of this call's granted `match` patterns. A header
+ *   value may reference a named secret instead of a plain string — see `secrets.use`.
  * - `synapseApi.files.save(options: SynapseFilesSaveOptions): Promise<SynapseFilesSaveResult>` — requires `files.save`.
  *   Write `options.content` to `options.filename` inside the Downloads folder.
  * - `synapseApi.net.mock.add(options: SynapseMockRuleOptions): Promise<{ id: string }>` — requires `net.mock`.
@@ -158,7 +171,7 @@
  * deliberately absent and can never become a scope: `bus.emit(moduleId, …)` reaches every bundled
  * Module's own listener, which is a god-capability no consent prompt can describe honestly.
  */
-type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch' | 'ui.render' | 'net.request' | 'files.save' | 'net.mock' | 'media' | 'page.eval';
+type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch' | 'ui.render' | 'net.request' | 'files.save' | 'net.mock' | 'media' | 'page.eval' | 'secrets.use';
 
 /**
  * One entry in a script's `scopes` declaration. `match` is the resource dimension: a grant is
@@ -211,6 +224,19 @@ interface SynapseUiApi {
   clear(): void;
 }
 
+/** A `net.request` header value naming a secret by reference instead of carrying it directly
+ * (docs/ROADMAP.md §11.6's Secret Service) — the script declares which secret it wants and how to
+ * shape the header around it, and never receives the resolved value in any form. `format` lets the
+ * header be more than the bare secret (`'Bearer {}'`); `{}` is replaced with the resolved value at
+ * the network boundary. Defaults to `'{}'` (the raw value). Requires the `secrets.use` scope in
+ * addition to `net.request` itself — and even then, the referenced secret's own `allowedHost`
+ * (bound once, at creation, in the Dashboard) must independently match `url`, regardless of what
+ * `net.request`'s own `match` grant allows. */
+interface SynapseNetSecretHeaderValue {
+  secretRef: string;
+  format?: string;
+}
+
 /** One outbound request for `net.request`. `match` in the granted scope is checked against `url`
  * before this ever reaches the network — a URL that doesn't fall under one of the script's granted
  * patterns fails at the call site, same as any other denied scope. */
@@ -218,7 +244,9 @@ interface SynapseNetRequestOptions {
   url: string;
   /** Defaults to `'GET'`. */
   method?: string;
-  headers?: Record<string, string>;
+  /** A value may be a plain string, or `{ secretRef, format? }` to have the platform inject a named
+   * secret (`secrets.use`) without this script ever seeing it. */
+  headers?: Record<string, string | SynapseNetSecretHeaderValue>;
   /** Must survive structured clone: a string, never a live body stream. Binary payloads go through
    * `bodyEncoding: 'base64'`, the same convention `shared/http-mock.ts`'s `bodyEncoding` uses. */
   body?: string;
