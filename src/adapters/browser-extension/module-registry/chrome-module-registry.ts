@@ -1,5 +1,5 @@
 import { validateModuleManifestShape } from '../../../kernel/manifest-validator';
-import type { ModuleRegistryService, RegistryEntry, UploadResult } from '../../../kernel/module-registry';
+import type { DryRunOutcome, ModuleRegistryService, RegistryEntry, UploadResult } from '../../../kernel/module-registry';
 import type { SynapseScopeGrant } from '../../../kernel/synapse-api';
 import { hashScriptSource } from '../../../shared/source-hash';
 import { resolveScriptLabel } from '../../../shared/resolve-script-label';
@@ -7,6 +7,7 @@ import { parseScopesFromSource } from '../../../shared/parse-scopes-from-source'
 import { BUNDLED_MODULES } from './bundled-modules';
 import { BACKGROUND_MODULES } from './background-modules';
 import { buildShimSource } from './user-script-shim';
+import { buildDryRunShimSource } from './dry-run-shim';
 // `&iife`, not `&module` — same reason as network-sniffer.background.ts's MAIN-world payload
 // import: chrome.userScripts, like chrome.scripting, injects `js` entries as classic scripts, and a
 // raw ES module chunk throws a SyntaxError before a single line runs.
@@ -36,6 +37,37 @@ import {
   type StoredGrantRecord,
   type StoredManifestReport,
 } from './storage';
+
+// `@types/chrome@0.0.287` (this project's pinned version) has no `execute()` at all on the
+// `userScripts` namespace, even though the real API has shipped since Chrome 133/135 (confirmed via
+// the Chrome for Developers reference while scoping docs/ROADMAP.md §12.5 — this project's own test
+// browser is on Chrome 150 per docs/LESSONS.md, well past that). Same fix shape as
+// `opfs-store.ts`'s `FileSystemDirectoryHandle` augmentation: teach the type checker what the
+// runtime already has, reusing `ScriptSource`/`ExecutionWorld` already declared in this same
+// namespace rather than redeclaring them.
+declare global {
+  namespace chrome.userScripts {
+    interface InjectionTarget {
+      tabId: number;
+      frameIds?: number[];
+      documentIds?: string[];
+      allFrames?: boolean;
+    }
+    interface UserScriptInjection {
+      target: InjectionTarget;
+      js: ScriptSource[];
+      world?: ExecutionWorld;
+      injectImmediately?: boolean;
+    }
+    interface InjectionResult {
+      documentId?: string;
+      frameId?: number;
+      result?: unknown;
+      error?: unknown;
+    }
+    function execute(injection: UserScriptInjection): Promise<InjectionResult[]>;
+  }
+}
 
 /**
  * Best-effort nudge so a bus-needing Module's `run()` re-checks `isModuleActive` right away instead
@@ -234,6 +266,38 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
       deleteSubState(id),
       clearScriptStorage(id),
     ]);
+  }
+
+  /** See the Port doc comment (kernel/module-registry.ts) for the full rationale. `libPayloadPath`
+   * is listed first for the exact same reason `registerUploadedScript` lists it first: by the time
+   * the dry-run shim's own header runs, `globalThis.__synapseLib` is already set for it to capture. */
+  async dryRunScript(source: string, tabId: number, moduleId?: string): Promise<DryRunOutcome> {
+    const runId = crypto.randomUUID();
+    if (!chrome.userScripts) {
+      return {
+        ok: false,
+        runId,
+        error: 'chrome.userScripts is unavailable — enable "Allow User Scripts" for this extension in chrome://extensions, then reload the extension.',
+      };
+    }
+    // No real uploaded script will ever have this id (uploadModule only mints crypto.randomUUID()
+    // with no prefix) — an unsaved script's dry run therefore resolves to "unknown module" in
+    // rpc-handler.ts's resolveGrantedScopes, i.e. every ctx.api.* call is denied, exactly
+    // docs/ROADMAP.md §12.5's chosen answer for a script that was never Saved.
+    const injectedModuleId = moduleId ?? `dry-run:${runId}`;
+    const shimmed = buildDryRunShimSource(injectedModuleId, source, runId);
+    try {
+      const results = await chrome.userScripts.execute({
+        target: { tabId },
+        js: [{ file: libPayloadPath }, { code: shimmed }],
+        world: 'USER_SCRIPT',
+      });
+      const failed = results.find((r) => r.error !== undefined);
+      if (failed) return { ok: false, runId, error: String(failed.error) };
+      return { ok: true, runId };
+    } catch (err) {
+      return { ok: false, runId, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   private async buildEntries(): Promise<RegistryEntry[]> {

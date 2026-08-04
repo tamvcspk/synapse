@@ -1,4 +1,12 @@
-import type { ManifestReport, RpcRequest, RpcResponse, SubStateQuery, SubStateQueryResponse } from '../../../kernel/rpc';
+import type {
+  DryRunLogMessage,
+  DryRunResultMessage,
+  ManifestReport,
+  RpcRequest,
+  RpcResponse,
+  SubStateQuery,
+  SubStateQueryResponse,
+} from '../../../kernel/rpc';
 import { SCOPE_CATALOG, grantsAllow, isMatchExemptMethod, resourceUrlForCall, scopeForApiMethod } from '../../../kernel/scopes';
 import type { SynapseApi, SynapseScopeGrant } from '../../../kernel/synapse-api';
 import { hashScriptSource } from '../../../shared/source-hash';
@@ -30,6 +38,26 @@ export function registerRpcHandler(trustedScopes: TrustedScopeMap = {}): void {
   const listener = (msg: unknown, sender: chrome.runtime.MessageSender, sendResponse: (r?: unknown) => void) => {
     if (isManifestReport(msg)) {
       void handleManifestReport(msg);
+      return;
+    }
+    if (isDryRunLog(msg) || isDryRunResult(msg)) {
+      // Fire-and-forget re-broadcast, NOT persisted anywhere (docs/ROADMAP.md §12.5) — a USER_SCRIPT
+      // world's chrome.runtime.sendMessage only reaches onUserScriptMessage, never an extension
+      // page's own onMessage, so Studio's console panel can't hear the injected dry-run code
+      // directly. Re-sending the exact same message via the background's own chrome.runtime.sendMessage
+      // is the same relay shape action-progress.ts documents for a content script broadcasting to
+      // every open extension page.
+      //
+      // `sender.tab` gates the re-send, deliberately: this same `listener` function is ALSO
+      // registered on `onMessage` (see below), and whether a context's own `chrome.runtime.sendMessage`
+      // loops back into its OWN `onMessage` listeners is not something this codebase has verified
+      // either way. The original message is always tab-sourced (injected into a real page via
+      // `chrome.userScripts.execute`); a hypothetical self-received echo of THIS relay would come
+      // from the background's own context instead, which has no `sender.tab` — so gating on its
+      // presence relays exactly once no matter which way that unverified behavior actually goes,
+      // the same "don't trust it either way, code the guard" posture background/index.ts's own
+      // `DownloadEngineRelayedCommand` double-delivery bugfix comment describes.
+      if (sender.tab) chrome.runtime.sendMessage(msg).catch(() => {});
       return;
     }
     if (isSubStateQuery(msg)) {
@@ -88,6 +116,14 @@ function isRpcRequest(msg: unknown): msg is RpcRequest {
 
 function isManifestReport(msg: unknown): msg is ManifestReport {
   return typeof msg === 'object' && msg !== null && (msg as { type?: unknown }).type === 'synapse:manifest-report';
+}
+
+function isDryRunLog(msg: unknown): msg is DryRunLogMessage {
+  return typeof msg === 'object' && msg !== null && (msg as { type?: unknown }).type === 'synapse:dry-run-log';
+}
+
+function isDryRunResult(msg: unknown): msg is DryRunResultMessage {
+  return typeof msg === 'object' && msg !== null && (msg as { type?: unknown }).type === 'synapse:dry-run-result';
 }
 
 async function handleManifestReport(report: ManifestReport): Promise<void> {

@@ -11,6 +11,7 @@ import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker';
 import TsWorker from 'monaco-editor/languages/features/typescript/ts.worker.js?worker';
 import synapseUserscriptDts from '../../../../../docs/types/synapse-userscript.d.ts?raw';
 import type { RegistryEntry } from '../../../../kernel/module-registry';
+import type { DryRunLogMessage, DryRunResultMessage } from '../../../../kernel/rpc';
 import { ChromeModuleRegistryService } from '../../module-registry/chrome-module-registry';
 import { icon, ICONS } from '../icon';
 import { NEW_SCRIPT_TEMPLATE } from './studio-template';
@@ -63,13 +64,24 @@ let sidebarOpen = true;
 const titleEl = document.getElementById('title')!;
 const messageEl = document.getElementById('message')!;
 const saveBtn = document.getElementById('save-btn') as HTMLButtonElement;
+const runBtn = document.getElementById('run-btn') as HTMLButtonElement;
 const toggleStepsBtn = document.getElementById('toggle-steps-btn') as HTMLButtonElement;
 const editorEl = document.getElementById('editor')!;
 const sidebarEl = document.getElementById('steps-sidebar')!;
+const consolePanelEl = document.getElementById('console-panel')!;
+const consoleLogEl = document.getElementById('console-log')!;
+const consoleClearBtn = document.getElementById('console-clear-btn') as HTMLButtonElement;
 
 saveBtn.replaceChildren(icon(ICONS.save));
 saveBtn.title = 'Save';
 saveBtn.setAttribute('aria-label', 'Save');
+runBtn.replaceChildren(icon(ICONS.play));
+runBtn.title = 'Run once on this tab';
+runBtn.setAttribute('aria-label', 'Run once on this tab');
+consoleClearBtn.replaceChildren(icon(ICONS.x));
+consoleClearBtn.title = 'Clear console';
+consoleClearBtn.setAttribute('aria-label', 'Clear console');
+consoleClearBtn.addEventListener('click', () => consoleLogEl.replaceChildren());
 toggleStepsBtn.addEventListener('click', () => {
   sidebarOpen = !sidebarOpen;
   renderStepsSidebar();
@@ -212,6 +224,101 @@ async function save(): Promise<void> {
 
   setMessage('Saved — takes effect on the next page load, not immediately.', 'success');
 }
+
+/**
+ * Dry Run / "Run once on this tab" (docs/ROADMAP.md §12.5) — injects the CURRENT editor content
+ * (whether or not it's been Saved) into whichever tab the user was last looking at, via
+ * `registry.dryRunScript`. Never touches `chrome.userScripts.register`'s persistent lifecycle: a
+ * bad run leaves nothing behind to clean up, and it never overwrites what the popup/steps sidebar
+ * show for the script's last CONFIRMED (saved-and-registered) run.
+ */
+
+let currentRunId: string | undefined;
+let dryRunListener: ((message: unknown) => void) | undefined;
+
+/**
+ * Studio itself is a foreground tab (opened via `chrome.tabs.create`, docs/ROADMAP.md §2.5's
+ * pattern) — the tab the user actually wants to test against is necessarily some OTHER tab, the one
+ * they were on before switching here. `chrome.tabs.getCurrent()` identifies Studio's own tab so it
+ * can be excluded; `lastAccessed` (no listener/state needed) picks whichever remaining tab was most
+ * recently focused. Restricted to http(s) — chrome://, chrome-extension://, and permission-less tabs
+ * either can't be injected into or would silently pick another extension page instead of a real one.
+ */
+async function pickDryRunTargetTab(): Promise<chrome.tabs.Tab | undefined> {
+  const self = await chrome.tabs.getCurrent();
+  const all = await chrome.tabs.query({});
+  const candidates = all.filter(
+    (t) => t.id !== undefined && t.id !== self?.id && !!t.url && /^https?:/.test(t.url),
+  );
+  candidates.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
+  return candidates[0];
+}
+
+function appendConsoleLine(level: 'log' | 'warn' | 'error', text: string): void {
+  consolePanelEl.classList.add('visible');
+  const line = document.createElement('div');
+  line.className = level === 'log' ? 'console-line' : `console-line ${level}`;
+  line.textContent = text;
+  consoleLogEl.append(line);
+  consoleLogEl.scrollTop = consoleLogEl.scrollHeight;
+}
+
+function isDryRunLog(message: unknown): message is DryRunLogMessage {
+  return !!message && typeof message === 'object' && (message as { type?: unknown }).type === 'synapse:dry-run-log';
+}
+
+function isDryRunResult(message: unknown): message is DryRunResultMessage {
+  return !!message && typeof message === 'object' && (message as { type?: unknown }).type === 'synapse:dry-run-result';
+}
+
+async function runOnce(): Promise<void> {
+  if (!model) return;
+
+  const targetTab = await pickDryRunTargetTab();
+  if (!targetTab?.id) {
+    setMessage('No other open tab to run against — open the page you want to test in another tab first.', 'error');
+    return;
+  }
+
+  runBtn.disabled = true;
+  appendConsoleLine('log', `— Running once on ${targetTab.url} —`);
+  setMessage(`Running once on ${targetTab.url}…`);
+
+  // Tagged by runId (not just "the latest run"): a slow previous run's late messages must not be
+  // rendered as if they belonged to this one — swapping the listener here, not filtering inside a
+  // single long-lived one, keeps that check in one place.
+  if (dryRunListener) chrome.runtime.onMessage.removeListener(dryRunListener);
+  const outcome = await registry.dryRunScript(model.getValue(), targetTab.id, moduleId);
+  currentRunId = outcome.runId;
+  dryRunListener = (message: unknown) => {
+    if (isDryRunLog(message) && message.runId === currentRunId) {
+      appendConsoleLine(message.level, message.text);
+    } else if (isDryRunResult(message) && message.runId === currentRunId) {
+      if (message.steps) {
+        for (const step of message.steps) {
+          if (step.skipped) appendConsoleLine('log', `${step.id}: skipped (bypassed)`);
+          else if (step.ok) appendConsoleLine('log', `${step.id}: ok (${step.durationMs}ms)`);
+          else appendConsoleLine('error', `${step.id}: ${step.error}`);
+        }
+      }
+      appendConsoleLine(message.ok ? 'log' : 'error', message.ok ? '— Run finished —' : `— Run failed: ${message.error} —`);
+    }
+  };
+  chrome.runtime.onMessage.addListener(dryRunListener);
+
+  runBtn.disabled = false;
+
+  if (!outcome.ok) {
+    // A rejection here means chrome.userScripts.execute() itself never accepted the injection (e.g.
+    // a top-level syntax error) — no synapse:dry-run-result will ever arrive for this runId.
+    appendConsoleLine('error', outcome.error ?? 'Run failed to start.');
+    setMessage('Run failed — see console panel.', 'error');
+    return;
+  }
+  setMessage('Running — output appears in the console panel below.', 'success');
+}
+
+runBtn.addEventListener('click', () => void runOnce());
 
 /**
  * Steps sidebar (docs/ROADMAP.md §12.3). Two sources, preferred in this order:

@@ -90,3 +90,34 @@ export interface SubStateQuery {
 export interface SubStateQueryResponse {
   subState: Record<string, boolean>;
 }
+
+/**
+ * Console output relayed from a Dry Run (docs/ROADMAP.md §12.5, "Run once on this tab") — sent by
+ * `dry-run-shim.ts`'s console shadow, one message per `console.log`/`warn`/`error` call the injected
+ * code makes. Routed through the background the same way `ManifestReport` is (a USER_SCRIPT world's
+ * `chrome.runtime.sendMessage` only reaches `onUserScriptMessage`, never an extension page's own
+ * `onMessage` directly) — `rpc-handler.ts` re-broadcasts it verbatim via `chrome.runtime.sendMessage`
+ * so Studio's own `onMessage` listener can pick it up. `runId` lets Studio ignore a stale message
+ * from a PREVIOUS run still in flight when a new one starts.
+ */
+export interface DryRunLogMessage {
+  type: 'synapse:dry-run-log';
+  runId: string;
+  level: 'log' | 'warn' | 'error';
+  text: string;
+}
+
+/**
+ * The pipeline's outcome for a Dry Run — the throwaway counterpart of `ManifestReport`, deliberately
+ * a SEPARATE message type rather than reusing it: a dry run's source may not even be saved yet, and
+ * even when it is (editing an already-uploaded script), its result must never be persisted or mistaken
+ * for the script's last CONFIRMED run (`chrome-module-registry.ts`'s `buildUploadedEntry` reads
+ * `ManifestReport` to build the Studio steps sidebar/popup status from real registered runs only).
+ */
+export interface DryRunResultMessage {
+  type: 'synapse:dry-run-result';
+  runId: string;
+  ok: boolean;
+  error?: string;
+  steps?: { id: string; ok: boolean; durationMs: number; error?: string; skipped?: boolean }[];
+}

@@ -195,3 +195,57 @@ button:disabled {
 .step-status.pending {
   color: #9a9a9a;
 }
+
+/* Dry Run console panel (docs/ROADMAP.md §12.5) — hidden until the first "Run once on this tab",
+   same on/off convention #steps-sidebar already uses (.visible toggles display). A fixed height
+   rather than flex:1, unlike #editor — the editor should keep the majority of vertical space even
+   with the panel open. */
+#console-panel {
+  display: none;
+  flex-direction: column;
+  height: 200px;
+  flex-shrink: 0;
+  border-top: 1px solid #333;
+}
+
+#console-panel.visible {
+  display: flex;
+}
+
+#console-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.3rem 0.75rem;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+#console-header h2 {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #9a9a9a;
+  margin: 0;
+}
+
+#console-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.4rem 0.75rem;
+  font-family: monospace;
+  font-size: 0.8rem;
+}
+
+.console-line {
+  white-space: pre-wrap;
+  margin: 0.15rem 0;
+}
+
+.console-line.warn {
+  color: #e0c069;
+}
+
+.console-line.error {
+  color: #f4a3a3;
+}

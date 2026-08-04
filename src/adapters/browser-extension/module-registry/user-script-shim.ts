@@ -269,7 +269,7 @@ function __synapseSubscribe(topic, handler) {
  * sync with `kernel/synapse-api.ts` (the interface) and `kernel/scopes.ts`'s `API_METHODS` (which
  * is what the background will actually accept) — a method here that isn't in the catalog is
  * rejected at the boundary, and one in the catalog but missing here is unreachable for scripts. */
-function header(moduleId: string): string {
+export function header(moduleId: string): string {
   const idLiteral = JSON.stringify(moduleId);
   return `
 const __SYNAPSE_MODULE_ID__ = ${idLiteral};
@@ -446,8 +446,12 @@ delete globalThis.__synapseModule;
  * Cannot validate that `run`/each step's `run` is *correct*, only that it's a function — the same
  * limitation `manifest-validator.ts`'s doc comment notes for scopes: function values don't survive
  * `chrome.runtime` messaging, so this check has to happen here, client-side, not in the background.
+ *
+ * Exported (with `header()` below) for `dry-run-shim.ts` (docs/ROADMAP.md §12.5) to reuse — a Dry
+ * Run needs the exact same RPC/ui setup and step normalization as a saved script, differing only in
+ * what happens to the RESULT (never persisted as a `ManifestReport`).
  */
-function normalizerSource(): string {
+export function normalizerSource(): string {
   return `
 function normalizeManifestSteps(m) {
   if (!m) return { valid: false, reason: 'globalThis.__synapseModule was not assigned' };

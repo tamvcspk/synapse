@@ -67,6 +67,16 @@ export interface UploadResult {
   reason?: string;
 }
 
+export interface DryRunOutcome {
+  ok: boolean;
+  /** Correlates this call with the `synapse:dry-run-log`/`synapse:dry-run-result` messages
+   * (kernel/rpc.ts) the injected code sends afterward — those arrive asynchronously, this return
+   * value only reports whether `chrome.userScripts.execute()` itself accepted the injection (e.g. a
+   * top-level syntax error in the source fails HERE, before any message can be sent at all). */
+  runId: string;
+  error?: string;
+}
+
 /**
  * Port (docs/design.md §1) for discovering, activating, and granting capabilities to Modules
  * from any source — bundled at build time or uploaded at runtime. Concrete discovery/storage
@@ -118,4 +128,22 @@ export interface ModuleRegistryService {
    * places, one function" — missing any one leaves ghost state, the same bug class as §8.12). A
    * no-op for a bundled id: bundled Modules aren't deletable, only toggled off. */
   deleteScript(id: string): Promise<void>;
+  /**
+   * "Run once on this tab" (docs/ROADMAP.md §12.5) — injects `source` directly into `tabId` via
+   * `chrome.userScripts.execute()`, entirely bypassing `register()`'s persistent lifecycle: nothing
+   * here touches `synapse:uploaded`/`synapse:script-meta`/`synapse:manifest-reports`, so a dry run of
+   * unsaved edits can never overwrite what the popup/Studio sidebar shows for the last CONFIRMED run.
+   *
+   * `moduleId`, when given (editing an already-uploaded script), makes the run reuse that script's
+   * EXISTING granted scopes — the RPC bridge (rpc-handler.ts's `resolveGrantedScopes`) doesn't need
+   * to know this is a dry run at all, because `moduleId` plus the PERSISTED source's hash is the only
+   * thing it ever keys off; the in-editor (possibly unsaved) text never enters that check. Omitted
+   * (a script that has never been Saved) runs under a fresh id that appears in no grant/trusted-scope
+   * map, so every `ctx.api.*` call is denied — docs/ROADMAP.md §12.5's chosen answer for "what can an
+   * unsaved script touch": nothing, until it's Saved once.
+   *
+   * The caller listens for `synapse:dry-run-log`/`synapse:dry-run-result` (kernel/rpc.ts), tagged
+   * with the returned `runId`, for everything that happens after injection succeeds.
+   */
+  dryRunScript(source: string, tabId: number, moduleId?: string): Promise<DryRunOutcome>;
 }
