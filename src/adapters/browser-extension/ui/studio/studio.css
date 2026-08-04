@@ -22,10 +22,25 @@ body {
   flex-shrink: 0;
 }
 
+/* Inline rename (docs/ROADMAP.md §12.4) — `[contenteditable]`, styled to invite a click without
+   looking like a form control until it's actually focused. */
 #title {
   margin: 0;
   font-size: 1rem;
   font-weight: 600;
+  cursor: text;
+  border-radius: 4px;
+  padding: 0.1rem 0.4rem;
+  outline: none;
+}
+
+#title:hover {
+  background: #2a2a2a;
+}
+
+#title:focus {
+  background: #2d2d2d;
+  box-shadow: 0 0 0 1px #5a5a5a;
 }
 
 .header-actions {

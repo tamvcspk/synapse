@@ -3,6 +3,7 @@ import type { ModuleRegistryService, RegistryEntry, UploadResult } from '../../.
 import type { SynapseScopeGrant } from '../../../kernel/synapse-api';
 import { hashScriptSource } from '../../../shared/source-hash';
 import { resolveScriptLabel } from '../../../shared/resolve-script-label';
+import { parseScopesFromSource } from '../../../shared/parse-scopes-from-source';
 import { BUNDLED_MODULES } from './bundled-modules';
 import { BACKGROUND_MODULES } from './background-modules';
 import { buildShimSource } from './user-script-shim';
@@ -282,12 +283,20 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
         id: mod.id,
         source: 'bundled',
         scopes,
-        active: activation[mod.id] ?? true,
+        // A Module with a `templateId` (docs/ROADMAP.md §12.4 — the 3 user-facing "Clone"-able
+        // builtins) defaults OFF instead of the usual "never explicitly toggled = on"; a plain
+        // build-time support Module without one (e.g. `iframe-unsandbox`) is unaffected. No install-
+        // vs-upgrade migration here on purpose — this project has no installed user base yet to
+        // protect from a silent flip, and gating on `chrome.runtime.onInstalled`'s `reason` made the
+        // behavior untestable in the normal "reload the unpacked extension" dev loop (it only ever
+        // reports `'update'` there, never `'install'`). Revisit once there's a real release channel.
+        active: activation[mod.id] ?? !mod.templateId,
         status: 'ok',
         grantedScopes: scopes,
         uiHidden: uiMuted[mod.id] ?? false,
       };
       if (mod.uiSchema) entry.uiSchema = mod.uiSchema;
+      if (mod.templateId) entry.templateId = mod.templateId;
       if (mod.uiParadigm) entry.uiParadigm = mod.uiParadigm;
       if (mod.label) entry.label = mod.label;
       if (mod.description) entry.description = mod.description;
@@ -370,9 +379,18 @@ export class ChromeModuleRegistryService implements ModuleRegistryService {
     }
 
     // No report yet (script hasn't run on a matching page since upload) — optimistic 'ok',
-    // graceful-fail layer 2/3 (run-time + shape) resolve once a report arrives.
+    // graceful-fail layer 2/3 (run-time + shape) resolve once a report arrives. `scopes` used to be
+    // hardcoded `[]` here, which meant the popup's Grant button couldn't appear until the script
+    // actually ran on a matching page AND the popup was reloaded — a real run+reload round trip for
+    // something already fully determined by the saved source (docs/ROADMAP.md §12.4). Statically
+    // parsed instead, same "best-effort preview, real report always wins once it exists" posture as
+    // Studio's steps sidebar (§12.3) — reuses `validateModuleManifestShape`/`normalizeScopeGrants` so
+    // an unparseable or invalid declaration just falls back to `[]`, never a malformed scope reaching
+    // the UI.
     if (!report) {
-      return { id, label, ...fileNameField, source: 'uploaded', scopes: [], active, status: 'ok', grantedScopes, uiHidden };
+      const staticShapeCheck = validateModuleManifestShape({ id, scopes: parseScopesFromSource(source) });
+      const staticScopes = staticShapeCheck.valid ? staticShapeCheck.manifest.scopes : [];
+      return { id, label, ...fileNameField, source: 'uploaded', scopes: staticScopes, active, status: 'ok', grantedScopes, uiHidden };
     }
 
     // Computed once, ahead of the runError check below, and reused by it: a script's `scopes` are

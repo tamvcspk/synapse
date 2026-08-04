@@ -7,7 +7,7 @@ export function registerDomModule(mod: Module): void {
     if (message.moduleId !== mod.id) return; // not for us
 
     (async () => {
-      if (!(await isModuleActive(mod.id))) {
+      if (!(await isModuleActive(mod.id, !mod.templateId))) {
         sendResponse({ error: `Module "${mod.id}" is inactive` });
         return;
       }

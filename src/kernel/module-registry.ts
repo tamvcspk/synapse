@@ -35,6 +35,9 @@ export interface RegistryEntry {
   grantedScopes: SynapseScopeGrant[];
   /** Mirrors Module.uiSchema — presence drives the popup's Gear/Arrow icon (docs/ROADMAP.md #2). */
   uiSchema?: UISchema;
+  /** Mirrors Module.templateId (docs/ROADMAP.md §12.4) — bundled-only, drives the popup's "Clone"
+   * button. An uploaded script never has one: it already has real, editable source of its own. */
+  templateId?: string;
   /** Mirrors Module.subModules (docs/ROADMAP.md #3) — presence drives the popup's per-step
    * bypass toggles for a Composite Module. */
   subModules?: { id: string; label?: string }[];

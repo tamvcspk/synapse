@@ -35,11 +35,27 @@ export interface ListViewCallbacks {
   onEdit(entry: RegistryEntry): void;
   onDownload(entry: RegistryEntry): void;
   onDelete(entry: RegistryEntry): void;
+  /** "Clone" on a read-only builtin (docs/ROADMAP.md §12.4) — only shown for `entry.source ===
+   * 'bundled'` with a `templateId`; opens Studio's "New script" flow pre-filled from that template
+   * instead of copying the builtin's own (uneditable, build-time) source. */
+  onClone(entry: RegistryEntry): void;
+  /** Tab switch (docs/ROADMAP.md §12.4) — purely a client-side filter over the same already-loaded
+   * `entries`, no reload. Separated from every other callback here since it's the one action that
+   * changes nothing about any Module, only what this render call shows. */
+  onTabChange(tab: ModuleListTab): void;
 }
+
+/** Builtin (`source: 'bundled'`) and uploaded ("My Scripts") Modules used to render interleaved in
+ * one list — read-only build-time code and editable user scripts look enough alike (both get a
+ * row, a toggle, action buttons) that the two kinds became hard to tell apart at a glance once a
+ * few of each were active. Split into two tabs instead of adding yet another badge to tell them
+ * apart within a single list. */
+export type ModuleListTab = 'builtin' | 'scripts';
 
 export interface ListViewProps {
   /** false when chrome.userScripts.configureWorld failed — see background/index.ts + storage.ts. */
   userScriptsPermissionGranted?: boolean;
+  activeTab?: ModuleListTab;
 }
 
 /** Main Registry View — single list view by design. */
@@ -50,6 +66,9 @@ export function renderListView(
   props: ListViewProps = {},
 ): void {
   root.replaceChildren();
+
+  const activeTab = props.activeTab ?? 'scripts';
+  const visibleEntries = entries.filter((entry) => (activeTab === 'builtin' ? entry.source === 'bundled' : entry.source === 'uploaded'));
 
   van.add(
     root,
@@ -67,7 +86,20 @@ export function renderListView(
         li(button({ title: 'Refresh', 'aria-label': 'Refresh', onclick: callbacks.onRefresh }, icon(ICONS.refreshCw))),
       ),
     ),
-    ul({ class: 'module-list' }, ...entries.map((entry) => renderModuleRow(entry, callbacks))),
+    div(
+      { class: 'tabs', role: 'tablist' },
+      button(
+        { class: 'tab' + (activeTab === 'scripts' ? ' active' : ''), role: 'tab', 'aria-selected': String(activeTab === 'scripts'), onclick: () => callbacks.onTabChange('scripts') },
+        `My Scripts (${entries.filter((e) => e.source === 'uploaded').length})`,
+      ),
+      button(
+        { class: 'tab' + (activeTab === 'builtin' ? ' active' : ''), role: 'tab', 'aria-selected': String(activeTab === 'builtin'), onclick: () => callbacks.onTabChange('builtin') },
+        `Builtin (${entries.filter((e) => e.source === 'bundled').length})`,
+      ),
+    ),
+    visibleEntries.length === 0
+      ? div({ class: 'empty-tab' }, activeTab === 'builtin' ? 'No builtin modules.' : 'No scripts yet — Upload or New script above.')
+      : ul({ class: 'module-list' }, ...visibleEntries.map((entry) => renderModuleRow(entry, callbacks))),
   );
 }
 
@@ -118,7 +150,7 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
   // The float-widget note (docs/ROADMAP.md #4.2) is driven by the generic `uiParadigm` field, not
   // hardcoded to network-sniffer by id, so any future float-widget Module gets it for free.
   const tooltipParts = [entry.description, entry.uiParadigm === 'float-widget' ? 'Shows on-page alerts when active.' : null].filter(Boolean);
-  const label = span(tooltipParts.length > 0 ? { title: tooltipParts.join(' ') } : {}, entry.label ?? entry.id);
+  const label = span({ class: 'module-label', ...(tooltipParts.length > 0 ? { title: tooltipParts.join(' ') } : {}) }, entry.label ?? entry.id);
   if (entry.uiSchema) {
     label.classList.add('module-label-link');
     // Collection schema: open Management View. Action schema: default to its first action (e.g.
@@ -147,6 +179,10 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
   return li(
     { class: 'module-row' + (entry.status !== 'ok' ? ' disabled' : '') },
     label,
+    // Read-only builtin, called out explicitly rather than left as an invisible privileged tier
+    // (docs/ROADMAP.md §12.0's decision table) — every bundled Module qualifies, not just the 3
+    // with a `templateId`; `iframe-unsandbox` etc. are just as build-time and un-editable.
+    entry.source === 'bundled' ? span({ class: 'badge-builtin', title: 'Build-time code — read-only, not editable or deletable' }, 'builtin') : null,
     entry.status !== 'ok' ? span({ class: 'reason', title: entry.reason ?? '' }, 'invalid') : null,
     // NOT gated on `entry.status === 'ok'` — a script's very first run is exactly the one most
     // likely to throw on an ungranted call (see chrome-module-registry.ts's doc comment on
@@ -162,6 +198,7 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
       stepsBtn,
       ...renderActionButtons(entry, callbacks),
       ...lifecycleButtons(entry, callbacks),
+      cloneButton(entry, callbacks),
       uiValveButton(entry, callbacks),
       input({
         type: 'checkbox',
@@ -172,6 +209,14 @@ function renderModuleRow(entry: RegistryEntry, callbacks: ListViewCallbacks) {
       }),
     ),
   );
+}
+
+/** "Clone" (docs/ROADMAP.md §12.4) — only for a builtin that actually declares a `templateId`; a
+ * bundled Module without one (e.g. `iframe-unsandbox`, an internal support Module never meant to be
+ * a user-facing starting point) gets no button, same as it gets no Clone-worthy template. */
+function cloneButton(entry: RegistryEntry, callbacks: ListViewCallbacks): HTMLElement | null {
+  if (entry.source !== 'bundled' || !entry.templateId) return null;
+  return button({ title: 'Clone as a new editable script, starting from a template', onclick: () => callbacks.onClone(entry) }, 'Clone');
 }
 
 /** Vòng đời script (docs/ROADMAP.md §12.1) — rename/download/delete, shown for every uploaded

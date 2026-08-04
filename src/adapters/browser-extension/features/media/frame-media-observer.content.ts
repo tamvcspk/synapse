@@ -16,6 +16,6 @@ import { isModuleActive } from '../../module-registry/storage';
  *   of its much broader security trade-off (see that Module's doc comment).
  */
 void (async () => {
-  if (await isModuleActive('network-sniffer')) installDomMediaObserver();
+  if (await isModuleActive('network-sniffer', false)) installDomMediaObserver();
   if (await isModuleActive('iframe-unsandbox')) installIframeUnsandbox();
 })();

@@ -30,10 +30,18 @@ export async function getActivationMap(): Promise<Record<string, boolean>> {
   return getStored(KEYS.activation, {});
 }
 
-/** Bundled modules default to active until explicitly toggled off; unknown ids default active too. */
-export async function isModuleActive(id: string): Promise<boolean> {
+/**
+ * Bundled modules default to active until explicitly toggled off; unknown ids default active too —
+ * UNLESS the caller passes `defaultActive: false` (docs/ROADMAP.md §12.4's default-OFF "Clone"-able
+ * builtins: reader-mode-converter/network-sniffer/http-error-mocker). This file stays agnostic of
+ * *which* ids that applies to on purpose (storage.ts has no Module-list import, by design) — each
+ * runtime gate call site passes its own default, matching `chrome-module-registry.ts`'s
+ * `!mod.templateId` read-side default so the popup's toggle and the actual runtime gate never
+ * disagree about a given Module's out-of-the-box state.
+ */
+export async function isModuleActive(id: string, defaultActive = true): Promise<boolean> {
   const map = await getActivationMap();
-  return map[id] ?? true;
+  return map[id] ?? defaultActive;
 }
 
 export async function setModuleActive(id: string, active: boolean): Promise<void> {

@@ -1,6 +1,6 @@
 import type { RegistryEntry } from '../../../../kernel/module-registry';
 import type { SynapseScopeGrant } from '../../../../kernel/synapse-api';
-import { renderListView, type ListViewProps } from './views/list-view';
+import { renderListView, type ListViewProps, type ModuleListTab } from './views/list-view';
 import { renderActionResultView } from './views/action-result-view';
 import { renderScopeConsentView } from './views/scope-consent-view';
 import { renderBusyView } from './views/busy-view';
@@ -56,6 +56,12 @@ export interface RouterHandlers {
   onEdit(entry: RegistryEntry): void;
   onDownload(entry: RegistryEntry): void;
   onDelete(entry: RegistryEntry): void;
+  /** "Clone" on a read-only builtin (docs/ROADMAP.md §12.4) — opens Studio's "New script" flow
+   * pre-filled from `entry.templateId`'s template. Only ever called for `entry.source === 'bundled'`
+   * with a `templateId`; `list-view.ts` doesn't render the button otherwise. */
+  onClone(entry: RegistryEntry): void;
+  /** Builtin/Scripts tab switch (docs/ROADMAP.md §12.4) — see `ListViewCallbacks.onTabChange`. */
+  onTabChange(tab: ModuleListTab): void;
   onRenameSave(label: string): void;
   onDeleteConfirm(): void;
   onReloadExtension(): void;
@@ -85,6 +91,8 @@ export async function render(
         onEdit: handlers.onEdit,
         onDownload: handlers.onDownload,
         onDelete: handlers.onDelete,
+        onClone: handlers.onClone,
+        onTabChange: handlers.onTabChange,
       },
       listProps,
     );

@@ -71,6 +71,14 @@ export interface Module<In = unknown, Out = unknown> {
    */
   subModules?: { id: string; label?: string }[];
   /**
+   * Points at a template under `ui/studio/templates/` (docs/ROADMAP.md §12.4) — presence is what
+   * makes the Registry UI show a "Clone" button for this (necessarily read-only, build-time)
+   * Module. Cloning never copies this Module's own source (its TS is not something a user script
+   * can run or edit); it opens Studio's "New script" flow pre-filled with the named template
+   * instead, same mechanism either way.
+   */
+  templateId?: string;
+  /**
    * On-page UI paradigm this Module opts into, beyond the default "no on-page UI, everything
    * lives in the Dashboard/popup" (docs/ROADMAP.md §4.2). `'float-widget'` is the only paradigm
    * with a real implementation today (utils/ui-compositor.ts + network-sniffer's push) —

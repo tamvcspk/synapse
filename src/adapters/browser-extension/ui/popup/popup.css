@@ -22,17 +22,63 @@ body {
   padding: 0;
 }
 
+/* Builtin/Scripts split (docs/ROADMAP.md §12.4) — plain buttons, not Pico's `role="tablist"`
+   default styling (this popup never opted into that elsewhere), so this matches the rest of the
+   popup's own icon-button look instead of introducing a second visual language. */
+.tabs {
+  display: flex;
+  gap: 0.3rem;
+  margin-bottom: 0.4rem;
+}
+
+.tab {
+  flex: 1 1 0;
+  width: auto;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.85em;
+  background: none;
+  border: 1px solid var(--pico-muted-border-color);
+  color: var(--pico-muted-color);
+}
+
+.tab.active {
+  background: var(--pico-primary-background);
+  border-color: var(--pico-primary-background);
+  color: var(--pico-primary-inverse);
+}
+
+.empty-tab {
+  color: var(--pico-muted-color);
+  font-size: 0.85em;
+  padding: 0.75rem 0;
+  text-align: center;
+}
+
+/* `flex-wrap` is the release valve for a row with many action buttons (Grant + Clone + builtin
+   badge + Steps + lifecycle icons + the on/off switch can all coexist on one entry): the label
+   shrinks/truncates first (`.module-label`, below), and only once IT hits its `min-width` does
+   `.row-actions` drop to a line of its own — buttons themselves never compress (see `.row-actions >
+   *`), which is what actually caused the squished-button look this replaces. */
 .module-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   padding: 0.4rem 0;
   border-bottom: 1px solid var(--pico-muted-border-color);
-  gap: 0.5rem;
+  gap: 0.3rem 0.5rem;
 }
 
 .module-row.disabled {
   opacity: 0.5;
+}
+
+.module-label {
+  flex: 1 1 auto;
+  min-width: 4rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .module-label-link {
@@ -40,15 +86,37 @@ body {
   text-decoration: underline dotted;
 }
 
+.reason,
+.badge-builtin,
+.module-row > button {
+  flex-shrink: 0;
+}
+
 .reason {
   font-size: 0.75em;
   color: var(--pico-del-color);
 }
 
+/* Read-only builtin (docs/ROADMAP.md §12.0/§12.4) — called out, not an invisible privileged tier. */
+.badge-builtin {
+  font-size: 0.75em;
+  color: var(--pico-muted-color);
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: 0 0.3em;
+}
+
 .row-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex-shrink: 0;
   gap: 0.4rem;
+}
+
+.row-actions > * {
+  flex-shrink: 0;
 }
 
 /* The "hide UI" valve (docs/ROADMAP.md §11.4). Muted rather than removed when off: the module is

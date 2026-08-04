@@ -10,6 +10,7 @@ import { listenForActionProgress } from '../action-progress';
 import { triggerModuleAction } from '../module-trigger';
 import { openReviewPage } from '../review-handoff';
 import { render as renderView, type RouterHandlers, type View } from './router';
+import type { ModuleListTab } from './views/list-view';
 import { DASHBOARD_PATH } from '../dashboard/dashboard-path';
 import { REVIEW_PATH } from '../review-path';
 import { STUDIO_PATH } from '../studio/studio-path';
@@ -20,6 +21,10 @@ const root = document.getElementById('root')!;
 let view: View = { kind: 'list' };
 let entries: RegistryEntry[] = [];
 let userScriptsPermissionGranted = true;
+/** Builtin/Scripts tab (docs/ROADMAP.md §12.4) — "My Scripts" by default: for a Tampermonkey-style
+ * tool, the scripts a user is actively writing/running are the primary daily surface, builtin is a
+ * secondary reference tab. Session-only, not persisted — resets to "scripts" each popup open. */
+let activeTab: ModuleListTab = 'scripts';
 
 const fileInput = document.createElement('input');
 fileInput.type = 'file';
@@ -87,7 +92,7 @@ async function load(): Promise<void> {
 }
 
 async function render(): Promise<void> {
-  await renderView(root, view, entries, handlers, { userScriptsPermissionGranted });
+  await renderView(root, view, entries, handlers, { userScriptsPermissionGranted, activeTab });
 }
 
 function navigate(next: View): void {
@@ -110,6 +115,11 @@ const handlers: RouterHandlers = {
   onRename: (entry) => navigate({ kind: 'rename', moduleId: entry.id, currentLabel: entry.label ?? entry.id }),
   onEdit: openStudio,
   onDownload: handleDownload,
+  onClone: handleClone,
+  onTabChange: (tab) => {
+    activeTab = tab;
+    void render();
+  },
   onDelete: (entry) => navigate({ kind: 'confirm-delete', moduleId: entry.id, label: entry.label ?? entry.id }),
   onRenameSave: handleRenameSave,
   onDeleteConfirm: handleDeleteConfirm,
@@ -139,6 +149,18 @@ function openStudio(entry?: RegistryEntry): void {
   const url = entry
     ? `${chrome.runtime.getURL(STUDIO_PATH)}?moduleId=${encodeURIComponent(entry.id)}`
     : chrome.runtime.getURL(STUDIO_PATH);
+  void chrome.tabs.create({ url });
+  window.close();
+}
+
+/** "Clone" on a read-only builtin (docs/ROADMAP.md §12.4) — same tab-open-then-close-popup shape as
+ * `openStudio`/`openDashboard`, but with `templateId` instead of `moduleId`: this never edits the
+ * builtin itself (it has no uploaded source to edit), it opens Studio's "New script" flow pre-filled
+ * from the named template. A no-op if the entry somehow lacks a `templateId` — `list-view.ts` never
+ * renders the Clone button in that case, so this is just defense against a stale callback wiring. */
+function handleClone(entry: RegistryEntry): void {
+  if (!entry.templateId) return;
+  const url = `${chrome.runtime.getURL(STUDIO_PATH)}?templateId=${encodeURIComponent(entry.templateId)}`;
   void chrome.tabs.create({ url });
   window.close();
 }

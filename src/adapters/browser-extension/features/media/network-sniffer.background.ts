@@ -426,7 +426,7 @@ chrome.runtime.onMessage.addListener((message: { event?: string; payload?: Repor
   void (async () => {
     // Re-validates server-side rather than trusting the content script's own filtering — same
     // "never trust the shim to self-limit" posture rpc-handler.ts already documents.
-    if (!(await isModuleActive('network-sniffer'))) return;
+    if (!(await isModuleActive('network-sniffer', false))) return;
     for (const item of items) {
       await persistDetectedMedia(item.url, item.pageUrl, sender.tab?.url, chromeStorageCache);
     }
@@ -444,7 +444,7 @@ chrome.runtime.onMessage.addListener((message: { event?: string; payload?: Repor
   if (message?.event !== 'network-sniffer' || message.payload?.op !== 'report-main-world-media') return;
   const { url, pageUrl } = message.payload;
   void (async () => {
-    if (!(await isModuleActive('network-sniffer'))) return;
+    if (!(await isModuleActive('network-sniffer', false))) return;
     await persistDetectedMedia(url, pageUrl, sender.tab?.url, chromeStorageCache);
   })();
 });
@@ -459,7 +459,7 @@ chrome.runtime.onMessage.addListener((message: { type?: string; url?: string } |
   void (async () => {
     // Re-validates rather than trusting the content script's own filtering — same "never trust the
     // shim to self-limit" posture as the report-dom-media/report-main-world-media listeners below.
-    if (!(await isModuleActive('network-sniffer')) || !classifyMediaUrl(url)) return;
+    if (!(await isModuleActive('network-sniffer', false)) || !classifyMediaUrl(url)) return;
     await chrome.downloads.download({ url });
   })();
 });
@@ -482,6 +482,7 @@ export const NetworkSnifferModule: Module<CollectionCommand<DetectedMedia> | und
   id: 'network-sniffer',
   label: 'Media Sniffer',
   description: 'Passively detects video/audio/stream URLs requested by pages you visit, and lets you download them.',
+  templateId: 'network-sniffer',
   needs: ['bus', 'cache'],
   // docs/ROADMAP.md #4.2 — this Module also pushes an on-page floating widget (utils/
   // ui-compositor.ts) when it detects media, instead of only surfacing results in the Dashboard.
@@ -574,7 +575,7 @@ export const NetworkSnifferModule: Module<CollectionCommand<DetectedMedia> | und
       variantLinks: m.variants?.map((v, i) => ({ url: v.url, label: describeResolution(v.resolution, `Option ${i + 1}`) })),
     })) as unknown as Record<string, unknown>[],
   async run(command, ctx) {
-    if (!(await isModuleActive('network-sniffer'))) {
+    if (!(await isModuleActive('network-sniffer', false))) {
       // Deliberately does NOT call teardownNetworkObserver() — the chrome.webRequest listener is
       // installed once at service-worker startup and stays installed (see installNetworkSniffing at
       // the bottom of this file); deactivating the Module only makes its callback inert. Removing
@@ -747,7 +748,7 @@ Object.defineProperty(globalThis, '__synapseSniffer', {
 // index.ts emits after kernel.run() — one storage read, started at startup, rather than a multi-step
 // async chain. The bus sync still arrives later and is still what handles activation CHANGES; this
 // only shortens the startup window during which requests have to be buffered above.
-void isModuleActive('network-sniffer')
+void isModuleActive('network-sniffer', false)
   .then(setSniffingActive)
   .catch(() => setSniffingActive(false));
 

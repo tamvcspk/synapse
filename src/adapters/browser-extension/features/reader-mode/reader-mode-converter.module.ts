@@ -192,6 +192,7 @@ const pageComposite = createCompositeModule({
   description:
     'Distills the page into Markdown, fetching images so they can be reviewed and downloaded as a bundle.',
   subModules: [LoadDomStep, CleanStep, FetchImagesStep, ConvertMarkdownStep],
+  templateId: 'reader-mode-converter',
 });
 
 function sleep(ms: number): Promise<void> {

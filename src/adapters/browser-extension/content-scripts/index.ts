@@ -68,7 +68,7 @@ function showNetworkSnifferIcon(): void {
 chrome.runtime.onMessage.addListener((message: { type?: string } | undefined) => {
   if (message?.type !== 'synapse:media-found') return;
   void (async () => {
-    if (!(await isModuleActive('network-sniffer'))) return;
+    if (!(await isModuleActive('network-sniffer', false))) return;
     showNetworkSnifferIcon();
   })();
 });
@@ -103,7 +103,7 @@ createMainWorldChannel<{ url: string }>(MAIN_WORLD_REPORT_CHANNEL_ID).onUpdate((
   // content script is already the top frame, the same one that owns the floating icon, so there's
   // no round trip needed to know "this page has media" the way the webRequest-only path does.
   void (async () => {
-    if (await isModuleActive('network-sniffer')) showNetworkSnifferIcon();
+    if (await isModuleActive('network-sniffer', false)) showNetworkSnifferIcon();
   })();
 });
 
@@ -128,7 +128,7 @@ const AUTORUN_EXCLUDED = new Set(['reader-mode-converter']);
 // immediate visual confirmation that the Kernel foundation + auto-discovery wire up correctly.
 for (const mod of domModules.filter((mod) => !AUTORUN_EXCLUDED.has(mod.id))) {
   void (async () => {
-    if (!(await isModuleActive(mod.id))) return;
+    if (!(await isModuleActive(mod.id, !mod.templateId))) return;
     try {
       await mod.run(undefined, { services: {}, api: buildDomModuleApi(mod.id) });
     } catch (err) {
@@ -189,7 +189,7 @@ function showReaderModeIcons(): void {
 }
 
 void (async () => {
-  if (await isModuleActive('reader-mode-converter')) showReaderModeIcons();
+  if (await isModuleActive('reader-mode-converter', false)) showReaderModeIcons();
 })();
 
 // docs/ROADMAP.md §11.4 — Core owns the surface lifecycle, so switching a Module off (or muting just

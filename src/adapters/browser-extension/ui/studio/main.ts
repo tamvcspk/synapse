@@ -14,11 +14,15 @@ import type { RegistryEntry } from '../../../../kernel/module-registry';
 import { ChromeModuleRegistryService } from '../../module-registry/chrome-module-registry';
 import { icon, ICONS } from '../icon';
 import { NEW_SCRIPT_TEMPLATE } from './studio-template';
+import { TEMPLATES } from './templates';
 
 /**
  * Studio (docs/ROADMAP.md §12.2) — edit an uploaded script's source in the extension itself.
  * `?moduleId=<id>` edits that script; no `moduleId` opens "New script" (a template, replacing the
- * old requirement of having a file ready to upload first).
+ * old requirement of having a file ready to upload first). `?templateId=<id>` (§12.4's "Clone" on a
+ * builtin) is the SAME "New script" flow, just pre-filled from a named template under
+ * `templates/*.js` instead of the blank `NEW_SCRIPT_TEMPLATE` — ignored when `moduleId` is present
+ * (editing an existing script always wins).
  */
 
 self.MonacoEnvironment = {
@@ -45,7 +49,9 @@ typescript.javascriptDefaults.setCompilerOptions({
 
 const registry = new ChromeModuleRegistryService();
 
-let moduleId = new URLSearchParams(location.search).get('moduleId') ?? undefined;
+const searchParams = new URLSearchParams(location.search);
+let moduleId = searchParams.get('moduleId') ?? undefined;
+const templateId = searchParams.get('templateId') ?? undefined;
 let model: monaco.editor.ITextModel | undefined;
 let editor: monaco.editor.IStandaloneCodeEditor | undefined;
 let currentEntry: RegistryEntry | undefined;
@@ -74,9 +80,49 @@ function setMessage(text: string, kind: 'info' | 'error' | 'success' = 'info'): 
   messageEl.className = kind === 'info' ? '' : kind;
 }
 
+let currentLabel = 'Studio';
+
 function setLabel(label: string): void {
+  currentLabel = label;
   document.title = `Synapse — Studio — ${label}`;
   titleEl.textContent = label;
+}
+
+/**
+ * Inline rename (docs/ROADMAP.md §12.4) — click the title, edit, blur/Enter commits, Excel-Online-
+ * cell style. Was the gap "Clone" left open: cloning a builtin used to leave the new script named
+ * after whatever uuid `uploadModule` minted, with no way to fix that from Studio itself.
+ *
+ * An already-uploaded script (`moduleId` set) renames immediately via `registry.renameScript`. A
+ * script not yet saved (Clone/"New script" — no id minted yet) has nothing to attach a rename TO
+ * yet, so the typed label is held here and applied right after the first successful Save mints an
+ * id (`save()`, below) — a Clone never has to be saved once just to get a uuid and renamed a
+ * second time.
+ */
+let pendingLabel: string | undefined;
+
+titleEl.contentEditable = 'true';
+titleEl.spellcheck = false;
+titleEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault(); // contenteditable's default Enter inserts a line break — this is one line.
+  titleEl.blur();
+});
+titleEl.addEventListener('blur', () => void commitTitleEdit());
+
+async function commitTitleEdit(): Promise<void> {
+  const next = titleEl.textContent?.trim();
+  if (!next || next === currentLabel) {
+    titleEl.textContent = currentLabel; // revert an empty/whitespace-only/unchanged edit
+    return;
+  }
+  currentLabel = next;
+  if (moduleId) {
+    await registry.renameScript(moduleId, next);
+    document.title = `Synapse — Studio — ${next}`;
+  } else {
+    pendingLabel = next;
+  }
 }
 
 async function init(): Promise<void> {
@@ -90,6 +136,7 @@ async function init(): Promise<void> {
       setLabel('Script not found');
       setMessage(`No uploaded script with id "${moduleId}" — open Studio from a script's Edit icon in the popup.`, 'error');
       saveBtn.disabled = true;
+      titleEl.contentEditable = 'false';
       return;
     }
     const stored = await registry.getUploadedSource(entry.id);
@@ -97,11 +144,15 @@ async function init(): Promise<void> {
       setLabel('Script not found');
       setMessage('This script has no stored source.', 'error');
       saveBtn.disabled = true;
+      titleEl.contentEditable = 'false';
       return;
     }
     source = stored;
     label = entry.label ?? entry.id;
     currentEntry = entry;
+  } else if (templateId && TEMPLATES[templateId]) {
+    source = TEMPLATES[templateId];
+    label = `New script — from "${templateId}" template`;
   } else {
     source = NEW_SCRIPT_TEMPLATE;
     label = 'New script';
@@ -148,7 +199,15 @@ async function save(): Promise<void> {
     // it rather than leaving the URL (and a subsequent Save) pointed at nothing.
     moduleId = result.entry.id;
     history.replaceState(null, '', `${location.pathname}?moduleId=${encodeURIComponent(moduleId)}`);
-    setLabel(result.entry.label ?? result.entry.id);
+    if (pendingLabel) {
+      // The title was renamed before this first Save (e.g. right after Clone) — apply it to the
+      // id that just got minted instead of leaving the script named after its raw uuid.
+      await registry.renameScript(moduleId, pendingLabel);
+      setLabel(pendingLabel);
+      pendingLabel = undefined;
+    } else {
+      setLabel(result.entry.label ?? result.entry.id);
+    }
   }
 
   setMessage('Saved — takes effect on the next page load, not immediately.', 'success');

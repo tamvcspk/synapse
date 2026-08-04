@@ -9,6 +9,9 @@ export interface CreateCompositeModuleOptions {
    * Module can declare its own Declarative UI Schema (docs/ROADMAP.md #2) independently of its
    * `subModules` metadata (which drives the Registry's separate per-step bypass UI, #3). */
   uiSchema?: UISchema;
+  /** Passed straight through to the returned Module, same as `label`/`uiSchema` — see
+   * `Module.templateId`'s doc comment (docs/ROADMAP.md §12.4). */
+  templateId?: string;
   /** Sub-modules run in this order — the only thing that decides sequencing (same rule as
    * Workflow.steps, docs/design.md §2: never rely on discovery/glob iteration order). */
   subModules: Module[];
@@ -45,6 +48,7 @@ export function createCompositeModule(options: CreateCompositeModuleOptions): Mo
     ...(options.label ? { label: options.label } : {}),
     ...(options.description ? { description: options.description } : {}),
     ...(options.uiSchema ? { uiSchema: options.uiSchema } : {}),
+    ...(options.templateId ? { templateId: options.templateId } : {}),
     needs,
     subModules: options.subModules.map((mod) => (mod.label ? { id: mod.id, label: mod.label } : { id: mod.id })),
     async run(input: unknown, ctx: ModuleContext): Promise<unknown> {

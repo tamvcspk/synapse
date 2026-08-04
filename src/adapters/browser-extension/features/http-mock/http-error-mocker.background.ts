@@ -53,6 +53,7 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
   label: 'HTTP Mock & Rewrite',
   description:
     'Fake, rewrite, or block HTTP requests matching a pattern — for testing error handling, mocking APIs, or serving canned/uploaded-file responses without a real backend.',
+  templateId: 'http-error-mocker',
   needs: ['bus', 'cache'],
   uiSchema: {
     kind: 'collection',
@@ -220,7 +221,7 @@ export const HttpErrorMockerModule: Module<CollectionCommand<MockConfig> | undef
   async run(command, ctx) {
     // Module-level Slide Toggle gate — mirrors relay.ts's dom-module active check. Inactive means
     // both "ignore CRUD commands" and "tear down the interceptor", not just a cosmetic toggle.
-    if (!(await isModuleActive('http-error-mocker'))) {
+    if (!(await isModuleActive('http-error-mocker', false))) {
       if (await isMainWorldScriptRegistered(MAIN_WORLD_SCRIPT_ID)) {
         await unregisterMainWorldScript(MAIN_WORLD_SCRIPT_ID);
       }
