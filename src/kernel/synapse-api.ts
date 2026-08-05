@@ -460,6 +460,54 @@ export interface SynapsePageApi {
   eval(code: string, args?: unknown[]): Promise<unknown>;
 }
 
+/** The two providers `ai.ask` speaks natively (docs/ROADMAP.md §11.6). Deliberately NOT an
+ * extensible string: "unified LLM interface" is the hole this method exists to avoid — anything
+ * beyond these two shapes is `net.request` + `secretRef`, not a third branch grafted on here. */
+export type SynapseAiProvider = 'openai' | 'ollama';
+
+export interface SynapseAiMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+export interface SynapseAiAskOptions {
+  provider: SynapseAiProvider;
+  model: string;
+  messages: SynapseAiMessage[];
+  /** Names a secret (`secrets.use`) whose value is injected as `Authorization: Bearer <value>` at
+   * the network boundary — this script never sees it, same mechanism `net.request`'s own
+   * `{secretRef}` header value uses. Required for `'openai'` (no key, no request); ignored for
+   * `'ollama'` (a local server, no auth) even if given. */
+  secretRef?: string;
+  /** Overrides the provider's default endpoint — a self-hosted Ollama on a non-default host/port,
+   * or an OpenAI-compatible proxy. Still checked against this call's own granted `net.request`
+   * `match` (see `SynapseAiApi`'s doc comment on why that's the gating scope). Defaults:
+   * `'https://api.openai.com/v1/chat/completions'` (openai), `'http://localhost:11434/api/chat'`
+   * (ollama). */
+  baseUrl?: string;
+  /** Defaults to 30s, capped at 120s — same cap as `net.request`. */
+  timeoutMs?: number;
+}
+
+export interface SynapseAiAskResult {
+  text: string;
+}
+
+/**
+ * `{provider, model, messages} → text` — a thin helper over the two chat-completion shapes worth
+ * saving a script from re-typing by hand, not an agent and not a unified abstraction over every LLM
+ * API (docs/ROADMAP.md §11.6). No scope of its own: gated on `net.request`, the same scope a script
+ * would need to call the provider's endpoint directly — `ai.ask` only shapes the request and
+ * extracts the reply text, it does not open a door `net.request` + `secretRef` didn't already open,
+ * so it does not get a second one.
+ *
+ * **v1 does not stream.** `chrome.runtime.sendMessage`'s reply is one value, not a stream — a
+ * streaming variant would need `chrome.runtime.connect`, not attempted here.
+ */
+export interface SynapseAiApi {
+  ask(options: SynapseAiAskOptions): Promise<SynapseAiAskResult>;
+}
+
 /** The facade every caller programs against, delivered as `ctx.api`: to bundled Modules from the
  * Kernel, to uploaded user scripts from the shim. One interface, three transports (in-process /
  * content-script RPC / user script shim) — a method reachable from one but not another is a
@@ -478,6 +526,7 @@ export interface SynapseApi {
    * whose method throws with that explanation, since "the page's MAIN world" has no meaning for
    * code that isn't attached to any tab. */
   page: SynapsePageApi;
+  ai: SynapseAiApi;
 }
 
 /** One step of a multi-step script (docs/ROADMAP.md §12.3) — the uploaded-script equivalent of a

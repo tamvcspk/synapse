@@ -425,6 +425,31 @@ export const API_METHODS: ApiMethodDefinition[] = [
     transport: 'rpc',
   },
   {
+    namespace: 'ai',
+    method: 'ask',
+    // Reuses net.request's own scope rather than adding an 11th (the catalog is already at its
+    // self-imposed ~10 ceiling, docs/ROADMAP.md §11.6) — ai.ask does not open any door net.request +
+    // secretRef didn't already open, it only shapes the request and extracts the reply text, so it
+    // does not warrant a second gate. A script granting net.request match for a provider's host can
+    // call ai.ask against it; one that hasn't gets the same denial calling net.request there would.
+    scope: 'net.request',
+    signature: 'ask(options: SynapseAiAskOptions): Promise<SynapseAiAskResult>',
+    description:
+      "Thin {provider,model,messages} → text helper for OpenAI/Ollama chat completions — not a " +
+      'unified LLM abstraction, see the type doc comment. `options.baseUrl` (or the provider\'s ' +
+      "default endpoint) must fall under one of this call's granted `net.request` `match` patterns, " +
+      'the same requirement calling that endpoint via `net.request` directly would carry. A ' +
+      '`secretRef` additionally requires `secrets.use`, injected as `Authorization: Bearer <value>`.',
+    resourceUrl: (args) => {
+      const options = args[0] as { provider?: unknown; baseUrl?: unknown } | undefined;
+      if (typeof options?.baseUrl === 'string') return options.baseUrl;
+      if (options?.provider === 'openai') return 'https://api.openai.com/v1/chat/completions';
+      if (options?.provider === 'ollama') return 'http://localhost:11434/api/chat';
+      return undefined;
+    },
+    transport: 'rpc',
+  },
+  {
     namespace: 'lib',
     method: 'hls.parse',
     signature: 'hls.parse(text: string, baseUrl: string): SynapseHlsManifest',

@@ -31,6 +31,13 @@ var __synapseRealConsole = window.console;
 function __synapseDryRunLog(level, args) {
   var text = Array.prototype.map.call(args, function (a) {
     if (typeof a === 'string') return a;
+    // An Error's own enumerable properties do NOT include message/stack (V8 puts both on the
+    // prototype chain as non-enumerable) — JSON.stringify(someError) is '{}', which is exactly
+    // what silently swallowed the real reason behind a failed ctx.api.* call in every dry run
+    // before this: \`console.error('x failed', err)\` relayed as "x failed {}". Checked here rather
+    // than fixed at each call site, since \`err\` reaching a bare console.error is the normal case,
+    // not a bug at the call site.
+    if (a instanceof Error) return a.name + ': ' + a.message;
     try { return JSON.stringify(a); } catch (e) { return String(a); }
   }).join(' ');
   chrome.runtime.sendMessage({ type: 'synapse:dry-run-log', runId: ${runIdLiteral}, level: level, text: text }).catch(function () {});

@@ -1,5 +1,7 @@
 import type { RpcRequest, RpcResponse } from '../../../kernel/rpc';
 import type {
+  SynapseAiAskOptions,
+  SynapseAiAskResult,
   SynapseApi,
   SynapseFilesSaveOptions,
   SynapseFilesSaveResult,
@@ -116,6 +118,9 @@ export function buildDomModuleApi(moduleId: string): SynapseApi {
     },
     page: {
       eval: (code: string, args?: unknown[]) => call(moduleId, 'page', 'eval', [code, args]),
+    },
+    ai: {
+      ask: (options: SynapseAiAskOptions) => call(moduleId, 'ai', 'ask', [options]) as Promise<SynapseAiAskResult>,
     },
   };
 }

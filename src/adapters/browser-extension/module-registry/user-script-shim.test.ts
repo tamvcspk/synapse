@@ -116,10 +116,12 @@ describe('buildShimSource', () => {
     const source = buildShimSource('id', '');
     expect(source).toContain('{ api: synapseApi }');
     expect(source).toContain("__synapseCall('storage', 'get'");
-    // `bus` was a god-capability, `cache` was the escalation hole, `ai` never had an adapter.
+    // `bus` was a god-capability, `cache` was the escalation hole — both retired for good
+    // (docs/ROADMAP.md §11.3). `ai` is back as of §11.6, but as the thin `ai.ask` RPC method, not
+    // the old Port-shaped capability these two guard against — see the `ai.ask` coverage below.
     expect(source).not.toMatch(/\bbus:\s*\{/);
     expect(source).not.toMatch(/\bcache:\s*\{/);
-    expect(source).not.toMatch(/\bai:\s*\{/);
+    expect(source).toMatch(/\bai:\s*\{\s*ask:/);
   });
 
   /**

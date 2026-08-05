@@ -208,6 +208,43 @@ describe('page.eval — resource comes from context, not args', () => {
   });
 });
 
+describe('ai.ask — reuses net.request\'s scope rather than adding an 11th (docs/ROADMAP.md §11.6)', () => {
+  it('resolves scopeForApiMethod to net.request, not a scope of its own', () => {
+    expect(scopeForApiMethod('ai', 'ask')).toBe('net.request');
+  });
+
+  it('does not add to the scope catalog', () => {
+    expect(isSynapseScope('ai.ask')).toBe(false);
+    expect(ALL_SCOPES).not.toContain('ai.ask');
+  });
+
+  it('derives the resourceUrl from baseUrl when given', () => {
+    expect(
+      resourceUrlForCall('ai', 'ask', [{ provider: 'openai', baseUrl: 'https://my-proxy.example/v1/chat' }]),
+    ).toBe('https://my-proxy.example/v1/chat');
+  });
+
+  it('falls back to each provider\'s default endpoint when baseUrl is omitted', () => {
+    expect(resourceUrlForCall('ai', 'ask', [{ provider: 'openai' }])).toBe(
+      'https://api.openai.com/v1/chat/completions',
+    );
+    expect(resourceUrlForCall('ai', 'ask', [{ provider: 'ollama' }])).toBe('http://localhost:11434/api/chat');
+  });
+
+  it('returns undefined for an unrecognized/missing provider — fail-closed, not a guess', () => {
+    expect(resourceUrlForCall('ai', 'ask', [{ provider: 'anthropic' }])).toBeUndefined();
+    expect(resourceUrlForCall('ai', 'ask', [{}])).toBeUndefined();
+    expect(resourceUrlForCall('ai', 'ask', [])).toBeUndefined();
+  });
+
+  it('a net.request grant covering the provider host is what makes ai.ask callable via grantsAllow', () => {
+    const grant = { scope: 'net.request' as const, match: ['https://api.openai.com/*'] };
+    const url = resourceUrlForCall('ai', 'ask', [{ provider: 'openai' }]);
+    expect(grantsAllow([grant], 'net.request', url)).toBe(true);
+    expect(grantsAllow([grant], 'net.request', 'http://localhost:11434/api/chat')).toBe(false);
+  });
+});
+
 describe('net.mock — dotted method names + matchExempt', () => {
   it('resolves scopeForApiMethod/resourceUrlForCall for a dotted method name (mock.add)', () => {
     expect(scopeForApiMethod('net', 'mock.add')).toBe('net.mock');

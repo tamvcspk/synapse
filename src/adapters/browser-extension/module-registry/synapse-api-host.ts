@@ -3,6 +3,7 @@ import { htmlToMarkdown } from '../../../shared/html-to-markdown';
 import { isValidMatchPattern, matchesAnyPattern, matchesUrlPattern } from '../../../shared/match-pattern';
 import { parseM3u8 } from '../../../shared/media-manifest-parser';
 import { buildZip } from '../../../shared/zip';
+import { performAiAsk } from './ai-ask-host';
 import { performFilesSave } from './files-save-host';
 import { readable } from './lib-readable';
 import { onMediaProgressLocal, performMediaControl, performMediaDownload, performMediaInspect, performMediaJob, performMediaList } from './media-host';
@@ -127,5 +128,6 @@ export function createSynapseApi(moduleId: string, context: SynapseApiContext = 
       onProgress: (jobId, handler) => onMediaProgressLocal(jobId, handler),
     },
     page: pageApiFor(context.tabId),
+    ai: { ask: performAiAsk },
   };
 }

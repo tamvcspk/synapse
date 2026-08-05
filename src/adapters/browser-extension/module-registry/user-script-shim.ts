@@ -350,6 +350,9 @@ const synapseApi = {
   page: {
     eval: function (code, args) { return __synapseCall('page', 'eval', [code, args]); },
   },
+  ai: {
+    ask: function (options) { return __synapseCall('ai', 'ask', [options]); },
+  },
   lib: __synapseLib,
 };
 
@@ -414,6 +417,9 @@ if (!globalThis.synapseApi) {
     },
     page: {
       eval: __synapseWrongHandle,
+    },
+    ai: {
+      ask: __synapseWrongHandle,
     },
     lib: {
       hls: { parse: __synapseWrongHandleSync },

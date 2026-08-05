@@ -227,6 +227,45 @@ __synapseModule = {
 - **Sharing your script is safe by construction**: the script only ever contains the *name*
   `my-openai-key`, never the value. Whoever runs it creates their own secret under that name.
 
+### Calling an AI provider
+
+`ai.ask` is a thin `{provider, model, messages} → text` helper for OpenAI and Ollama chat
+completions — not a unified LLM abstraction, and not an agent. It shapes the request and extracts
+the reply text for you; anything beyond that (streaming, other providers, vision, tool calling) is
+`net.request` + `secretRef`, which you already have full access to.
+
+```javascript
+__synapseModule = {
+  id: 'summarize-with-ollama',
+  scopes: [{ scope: 'net.request', match: ['http://localhost:11434/*'] }],
+  async run(input, ctx) {
+    const result = await ctx.api.ai.ask({
+      provider: 'ollama',
+      model: 'llama3.2',
+      messages: [{ role: 'user', content: 'Summarize this in one sentence: ' + input }],
+    });
+    console.log(result.text);
+  },
+};
+```
+
+- **No scope of its own — gated on `net.request`.** `ai.ask` doesn't open any door `net.request` +
+  `secretRef` didn't already open, so it reuses that scope's `match` check instead of adding a
+  separate one: your grant's `match` must cover the provider's endpoint (the default, or your own
+  `baseUrl`), exactly as if you'd called that endpoint via `net.request` directly.
+- **Provider defaults**: `'openai'` → `https://api.openai.com/v1/chat/completions`; `'ollama'` →
+  `http://localhost:11434/api/chat`. Override with `baseUrl` for a self-hosted Ollama or an
+  OpenAI-compatible proxy — it still has to fall under your granted `match`.
+- **`secretRef` works the same way it does for `net.request`** (see the section above) — required
+  for `'openai'` (no key, no request), meaningless for `'ollama'` (local, no auth) even if given.
+  Needs `secrets.use` in addition to `net.request`, same two-scope shape.
+- **v1 does not stream.** A reply arrives as one value, not incrementally — `chrome.runtime.sendMessage`
+  carries a single response, and streaming would need a different transport (`chrome.runtime.connect`)
+  this version doesn't use.
+- **Ollama and CORS**: `ai.ask` runs in the background, so the request to your local Ollama carries
+  the extension's own origin (`chrome-extension://…`), which Ollama's default origin allowlist
+  rejects. Start it with `OLLAMA_ORIGINS=*` (or your extension's specific origin) for this to work.
+
 ### Saving a file to disk
 
 `files.save` writes to your Downloads folder — the `GM_download` delta, since there's no page API
@@ -501,7 +540,7 @@ Older scripts declared `needs: ['ai' | 'cache' | 'bus' | 'net' | 'dom']` and cal
 |---|---|
 | `synapse.cache.get/set` | `ctx.api.storage.get/set/remove/keys` under `storage.rw` — namespaced per script |
 | `synapse.bus.emit/on` | *(removed)* — `bus` reached every built-in module's listener, a permission no prompt could describe honestly. `.on()` never worked anyway: a handler function can't cross the clone boundary |
-| `synapse.ai.ask` | *(removed for now)* — it had no implementation behind it and always threw. It comes back as a thin, explicitly-scoped helper |
+| `synapse.ai.ask` | `ctx.api.ai.ask({provider, model, messages})` under `net.request`'s own scope+match — see "Calling an AI provider" above. The old `synapse.ai.ask` had no implementation behind it and always threw; this is a different, thin helper, not a revival of the old `AiService` Port |
 | `needs: ['net'\|'dom']` | *(removed)* — these resolved to nothing at all |
 
 A leftover `needs` field is ignored rather than rejected, but it grants nothing: add `scopes` and

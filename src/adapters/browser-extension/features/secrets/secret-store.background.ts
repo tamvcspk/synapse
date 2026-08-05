@@ -20,7 +20,8 @@ export async function setSecrets(secrets: SecretRecord[], cache: CacheService = 
 }
 
 /** Looked up by name, never by id — a script only ever knows the `secretRef` name it declared, and
- * `net-request-host.ts` (the one runtime caller of this) has nothing else to look it up by. */
+ * neither runtime caller (`net-request-host.ts`, `ai-ask-host.ts` — both via `secret-resolution.ts`)
+ * has anything else to look it up by. */
 export async function findSecretByName(name: string, cache: CacheService = chromeStorageCache): Promise<SecretRecord | undefined> {
   const secrets = await getSecrets(cache);
   return secrets.find((s) => s.name === name);

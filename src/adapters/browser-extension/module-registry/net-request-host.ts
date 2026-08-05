@@ -1,8 +1,7 @@
 import { base64ToBytes, bytesToBase64 } from '../utils/blob-store';
-import { matchesUrlPattern } from '../../../shared/match-pattern';
-import type { SecretRecord } from '../../../shared/secrets';
 import type { SynapseNetRequestOptions, SynapseNetResponse } from '../../../kernel/synapse-api';
 import { findSecretByName } from '../features/secrets/secret-store.background';
+import { resolveSecretForRequest, type SecretLookup } from './secret-resolution';
 
 /**
  * Backs `synapseApi.net.request` (docs/api-inventory.md §2, "priority #1"). Runs in the background
@@ -30,7 +29,7 @@ const MAX_RESPONSE_BYTES = 25 * 1024 * 1024;
 
 export async function performNetRequest(
   options: SynapseNetRequestOptions,
-  secretLookup: (name: string) => Promise<SecretRecord | undefined> = findSecretByName,
+  secretLookup: SecretLookup = findSecretByName,
 ): Promise<SynapseNetResponse> {
   if (typeof options?.url !== 'string' || options.url === '') {
     throw new Error('net.request: "url" is required');
@@ -94,7 +93,7 @@ function requestInit(options: SynapseNetRequestOptions, headers: Record<string, 
 async function resolveHeaders(
   headers: SynapseNetRequestOptions['headers'],
   requestUrl: string,
-  secretLookup: (name: string) => Promise<SecretRecord | undefined>,
+  secretLookup: SecretLookup,
 ): Promise<Record<string, string> | undefined> {
   if (headers === undefined) return undefined;
 
@@ -108,19 +107,13 @@ async function resolveHeaders(
       throw new Error(`net.request: header "${key}" must be a string or { secretRef }`);
     }
 
-    const secret = await secretLookup(raw.secretRef);
-    if (!secret) throw new Error(`net.request: secret "${raw.secretRef}" does not exist`);
-    if (!matchesUrlPattern(requestUrl, secret.allowedHost)) {
-      throw new Error(
-        `net.request: secret "${raw.secretRef}" is bound to "${secret.allowedHost}", which does not match this request's url`,
-      );
-    }
+    const value = await resolveSecretForRequest('net.request', raw.secretRef, requestUrl, secretLookup);
 
     const format = raw.format ?? '{}';
     if (!format.includes('{}')) {
       throw new Error(`net.request: header "${key}"'s format must contain "{}"`);
     }
-    resolved[key] = format.split('{}').join(secret.value);
+    resolved[key] = format.split('{}').join(value);
   }
   return resolved;
 }

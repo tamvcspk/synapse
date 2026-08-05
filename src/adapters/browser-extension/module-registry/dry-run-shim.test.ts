@@ -153,6 +153,17 @@ describe('buildDryRunShimSource', () => {
       expect(errorLine).toMatchObject({ level: 'error', text: 'boom' });
     });
 
+    it('formats an Error argument as "name: message", not JSON.stringify\'s "{}"', async () => {
+      // Real bug, found via a user's own dry run of ai.ask: console.error('x failed', err) relayed
+      // as "x failed {}" because an Error's message/stack are non-enumerable in V8, so
+      // JSON.stringify(err) is '{}' — the actual failure reason was invisible until this was fixed.
+      const { sent } = await run(
+        `globalThis.__synapseModule = { id: 'x', run() { try { throw new Error('bad key'); } catch (err) { console.error('call failed', err); } } };`,
+      );
+      const [line] = logs(sent);
+      expect(line).toMatchObject({ level: 'error', text: 'call failed Error: bad key' });
+    });
+
     it('does not leak the console shadow out of its own IIFE into the shared realm’s global console', async () => {
       // The shadowing `var console` lives inside `buildDryRunShimSource`'s own `(function () {...})()`
       // wrapper (the same IIFE `header()`'s tests already pin as isolating __SYNAPSE_MODULE_ID__/

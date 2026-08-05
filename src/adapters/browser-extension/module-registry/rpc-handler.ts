@@ -242,18 +242,29 @@ async function handleRpc(req: RpcRequest, trustedScopes: TrustedScopeMap, sender
     // inspected). Checked here instead, at the same trust boundary as every other scope check in
     // this function — the actual per-secret host-binding check (independent of any grant, since a
     // secret is bound to a host once at creation, not per script) happens one layer down, in
-    // net-request-host.ts, uniformly for every transport (see that file's own doc comment).
-    if (req.namespace === 'net' && req.method === 'request' && !granted.some((g) => g.scope === 'secrets.use')) {
-      const requestOptions = req.args[0] as { headers?: Record<string, unknown> } | undefined;
-      const referencesSecret = requestOptions?.headers
-        ? Object.values(requestOptions.headers).some(
-            (v) => typeof v === 'object' && v !== null && typeof (v as { secretRef?: unknown }).secretRef === 'string',
-          )
-        : false;
-      if (referencesSecret) {
-        return fail(
-          `Scope "secrets.use" is not granted for module "${req.moduleId}" — required to reference a secret by name in net.request headers`,
-        );
+    // net-request-host.ts/ai-ask-host.ts (via secret-resolution.ts), uniformly for every transport
+    // (see net-request-host.ts's own doc comment). `ai.ask`'s `options.secretRef` is the same shape
+    // of condition, just a plain field instead of a header value — same reasoning, same place.
+    if (!granted.some((g) => g.scope === 'secrets.use')) {
+      if (req.namespace === 'net' && req.method === 'request') {
+        const requestOptions = req.args[0] as { headers?: Record<string, unknown> } | undefined;
+        const referencesSecret = requestOptions?.headers
+          ? Object.values(requestOptions.headers).some(
+              (v) => typeof v === 'object' && v !== null && typeof (v as { secretRef?: unknown }).secretRef === 'string',
+            )
+          : false;
+        if (referencesSecret) {
+          return fail(
+            `Scope "secrets.use" is not granted for module "${req.moduleId}" — required to reference a secret by name in net.request headers`,
+          );
+        }
+      } else if (req.namespace === 'ai' && req.method === 'ask') {
+        const askOptions = req.args[0] as { secretRef?: unknown } | undefined;
+        if (typeof askOptions?.secretRef === 'string') {
+          return fail(
+            `Scope "secrets.use" is not granted for module "${req.moduleId}" — required to reference a secret by name in ai.ask`,
+          );
+        }
       }
     }
 

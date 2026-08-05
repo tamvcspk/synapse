@@ -144,6 +144,13 @@
  *   runs as an async function body; `args` become its own `args` parameter. Gated on the calling
  *   tab's REAL url falling under this call's granted `match` patterns — not a url the script
  *   provides.
+ * - `synapseApi.ai.ask(options: SynapseAiAskOptions): Promise<SynapseAiAskResult>` — requires `net.request`.
+ *   Thin {provider,model,messages} → text helper for OpenAI/Ollama chat completions — not a
+ *   unified LLM abstraction, see the type doc comment. `options.baseUrl` (or the provider's
+ *   default endpoint) must fall under one of this call's granted `net.request` `match` patterns,
+ *   the same requirement calling that endpoint via `net.request` directly would carry. A
+ *   `secretRef` additionally requires `secrets.use`, injected as `Authorization: Bearer
+ *   <value>`.
  * - `synapseApi.lib.hls.parse(text: string, baseUrl: string): SynapseHlsManifest` — no scope required — pure computation (runs in your own world — synchronous).
  *   Parse an HLS (.m3u8) manifest already fetched by the script. No scope: pure computation on
  *   data the caller already has, granted no privilege (docs/api-inventory.md §3.0).
@@ -597,6 +604,54 @@ interface SynapsePageApi {
   eval(code: string, args?: unknown[]): Promise<unknown>;
 }
 
+/** The two providers `ai.ask` speaks natively (docs/ROADMAP.md §11.6). Deliberately NOT an
+ * extensible string: "unified LLM interface" is the hole this method exists to avoid — anything
+ * beyond these two shapes is `net.request` + `secretRef`, not a third branch grafted on here. */
+type SynapseAiProvider = 'openai' | 'ollama';
+
+interface SynapseAiMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+interface SynapseAiAskOptions {
+  provider: SynapseAiProvider;
+  model: string;
+  messages: SynapseAiMessage[];
+  /** Names a secret (`secrets.use`) whose value is injected as `Authorization: Bearer <value>` at
+   * the network boundary — this script never sees it, same mechanism `net.request`'s own
+   * `{secretRef}` header value uses. Required for `'openai'` (no key, no request); ignored for
+   * `'ollama'` (a local server, no auth) even if given. */
+  secretRef?: string;
+  /** Overrides the provider's default endpoint — a self-hosted Ollama on a non-default host/port,
+   * or an OpenAI-compatible proxy. Still checked against this call's own granted `net.request`
+   * `match` (see `SynapseAiApi`'s doc comment on why that's the gating scope). Defaults:
+   * `'https://api.openai.com/v1/chat/completions'` (openai), `'http://localhost:11434/api/chat'`
+   * (ollama). */
+  baseUrl?: string;
+  /** Defaults to 30s, capped at 120s — same cap as `net.request`. */
+  timeoutMs?: number;
+}
+
+interface SynapseAiAskResult {
+  text: string;
+}
+
+/**
+ * `{provider, model, messages} → text` — a thin helper over the two chat-completion shapes worth
+ * saving a script from re-typing by hand, not an agent and not a unified abstraction over every LLM
+ * API (docs/ROADMAP.md §11.6). No scope of its own: gated on `net.request`, the same scope a script
+ * would need to call the provider's endpoint directly — `ai.ask` only shapes the request and
+ * extracts the reply text, it does not open a door `net.request` + `secretRef` didn't already open,
+ * so it does not get a second one.
+ *
+ * **v1 does not stream.** `chrome.runtime.sendMessage`'s reply is one value, not a stream — a
+ * streaming variant would need `chrome.runtime.connect`, not attempted here.
+ */
+interface SynapseAiApi {
+  ask(options: SynapseAiAskOptions): Promise<SynapseAiAskResult>;
+}
+
 /** The facade every caller programs against, delivered as `ctx.api`: to bundled Modules from the
  * Kernel, to uploaded user scripts from the shim. One interface, three transports (in-process /
  * content-script RPC / user script shim) — a method reachable from one but not another is a
@@ -615,6 +670,7 @@ interface SynapseApi {
    * whose method throws with that explanation, since "the page's MAIN world" has no meaning for
    * code that isn't attached to any tab. */
   page: SynapsePageApi;
+  ai: SynapseAiApi;
 }
 
 /** One step of a multi-step script (docs/ROADMAP.md §12.3) — the uploaded-script equivalent of a
