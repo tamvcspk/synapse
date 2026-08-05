@@ -61,7 +61,11 @@ function scopeReference(): string {
   }
 
   lines.push(' * ## Methods', ' *');
-  for (const method of API_METHODS) {
+  // `internal` entries (docs/ROADMAP.md §11.6 item 8's `pipeline.register`/`pipeline.unregister`)
+  // exist only for another public method's own shim code to call — they're absent from
+  // `synapse-api.ts`'s declarations below already, so documenting them here as if a script could
+  // call `synapseApi.pipeline.register(...)` directly would describe an API that doesn't exist.
+  for (const method of API_METHODS.filter((m) => !m.internal)) {
     // Whether a call leaves the page matters to an author: in-world methods are synchronous and
     // take callbacks, RPC ones are async and drop every function they are handed.
     const note = method.transport === 'in-world' ? ' (runs in your own world — synchronous)' : '';

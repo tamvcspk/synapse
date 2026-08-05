@@ -1,4 +1,4 @@
-import type { SynapseApi, SynapsePageApi, SynapseUiApi } from '../../../kernel/synapse-api';
+import type { SynapseApi, SynapsePageApi, SynapsePipelineApi, SynapseUiApi } from '../../../kernel/synapse-api';
 import { htmlToMarkdown } from '../../../shared/html-to-markdown';
 import { isValidMatchPattern, matchesAnyPattern, matchesUrlPattern } from '../../../shared/match-pattern';
 import { parseM3u8 } from '../../../shared/media-manifest-parser';
@@ -10,6 +10,7 @@ import { onMediaProgressLocal, performMediaControl, performMediaDownload, perfor
 import { performMockAdd, performMockList, performMockRemove } from './net-mock-host';
 import { performNetRequest } from './net-request-host';
 import { performPageEval } from './page-eval-host';
+import { performHookRegister, performHookUnregister } from './pipeline-hook-store';
 import { createScriptStorage } from './script-storage';
 
 /** Second argument to `createSynapseApi` — context the transport itself knows and the caller cannot
@@ -99,6 +100,36 @@ function pageApiFor(tabId: number | undefined): SynapsePageApi {
   return { eval: (code, args) => performPageEval(tabId, code, args) };
 }
 
+/** `register` is internal plumbing `pipeline.hook`'s shim code calls on the script's behalf
+ * (`scopes.ts`'s `pipeline.register` catalog entry doc comment) — deliberately NOT part of the
+ * public `SynapseApi`/`SynapsePipelineApi` type, only reachable via `rpc-handler.ts`'s untyped
+ * `api[req.namespace]` reflection dispatch. */
+interface PipelineApiInternal extends SynapsePipelineApi {
+  register(slotName: string, options: { match: string[] }): Promise<void>;
+  unregister(slotName: string): Promise<void>;
+}
+
+/** `hook` itself needs a real "own world" (a `window` to dispatch/listen for the fire/result
+ * CustomEvent round trip) — meaningless for the background service worker, same reason
+ * `backgroundUiStub`/`backgroundPageStub` exist. A background Module has no bundled-Module use case
+ * for hooking a slot anyway (Tier 2 is for user scripts overriding the platform, not the platform
+ * hooking itself), so this is a throwing stub, not a real in-process implementation — `rpc-client.ts`
+ * (dom Module) and `user-script-shim.ts` (uploaded script) each hand-roll their own real `hook`, the
+ * same "every transport builds its own in-world thing" shape `ui`/`media.onProgress` already use. */
+function pipelineApiFor(moduleId: string): PipelineApiInternal {
+  return {
+    hook: () =>
+      Promise.reject(
+        new Error(
+          "synapseApi.pipeline.hook runs only inside a script's own world (content-script or " +
+            'uploaded-script transport) — not reachable in-process from a background Module.',
+        ),
+      ),
+    register: (slotName, options) => performHookRegister(moduleId, slotName, options),
+    unregister: (slotName) => performHookUnregister(moduleId, slotName),
+  };
+}
+
 export function createSynapseApi(moduleId: string, context: SynapseApiContext = {}): SynapseApi {
   return {
     storage: createScriptStorage(moduleId),
@@ -129,5 +160,6 @@ export function createSynapseApi(moduleId: string, context: SynapseApiContext = 
     },
     page: pageApiFor(context.tabId),
     ai: { ask: performAiAsk },
+    pipeline: pipelineApiFor(moduleId),
   };
 }

@@ -210,6 +210,15 @@ export interface ApiMethodDefinition {
    *   both.
    */
   transport: 'rpc' | 'in-world';
+  /** True for an RPC method that exists purely so another (public, `in-world`) method's shim code
+   * can call it internally — `pipeline.register`/`pipeline.unregister` behind `pipeline.hook`, the
+   * same relationship `__synapseCall` itself has to the facade. Never appears as a directly-callable
+   * `ctx.api.<namespace>.<method>` on any transport; still fully scope-checked like any other `rpc`
+   * entry, since it's the one place that check can actually happen (see `pipeline.hook`'s own
+   * doc comment). Consulted only by `user-script-shim.test.ts`'s structural coverage check, so a
+   * namespace's *public* shape doesn't drift from the catalog by requiring an internal-only method
+   * to also be exposed. */
+  internal?: boolean;
 }
 
 /** What a `resourceUrl` extractor gets besides the call's own `args` — populated by
@@ -410,6 +419,53 @@ export const API_METHODS: ApiMethodDefinition[] = [
       'real Chrome. Runs in your own world, like ui.*, and never reaches this scope check the way ' +
       'job()/download() do (a function-valued handler cannot cross the RPC boundary at all).',
     transport: 'in-world',
+  },
+  {
+    namespace: 'pipeline',
+    method: 'hook',
+    // Reuses media's own scope rather than adding an 11th (catalog already at its self-imposed ~10
+    // ceiling) — v1's only slot (media.correlate-url) belongs to the same feature `media.*` already
+    // gates, and a script that could already call media.list/download etc. is exactly who this
+    // should be legible to. Cataloged here for docs/consent-UI completeness only, same as
+    // media.onProgress above — real enforcement is on the separate `pipeline.register` entry below,
+    // since this one (transport: 'in-world') never reaches rpc-handler.ts's check at all.
+    scope: 'media',
+    signature: "hook(slotName: 'media.correlate-url', options: SynapsePipelineHookOptions): Promise<() => void>",
+    description:
+      'Register a handler for a named platform-pipeline slot, scoped by match — a script overrides ' +
+      'one step of a built-in pipeline instead of forking the whole feature (docs/ROADMAP.md §11.6 ' +
+      'Tier 2). Runs in your own world, like ui.*/media.onProgress, since a function-valued handler ' +
+      'cannot cross the RPC boundary — internally calls the separate pipeline.register RPC method to ' +
+      'persist {slotName, match}, which IS scope-checked; a denied registration never gets into the ' +
+      'winner computation, so the locally-held handler here is simply never invoked.',
+    transport: 'in-world',
+  },
+  {
+    namespace: 'pipeline',
+    method: 'register',
+    // Internal plumbing `pipeline.hook`'s shim code calls on the script's behalf — not part of the
+    // public SynapseApi interface (same relationship __synapseCall itself has to the facade). Kept
+    // as its own catalog entry, not folded into `hook`, because THIS is the half that actually
+    // crosses the RPC boundary and is the one place enforcement can happen (see hook's own comment).
+    scope: 'media',
+    signature: "register(slotName: string, options: { match: string[] }): Promise<void>",
+    description:
+      'Internal: persists a pipeline.hook registration so the platform can resolve "who wins this ' +
+      'slot for this URL" without a live callback into every candidate script. Rejects an unknown ' +
+      'slotName or an invalid match array before touching storage (pipeline-hook-store.ts).',
+    transport: 'rpc',
+    internal: true,
+  },
+  {
+    namespace: 'pipeline',
+    method: 'unregister',
+    // Same scope as register/hook above — releasing a slot early needs no more privilege than
+    // claiming one did.
+    scope: 'media',
+    signature: 'unregister(slotName: string): Promise<void>',
+    description: "Internal: releases this script's own pipeline.hook registration early — called by the unsubscribe function hook() returns.",
+    transport: 'rpc',
+    internal: true,
   },
   {
     namespace: 'page',

@@ -2,6 +2,7 @@ import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { API_METHODS } from '../../../kernel/scopes';
 import { SUBSCRIPTION_PUSH_CHANNEL_ID } from '../../../shared/subscription-bridge';
+import { PIPELINE_HOOK_FIRE_CHANNEL_ID, PIPELINE_HOOK_RESULT_CHANNEL_ID } from '../../../shared/pipeline-hook-bridge';
 import { buildShimSource } from './user-script-shim';
 
 /**
@@ -411,6 +412,173 @@ describe('buildShimSource', () => {
     });
   });
 
+  describe('pipeline.hook (Tier 2, docs/ROADMAP.md §11.6 item 8)', () => {
+    /** Own realm builder (not `sharedRealm()`) so the test can keep a handle on `window`/`dispatch`
+     * — needed to both fire the round trip from outside and assert on the result event it dispatches
+     * back, neither of which the existing subscription-only `sharedRealm()` exposes. */
+    function pipelineRealm(sendMessage: (m: any) => unknown): {
+      ctx: vm.Context;
+      window: { addEventListener: (type: string, handler: (event: any) => void) => void };
+      dispatch: ReturnType<typeof fakeWindow>['dispatch'];
+    } {
+      const { window, CustomEvent, dispatch } = fakeWindow();
+      const ctx = vm.createContext({
+        chrome: { runtime: { sendMessage, onMessage: { addListener: () => {} } } },
+        crypto,
+        console,
+        window,
+        CustomEvent,
+      });
+      return { ctx, window: window as { addEventListener: (type: string, handler: (event: any) => void) => void }, dispatch };
+    }
+
+    async function captureApi(moduleId: string, ctx: vm.Context): Promise<any> {
+      vm.runInContext(
+        buildShimSource(
+          moduleId,
+          `globalThis.__synapseModule = { id: ${JSON.stringify(moduleId)}, run: (input, ctx) => { globalThis['captured_' + ${JSON.stringify(moduleId)}] = ctx.api; } };`,
+        ),
+        ctx,
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      return (ctx as any)[`captured_${moduleId}`];
+    }
+
+    it('registers via RPC before resolving, to an unsubscribe function', async () => {
+      const calls: any[] = [];
+      const { ctx } = pipelineRealm((m) => {
+        calls.push(m);
+        return Promise.resolve({});
+      });
+      const api = await captureApi('uuid-hook', ctx);
+
+      const unsubscribe = await api.pipeline.hook('media.correlate-url', { match: ['*://example.com/*'], handler: () => [] });
+
+      expect(typeof unsubscribe).toBe('function');
+      // `calls` also carries this shim's own manifest-report/sub-state-query bookkeeping messages,
+      // sent before `run()`'s body (where captureApi's own module code calls pipeline.hook) ever
+      // executes — filtered down to the one call this test actually cares about.
+      const pipelineCalls = calls.filter((c) => c.namespace === 'pipeline');
+      expect(pipelineCalls).toEqual([
+        expect.objectContaining({
+          namespace: 'pipeline',
+          method: 'register',
+          args: ['media.correlate-url', { match: ['*://example.com/*'] }],
+        }),
+      ]);
+    });
+
+    it('invokes the locally-registered handler when a fire event addresses this script’s moduleId, and dispatches the result back', async () => {
+      const { ctx, window, dispatch } = pipelineRealm(() => Promise.resolve({}));
+      const api = await captureApi('uuid-hook', ctx);
+      const received: unknown[] = [];
+      await api.pipeline.hook('media.correlate-url', {
+        match: ['*://example.com/*'],
+        handler: (fireCtx: unknown) => {
+          received.push(fireCtx);
+          return [{ cssSelector: 'video', url: 'https://example.com/x.m3u8' }];
+        },
+      });
+
+      const results: unknown[] = [];
+      window.addEventListener(PIPELINE_HOOK_RESULT_CHANNEL_ID, (event: any) => results.push(event.detail));
+      dispatch(PIPELINE_HOOK_FIRE_CHANNEL_ID, {
+        requestId: 'req-1',
+        slotName: 'media.correlate-url',
+        moduleId: 'uuid-hook',
+        ctx: { pageUrl: 'https://example.com' },
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(received).toEqual([{ pageUrl: 'https://example.com' }]);
+      expect(results).toEqual([{ requestId: 'req-1', result: [{ cssSelector: 'video', url: 'https://example.com/x.m3u8' }] }]);
+    });
+
+    it('never invokes the handler when the fire event addresses a different moduleId', async () => {
+      const { ctx, window, dispatch } = pipelineRealm(() => Promise.resolve({}));
+      const api = await captureApi('uuid-hook', ctx);
+      const received: unknown[] = [];
+      await api.pipeline.hook('media.correlate-url', {
+        match: ['*://example.com/*'],
+        handler: (fireCtx: unknown) => {
+          received.push(fireCtx);
+          return [];
+        },
+      });
+
+      const results: unknown[] = [];
+      window.addEventListener(PIPELINE_HOOK_RESULT_CHANNEL_ID, (event: any) => results.push(event.detail));
+      dispatch(PIPELINE_HOOK_FIRE_CHANNEL_ID, {
+        requestId: 'req-2',
+        slotName: 'media.correlate-url',
+        moduleId: 'someone-elses-script',
+        ctx: { pageUrl: 'https://example.com' },
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(received).toEqual([]);
+      expect(results).toEqual([]);
+    });
+
+    it('answers with an undefined result rather than hanging when the handler throws', async () => {
+      const { ctx, window, dispatch } = pipelineRealm(() => Promise.resolve({}));
+      const api = await captureApi('uuid-hook', ctx);
+      await api.pipeline.hook('media.correlate-url', {
+        match: ['*://example.com/*'],
+        handler: () => {
+          throw new Error('boom');
+        },
+      });
+
+      const results: unknown[] = [];
+      window.addEventListener(PIPELINE_HOOK_RESULT_CHANNEL_ID, (event: any) => results.push(event.detail));
+      dispatch(PIPELINE_HOOK_FIRE_CHANNEL_ID, {
+        requestId: 'req-3',
+        slotName: 'media.correlate-url',
+        moduleId: 'uuid-hook',
+        ctx: { pageUrl: 'https://example.com' },
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(results).toEqual([{ requestId: 'req-3', result: undefined }]);
+    });
+
+    it('stops answering for a slot once its unsubscribe function has been called', async () => {
+      const { ctx, window, dispatch } = pipelineRealm(() => Promise.resolve({}));
+      const api = await captureApi('uuid-hook', ctx);
+      const received: unknown[] = [];
+      const unsubscribe = await api.pipeline.hook('media.correlate-url', {
+        match: ['*://example.com/*'],
+        handler: (fireCtx: unknown) => {
+          received.push(fireCtx);
+          return [];
+        },
+      });
+      unsubscribe();
+
+      const results: unknown[] = [];
+      window.addEventListener(PIPELINE_HOOK_RESULT_CHANNEL_ID, (event: any) => results.push(event.detail));
+      dispatch(PIPELINE_HOOK_FIRE_CHANNEL_ID, {
+        requestId: 'req-4',
+        slotName: 'media.correlate-url',
+        moduleId: 'uuid-hook',
+        ctx: { pageUrl: 'https://example.com' },
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(received).toEqual([]);
+      expect(results).toEqual([]);
+    });
+
+    it('makes the global guard reject for pipeline.hook rather than act as another script', async () => {
+      const { ctx } = pipelineRealm(() => Promise.resolve({}));
+      await captureApi('uuid-a', ctx);
+      const guard = (ctx as any).synapseApi;
+
+      await expect(guard.pipeline.hook('media.correlate-url', { match: [], handler: () => [] })).rejects.toThrow(/not a global/);
+    });
+  });
+
   describe('RPC namespaces (structural coverage)', () => {
     /**
      * Guards against the exact bug found while adding `media`: a namespace present in
@@ -427,8 +595,13 @@ describe('buildShimSource', () => {
       // docs/api-inventory.md §6 item 8) since it lives on the same ctx.api.media object as the RPC
       // methods, so the real shim's actual keys include both — this has to build the same union or
       // the two would drift apart by construction, not by a bug either side introduced.
+      //
+      // IS filtered to exclude `internal` entries (`pipeline.register`/`pipeline.unregister`,
+      // docs/ROADMAP.md §11.6 item 8): those exist only for `pipeline.hook`'s own shim code to call
+      // via `__synapseCall`, the same relationship `__synapseCall` itself has to the facade — never a
+      // directly-callable `ctx.api.pipeline.register`, by design, not by omission.
       const shape: Record<string, unknown> = {};
-      for (const m of API_METHODS.filter((x) => x.namespace === namespace)) {
+      for (const m of API_METHODS.filter((x) => x.namespace === namespace && !x.internal)) {
         const parts = m.method.split('.');
         let cur = shape;
         for (let i = 0; i < parts.length - 1; i++) {

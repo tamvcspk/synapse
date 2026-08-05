@@ -138,6 +138,13 @@
  *   use of the subscription mechanism docs/api-inventory.md §4 spiked (§6 item 8), confirmed on
  *   real Chrome. Runs in your own world, like ui.*, and never reaches this scope check the way
  *   job()/download() do (a function-valued handler cannot cross the RPC boundary at all).
+ * - `synapseApi.pipeline.hook(slotName: 'media.correlate-url', options: SynapsePipelineHookOptions): Promise<() => void>` — requires `media` (runs in your own world — synchronous).
+ *   Register a handler for a named platform-pipeline slot, scoped by match — a script overrides
+ *   one step of a built-in pipeline instead of forking the whole feature (docs/ROADMAP.md §11.6
+ *   Tier 2). Runs in your own world, like ui.*/media.onProgress, since a function-valued handler
+ *   cannot cross the RPC boundary — internally calls the separate pipeline.register RPC method
+ *   to persist {slotName, match}, which IS scope-checked; a denied registration never gets into
+ *   the winner computation, so the locally-held handler here is simply never invoked.
  * - `synapseApi.page.eval(code: string, args?: unknown[]): Promise<unknown>` — requires `page.eval`.
  *   Run code in the page's own MAIN-world JS context (Tampermonkey's `unsafeWindow`, made an
  *   explicit call) — breaks the isolation the USER_SCRIPT world otherwise guarantees. `code`
@@ -652,6 +659,57 @@ interface SynapseAiApi {
   ask(options: SynapseAiAskOptions): Promise<SynapseAiAskResult>;
 }
 
+/**
+ * Tier 2 composition (docs/ROADMAP.md §11.6 item 8, `.claude/skills/userscript-api` "Composition"):
+ * a platform pipeline declares a named *slot*; a script overrides it for the pages it cares about
+ * via `match`, instead of forking the whole feature. **Synchronous-feeling but takes a closure —
+ * like `ui`/`media.onProgress`, not like the rest of the facade**: `handler` never crosses the RPC
+ * boundary (a function-valued parameter cannot survive structured clone), so it runs entirely in
+ * your own world, and only its already-serializable *return value* is relayed back to the platform.
+ *
+ * **Conflict rule** when more than one script hooks the same slot for an overlapping URL: the more
+ * specific `match` pattern wins; a tie breaks by script order the user has configured (today: a
+ * placeholder — no such setting exists yet, see docs/ROADMAP.md); registration order never decides
+ * anything.
+ *
+ * v1 has exactly one slot. Extend `SynapsePipelineHookOptions`'s `slotName`/ctx/result union when a
+ * second one ships — do not generalize ahead of a second real caller.
+ */
+interface SynapseMediaCorrelateUrlCtx {
+  /** The page this slot fired on — match your `handler`'s own site-specific logic against this,
+   * not against `location.href` read fresh (the two are the same value here, but reading the one
+   * you were given is what makes a future slot with a different `ctx` shape safe to add without
+   * silently changing this one's contract). */
+  pageUrl: string;
+}
+
+interface SynapseMediaCorrelateUrlResult {
+  /** CSS selector identifying the `<video>`/`<audio>` element this `url` belongs to. Re-resolved by
+   * the platform against the live page DOM after `handler` returns — the element itself never
+   * crosses the world boundary, only this selector does. An entry whose selector no longer resolves
+   * (the page changed between fire and response) is skipped, not an error. */
+  cssSelector: string;
+  url: string;
+}
+
+interface SynapsePipelineHookOptions {
+  match: string[];
+  /** Called with the fired slot's `ctx` when this script wins the conflict resolution for the
+   * current page. Return the media URLs your own site-specific logic found — an empty array or a
+   * thrown error both mean "nothing found", never a hang (see `pipeline.hook`'s own doc comment on
+   * `SynapsePipelineApi`). */
+  handler: (ctx: SynapseMediaCorrelateUrlCtx) => SynapseMediaCorrelateUrlResult[] | Promise<SynapseMediaCorrelateUrlResult[]>;
+}
+
+interface SynapsePipelineApi {
+  /** Registers `options.handler` for `slotName` on the pages matched by `options.match`. Resolves
+   * once the registration is accepted (rejects if the required scope — reused from whichever
+   * feature owns the slot, `media` for `'media.correlate-url'` — isn't granted) to an unsubscribe
+   * function; call it to release the slot early (a fresh page load re-registers anyway, since
+   * top-level script code runs again on every navigation). */
+  hook(slotName: 'media.correlate-url', options: SynapsePipelineHookOptions): Promise<() => void>;
+}
+
 /** The facade every caller programs against, delivered as `ctx.api`: to bundled Modules from the
  * Kernel, to uploaded user scripts from the shim. One interface, three transports (in-process /
  * content-script RPC / user script shim) — a method reachable from one but not another is a
@@ -671,6 +729,7 @@ interface SynapseApi {
    * code that isn't attached to any tab. */
   page: SynapsePageApi;
   ai: SynapseAiApi;
+  pipeline: SynapsePipelineApi;
 }
 
 /** One step of a multi-step script (docs/ROADMAP.md §12.3) — the uploaded-script equivalent of a

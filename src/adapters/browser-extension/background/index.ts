@@ -15,6 +15,10 @@ import { createSynapseApi } from '../module-registry/synapse-api-host';
 import type { TrustedScopeMap } from '../module-registry/rpc-handler';
 import { chromeRuntimeBus } from './services/bus';
 import { chromeStorageCache } from './services/cache';
+import { resolveHookWinnerForSlot } from '../module-registry/pipeline-hook-store';
+import { getManifestReports, getScriptMetaMap } from '../module-registry/storage';
+import { resolveScriptLabel } from '../../../shared/resolve-script-label';
+import { PIPELINE_HOOK_WINNER_QUERY_MESSAGE_TYPE } from '../../../shared/pipeline-hook-bridge';
 // import a concrete ai factory once a Module actually declares it — see kernel-bootstrap skill
 
 const injector = new ServiceInjector({
@@ -98,6 +102,32 @@ chrome.runtime.onMessage.addListener((message: DownloadEngineCommand | undefined
 chrome.runtime.onMessage.addListener((message: DownloadEngineEvent | undefined) => {
   if (message?.type !== 'synapse:download-engine-event') return;
   recordMediaJobSnapshot(message);
+});
+
+/**
+ * docs/ROADMAP.md §11.6 item 8 (Tier 2 pipeline hooks) — the ISOLATED-world "who wins slot X for
+ * this URL" query (`content-scripts/pipeline-hook-client.ts`). A dedicated message type, not the
+ * generic `synapse:rpc` envelope, because the caller is platform content-script code, not a user
+ * script going through the facade (same reasoning as every other bespoke relay in this file). Labels
+ * are resolved once per query with the exact same 4-tier fallback the popup/Studio/Side Panel use
+ * (`resolveScriptLabel`) so "user-configured order" ties break on the name a user would actually
+ * recognize, never on a raw moduleId.
+ */
+chrome.runtime.onMessage.addListener((message: { type?: string; slotName?: string; url?: string } | undefined, _sender, sendResponse) => {
+  if (message?.type !== PIPELINE_HOOK_WINNER_QUERY_MESSAGE_TYPE || !message.slotName || !message.url) return;
+  const { slotName, url } = message;
+  void (async () => {
+    const [metaMap, reports] = await Promise.all([getScriptMetaMap(), getManifestReports()]);
+    const labelFor = (moduleId: string): string =>
+      resolveScriptLabel(moduleId, {
+        userLabel: metaMap[moduleId]?.userLabel,
+        reportLabel: reports[moduleId]?.id,
+        fileName: metaMap[moduleId]?.fileName,
+      });
+    const winner = await resolveHookWinnerForSlot(slotName, url, labelFor);
+    sendResponse(winner ?? {});
+  })();
+  return true;
 });
 
 /**

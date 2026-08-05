@@ -70,6 +70,7 @@ function unavailableSynapseApi(moduleId: string): SynapseApi {
     media: { list: fail, inspect: fail, download: fail, job: fail, control: fail, onProgress: failSync },
     page: { eval: fail },
     ai: { ask: fail },
+    pipeline: { hook: fail },
     // hls.parse/toMarkdown/zip have no context dependency to be "unavailable" — pure computation
     // (docs/api-inventory.md §3.0) importable straight from shared/, so the real implementation is
     // always constructible here. `readable` is the one exception: its real implementation lives in

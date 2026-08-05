@@ -387,6 +387,51 @@ __synapseModule = {
 - **`control(jobId, action)`** takes `'pause' | 'resume' | 'cancel' | 'stop-live'` — `'stop-live'`
   only means something for a live (no-`#EXT-X-ENDLIST`) capture, and is a no-op otherwise.
 
+### Overriding one step of a platform pipeline
+
+`pipeline.hook` lets your script fix a *specific* built-in behavior for a *specific* site, instead
+of reimplementing the whole feature yourself. The platform declares a named *slot* inside one of
+its own pipelines; your script registers a handler for it, scoped by `match` the same way
+`net.request`/`net.mock` are. v1 has exactly one slot: `media.correlate-url`, for a site whose
+video player streams through a `blob:` URL none of the built-in detection heuristics can resolve
+to a real, downloadable URL on their own.
+
+```javascript
+__synapseModule = {
+  id: 'fix-example-com-player',
+  scopes: ['media'],
+  async run(input, ctx) {
+    await ctx.api.pipeline.hook('media.correlate-url', {
+      match: ['*://videos.example.com/watch/*'],
+      handler: (fireCtx) => {
+        // Runs only on pages under `match`, and only when none of the platform's own 3 correlation
+        // signals already placed the video — your own site-specific knowledge fills the gap.
+        const el = document.querySelector('video.player[data-manifest]');
+        if (!el) return [];
+        return [{ cssSelector: 'video.player[data-manifest]', url: el.dataset.manifest }];
+      },
+    });
+  },
+};
+```
+
+- **Gated on `media`** — the same scope `list`/`inspect`/`download`/`job` already use, not a
+  separate one: hooking a `media.*` slot needs the same permission calling `media.*` directly would.
+- **`handler` runs in your own world, like `ui.*`/`media.onProgress`** — a function-valued argument
+  cannot cross the RPC boundary, so it never leaves the page. Only its return value (plain data) is
+  reported back.
+- **Return CSS selectors, not elements.** `document.querySelector` inside `handler` runs against the
+  same live page DOM your script already has (`page.dom`, Disclosed) — the platform re-resolves your
+  selector against that DOM after `handler` returns, rather than trying to pass the element itself
+  across a world boundary. An entry whose selector no longer matches anything is skipped, not an
+  error.
+- **Two scripts hooking the same slot for overlapping pages**: the more specific `match` pattern
+  wins. A tie breaks by script order — there is no reorder UI for this yet, so today that's a
+  placeholder (alphabetical by script name), not a setting you can configure.
+- **`hook()` resolves to an unsubscribe function**, same shape as `media.onProgress`. You don't need
+  to call it under normal circumstances — a fresh page load re-registers anyway, since your script's
+  top-level code runs again on every navigation.
+
 ### Running code in the page's own JS context
 
 `page.eval` runs code directly in the page's MAIN-world JS context — the same place a

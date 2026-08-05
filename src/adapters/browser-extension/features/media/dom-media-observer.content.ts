@@ -1,6 +1,8 @@
 import { classifyMediaUrl } from '../../../../shared/media-url-matcher';
 import { createMainWorldChannel } from '../../utils/main-world/event-channel';
 import { createUiSurface } from '../../utils/ui-compositor';
+import { firePipelineHook } from '../../content-scripts/pipeline-hook-client';
+import type { SynapseMediaCorrelateUrlResult } from '../../../../kernel/synapse-api';
 import {
   MAIN_WORLD_REPORT_CHANNEL_ID,
   MAIN_WORLD_CORRELATION_CHANNEL_ID,
@@ -41,6 +43,14 @@ import {
  * `playCorrelatedUrl`, populated only when a SPECIFIC element's own `'play'` event fires — the last
  * resort, for a blob: element neither of the above could place, now scoped to the element that
  * actually started playing instead of applied to every blob: element on the page.
+ *
+ * docs/ROADMAP.md §11.6 item 8 — a 4th signal, `findUnresolvedBlobElements()`/`fireHookForUnresolved()`
+ * below: for a `blob:` element none of the 3 signals above could place, asks whether a user script has
+ * hooked `synapseApi.pipeline.hook('media.correlate-url', …)` for this site. Strictly additive and
+ * async (fire-and-forget from `scanNow()`) — it never touches, reorders, or gates the 3 signals above,
+ * which stay exactly as they were before this signal existed. This is the `[§7.3-open]` Open Point's
+ * escape hatch: the anchor-badge correlation for a given site can now be fixed by a user script
+ * without another guess-and-patch cycle on this file's own heuristics.
  */
 
 interface DomMediaItem {
@@ -103,6 +113,58 @@ function collectCandidates(): CandidateMedia[] {
   return candidates;
 }
 
+// docs/ROADMAP.md §11.6 item 8 (Tier 2 pipeline hooks) — the 4th, lowest-priority signal, additive
+// only: a `blob:` element that STILL has no `correlatedUrl` after all 3 signals above have already
+// been checked (deliberately re-derived here rather than threaded out of collectCandidates(), so
+// this function cannot accidentally change what that one returns for the 3-signal path — see the
+// file's own top comment on why that path stays untouched). Never fires for an element any existing
+// signal already resolved.
+function findUnresolvedBlobElements(): HTMLMediaElement[] {
+  const unresolved: HTMLMediaElement[] = [];
+  for (const el of document.querySelectorAll('video, audio')) {
+    if (!(el instanceof HTMLMediaElement)) continue;
+    const src = el.currentSrc || el.getAttribute('src');
+    if (!src?.startsWith('blob:')) continue;
+    const correlatedUrl = el.getAttribute(HLS_CORRELATION_ATTRIBUTE) ?? blobUrlCorrelation.get(src) ?? playCorrelatedUrl.get(el);
+    if (!correlatedUrl) unresolved.push(el);
+  }
+  return unresolved;
+}
+
+// Tracks elements with an in-flight hook query so a burst of MutationObserver mutations (scanNow()
+// firing many times in quick succession) can't pile up concurrent duplicate round trips for the same
+// element — cleared once that element's query settles, so a later scan can still retry it (e.g. after
+// a background service-worker restart the first attempt raced).
+const hookQueryInFlight = new WeakSet<HTMLMediaElement>();
+
+/** Best-effort, async, fire-and-forget — never awaited by scanNow() itself, so a slow/missing script
+ * hook cannot delay the synchronous 3-signal badge/report path above. `firePipelineHook` already
+ * fails soft (background restarted, no winner, no response within its own timeout all resolve to
+ * `undefined`), so this only has to handle "a script answered with something real". */
+function fireHookForUnresolved(): void {
+  const unresolved = findUnresolvedBlobElements().filter((el) => !hookQueryInFlight.has(el));
+  if (unresolved.length === 0) return;
+  for (const el of unresolved) hookQueryInFlight.add(el);
+
+  const pageUrl = location.href;
+  void firePipelineHook('media.correlate-url', pageUrl, { pageUrl })
+    .then((result) => {
+      if (!Array.isArray(result)) return;
+      for (const entry of result as SynapseMediaCorrelateUrlResult[]) {
+        if (!entry || typeof entry.cssSelector !== 'string' || typeof entry.url !== 'string') continue;
+        const el = document.querySelector(entry.cssSelector);
+        // Only accept a result for an element that was ACTUALLY unresolved when asked — never lets a
+        // hook answer override an element one of the 3 built-in signals already placed correctly.
+        if (!(el instanceof HTMLMediaElement) || !unresolved.includes(el)) continue;
+        showBadges([{ element: el, url: entry.url, correlated: true }]);
+      }
+    })
+    .catch(() => {})
+    .then(() => {
+      for (const el of unresolved) hookQueryInFlight.delete(el);
+    });
+}
+
 // One surface for this owner (docs/ROADMAP.md §11.4). The id is the Module's, supplied here at the
 // composition point — never passed in by whatever calls showBadges — so nothing downstream can
 // address another owner's UI. Badge ids are local to this surface, hence the bare `url`: two owners
@@ -144,6 +206,9 @@ function scanNow(): void {
   // Correlated candidates aren't real DOM-resolved detections — already persisted once via
   // network-sniffer.background.ts's report-main-world-media handling, don't double-report them here.
   report(candidates.filter((c) => !c.correlated).map((c) => c.url));
+  // docs/ROADMAP.md §11.6 item 8 — additive 4th signal, never awaited here (fire-and-forget), so it
+  // cannot delay or alter anything above this line.
+  fireHookForUnresolved();
 }
 
 /** Idempotent per page load — content-scripts/index.ts only calls this once, when the Module is

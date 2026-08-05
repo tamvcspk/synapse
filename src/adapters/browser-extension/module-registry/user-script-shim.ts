@@ -1,4 +1,5 @@
 import { SUBSCRIPTION_PUSH_CHANNEL_ID } from '../../../shared/subscription-bridge';
+import { PIPELINE_HOOK_FIRE_CHANNEL_ID, PIPELINE_HOOK_RESULT_CHANNEL_ID } from '../../../shared/pipeline-hook-bridge';
 import {
   KEY_SEPARATOR,
   SURFACE_QUOTA,
@@ -265,6 +266,48 @@ function __synapseSubscribe(topic, handler) {
 `.trim();
 }
 
+/**
+ * `synapseApi.pipeline.hook` for the USER_SCRIPT world (docs/ROADMAP.md §11.6 item 8, Tier 2) — the
+ * same "local closure + shared-window CustomEvent" shape `subscriptionSource()` above uses, one hop
+ * further: the platform needs the handler's RETURN VALUE back, not just a one-way push (see
+ * `content-scripts/pipeline-hook-client.ts`'s doc comment for the full round trip). `__synapseHook`
+ * does two things, in order: registers `{slotName, match}` with the background over RPC (scope-
+ * checked, persisted — `pipeline.register`) so conflict resolution has something to read, THEN stores
+ * the closure locally, keyed by slotName, only once that RPC call succeeds. A denied registration
+ * therefore never reaches the local map either — the fire listener below can only ever be asked about
+ * a slot the background actually granted, even though nothing stops the closure existing in memory
+ * for one this script never successfully registered.
+ */
+function pipelineHookSource() {
+  const fireChannelId = JSON.stringify(PIPELINE_HOOK_FIRE_CHANNEL_ID);
+  const resultChannelId = JSON.stringify(PIPELINE_HOOK_RESULT_CHANNEL_ID);
+  return `
+const __synapsePipelineHooks = {};
+window.addEventListener(${fireChannelId}, function (event) {
+  var payload = event.detail;
+  if (payload.moduleId !== __SYNAPSE_MODULE_ID__) return;
+  var handler = __synapsePipelineHooks[payload.slotName];
+  if (!handler) return;
+  Promise.resolve().then(function () {
+    return handler(payload.ctx);
+  }).catch(function () {
+    return undefined;
+  }).then(function (result) {
+    window.dispatchEvent(new CustomEvent(${resultChannelId}, { detail: { requestId: payload.requestId, result: result } }));
+  });
+});
+function __synapseHook(slotName, options) {
+  return __synapseCall('pipeline', 'register', [slotName, { match: options.match }]).then(function () {
+    __synapsePipelineHooks[slotName] = options.handler;
+    return function () {
+      delete __synapsePipelineHooks[slotName];
+      __synapseCall('pipeline', 'unregister', [slotName]).catch(function () {});
+    };
+  });
+}
+`.trim();
+}
+
 /** Injected before the user's code: the RPC transport plus the `synapseApi` facade. Must stay in
  * sync with `kernel/synapse-api.ts` (the interface) and `kernel/scopes.ts`'s `API_METHODS` (which
  * is what the background will actually accept) — a method here that isn't in the catalog is
@@ -298,6 +341,8 @@ function __synapseCall(namespace, method, args) {
 ${uiSource()}
 
 ${subscriptionSource()}
+
+${pipelineHookSource()}
 
 // lib.* (docs/api-inventory.md §3.0) — set by user-script-lib-payload.ts, registered as a separate
 // { file } entry BEFORE this code (chrome-module-registry.ts's registerUploadedScript). Captured
@@ -352,6 +397,9 @@ const synapseApi = {
   },
   ai: {
     ask: function (options) { return __synapseCall('ai', 'ask', [options]); },
+  },
+  pipeline: {
+    hook: function (slotName, options) { return __synapseHook(slotName, options); },
   },
   lib: __synapseLib,
 };
@@ -420,6 +468,9 @@ if (!globalThis.synapseApi) {
     },
     ai: {
       ask: __synapseWrongHandle,
+    },
+    pipeline: {
+      hook: __synapseWrongHandle,
     },
     lib: {
       hls: { parse: __synapseWrongHandleSync },

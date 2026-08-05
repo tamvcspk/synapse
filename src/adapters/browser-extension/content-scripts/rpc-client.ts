@@ -14,6 +14,7 @@ import type {
   SynapseMockRuleOptions,
   SynapseNetRequestOptions,
   SynapseNetResponse,
+  SynapsePipelineHookOptions,
 } from '../../../kernel/synapse-api';
 import { htmlToMarkdown } from '../../../shared/html-to-markdown';
 import { isValidMatchPattern, matchesAnyPattern, matchesUrlPattern } from '../../../shared/match-pattern';
@@ -22,6 +23,7 @@ import { SUBSCRIPTION_PUSH_CHANNEL_ID, type SubscriptionPushPayload } from '../.
 import { buildZip } from '../../../shared/zip';
 import { readable } from '../module-registry/lib-readable';
 import { createMainWorldChannel } from '../utils/main-world/event-channel';
+import { installPipelineHookResponder } from './pipeline-hook-client';
 import { createUiSurface } from '../utils/ui-compositor';
 
 // docs/api-inventory.md §6 item 8 — the same DOM-CustomEvent channel content-scripts/index.ts
@@ -80,6 +82,12 @@ async function call(
  * in-world compositor here, with the same `moduleId` this function was given. Identity still comes
  * from the caller of THIS function (the composition root), never from the Module's own code. */
 export function buildDomModuleApi(moduleId: string): SynapseApi {
+  // docs/ROADMAP.md §11.6 item 8 (Tier 2 pipeline hooks) — one responder per Module, answering every
+  // fire addressed to this moduleId regardless of which slot; `pipeline.hook` below just populates
+  // this map, it never installs a second listener.
+  const pipelineHooks = new Map<string, (ctx: unknown) => unknown>();
+  installPipelineHookResponder(moduleId, (slotName) => pipelineHooks.get(slotName));
+
   return {
     storage: {
       get: (key) => call(moduleId, 'storage', 'get', [key]),
@@ -121,6 +129,16 @@ export function buildDomModuleApi(moduleId: string): SynapseApi {
     },
     ai: {
       ask: (options: SynapseAiAskOptions) => call(moduleId, 'ai', 'ask', [options]) as Promise<SynapseAiAskResult>,
+    },
+    pipeline: {
+      hook: async (slotName: 'media.correlate-url', options: SynapsePipelineHookOptions) => {
+        await call(moduleId, 'pipeline', 'register', [slotName, { match: options.match }]);
+        pipelineHooks.set(slotName, options.handler as (ctx: unknown) => unknown);
+        return () => {
+          pipelineHooks.delete(slotName);
+          void call(moduleId, 'pipeline', 'unregister', [slotName]).catch(() => {});
+        };
+      },
     },
   };
 }
