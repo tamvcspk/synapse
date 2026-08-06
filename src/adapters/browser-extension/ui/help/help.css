@@ -1,0 +1,106 @@
+body {
+  max-width: none;
+}
+
+.help-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--pico-muted-border-color, currentColor);
+}
+
+.help-header > div {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.help-header h1 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+.version-badge {
+  font-size: 0.8rem;
+  color: var(--pico-muted-color);
+}
+
+.help-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 2rem;
+  padding: 1.5rem;
+  max-width: 60rem;
+  margin: 0 auto;
+}
+
+.help-nav {
+  position: sticky;
+  top: 1.5rem;
+  flex: 0 0 14rem;
+}
+
+.help-nav ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.help-nav li {
+  margin: 0.15rem 0;
+}
+
+.help-nav .nav-sub {
+  padding-left: 1rem;
+  font-size: 0.85rem;
+}
+
+.help-content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.help-content section {
+  margin-bottom: 2rem;
+}
+
+/* Rendered from raw markdown text (see main.ts's file banner for why there's no parser) — wraps
+   like prose but keeps line breaks and indentation, so fenced code blocks stay legible even with
+   their backticks showing literally. */
+.guide-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.guide-text.mono {
+  font-family: var(--pico-font-family-monospace, monospace);
+  font-size: 0.85rem;
+}
+
+.reference-note {
+  color: var(--pico-muted-color);
+}
+
+.mono {
+  font-family: var(--pico-font-family-monospace, monospace);
+}
+
+/* docs/icon-inventory.md — same invert-in-dark-mode rule every other extension page's own
+   stylesheet carries (no shared stylesheet between Vite entry points). */
+.syn-icon-img {
+  width: 16px;
+  height: 16px;
+  vertical-align: -3px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .syn-icon-img {
+    filter: invert(1);
+  }
+}

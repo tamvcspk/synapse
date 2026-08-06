@@ -43,6 +43,8 @@ export interface ListViewCallbacks {
    * `entries`, no reload. Separated from every other callback here since it's the one action that
    * changes nothing about any Module, only what this render call shows. */
   onTabChange(tab: ModuleListTab): void;
+  /** Opens the Help page (docs/ROADMAP.md §11.6 item 9) in its own Tab. */
+  onOpenHelp(): void;
 }
 
 /** Builtin (`source: 'bundled'`) and uploaded ("My Scripts") Modules used to render interleaved in
@@ -84,6 +86,7 @@ export function renderListView(
         li(button({ title: 'New script', 'aria-label': 'New script', onclick: callbacks.onNewScript }, icon(ICONS.fileText))),
         li(button({ title: 'Upload script', 'aria-label': 'Upload script', onclick: callbacks.onUpload }, icon(ICONS.upload))),
         li(button({ title: 'Refresh', 'aria-label': 'Refresh', onclick: callbacks.onRefresh }, icon(ICONS.refreshCw))),
+        li(button({ title: 'Help', 'aria-label': 'Help', onclick: callbacks.onOpenHelp }, icon(ICONS.info))),
       ),
     ),
     div(

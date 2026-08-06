@@ -65,6 +65,9 @@ export interface RouterHandlers {
   onRenameSave(label: string): void;
   onDeleteConfirm(): void;
   onReloadExtension(): void;
+  /** Opens the Help page (docs/ROADMAP.md §11.6 item 9) in its own Tab — `anchor` jumps straight to
+   * one of its sections (e.g. the scope-consent view links to "scopes-and-consent"). */
+  onOpenHelp(anchor?: string): void;
 }
 
 export async function render(
@@ -93,6 +96,7 @@ export async function render(
         onDelete: handlers.onDelete,
         onClone: handlers.onClone,
         onTabChange: handlers.onTabChange,
+        onOpenHelp: handlers.onOpenHelp,
       },
       listProps,
     );
@@ -134,5 +138,6 @@ export async function render(
   renderScopeConsentView(root, view, {
     onApprove: handlers.onConsentApprove,
     onDeny: handlers.onConsentDeny,
+    onOpenHelp: () => handlers.onOpenHelp('scopes-and-consent'),
   });
 }

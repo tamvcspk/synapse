@@ -12,6 +12,7 @@ công khai `synapseApi.ui.*`.
 |---|---|---|---|
 | ⬆ | `upload` | nav, nút Upload script | Tải script lên |
 | ⟳ | `refresh-cw` | nav, nút Refresh | Làm mới danh sách |
+| (không có) | `info` | nav, nút Help (§11.6 item 9) | Mở trang Help ở tab riêng — tái dùng icon đã có ở `item-form-view.ts` thay vì tải thêm icon "circle-question" mới |
 | ⚙ | `settings` | `module-gear` | Mở Management View (Collection schema) |
 | 👁 / 🙈 | `eye` / `eye-off` | `ui-valve` | Hiện/ẩn UI của module (§11.4) |
 | ✏️ | `pencil` | lifecycle, nút Rename | Đổi tên script (§12.1) |

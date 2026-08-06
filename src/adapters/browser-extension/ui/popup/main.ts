@@ -14,6 +14,7 @@ import type { ModuleListTab } from './views/list-view';
 import { DASHBOARD_PATH } from '../dashboard/dashboard-path';
 import { REVIEW_PATH } from '../review-path';
 import { STUDIO_PATH } from '../studio/studio-path';
+import { HELP_PATH } from '../help/help-path';
 
 const registry = new ChromeModuleRegistryService();
 const root = document.getElementById('root')!;
@@ -124,6 +125,7 @@ const handlers: RouterHandlers = {
   onRenameSave: handleRenameSave,
   onDeleteConfirm: handleDeleteConfirm,
   onReloadExtension: () => chrome.runtime.reload(),
+  onOpenHelp: handleOpenHelp,
 };
 
 // Navigation Flow (docs/ROADMAP.md #2, extended by #2.5): a Collection schema opens the Dashboard
@@ -161,6 +163,15 @@ function openStudio(entry?: RegistryEntry): void {
 function handleClone(entry: RegistryEntry): void {
   if (!entry.templateId) return;
   const url = `${chrome.runtime.getURL(STUDIO_PATH)}?templateId=${encodeURIComponent(entry.templateId)}`;
+  void chrome.tabs.create({ url });
+  window.close();
+}
+
+/** Opens the Help page (docs/ROADMAP.md §11.6 item 9) — same tab-open-then-close-popup shape as
+ * `openDashboard`/`openStudio`. `anchor` (the scope-consent view's "What do these mean?" link)
+ * jumps straight to that section instead of landing at the top. */
+function handleOpenHelp(anchor?: string): void {
+  const url = `${chrome.runtime.getURL(HELP_PATH)}${anchor ? `#${anchor}` : ''}`;
   void chrome.tabs.create({ url });
   window.close();
 }

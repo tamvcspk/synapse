@@ -27,6 +27,9 @@ export default defineConfig({
         // §12.2 Monaco spike (docs/ROADMAP.md) — NOT the real Studio page yet, see studio/main.ts's
         // doc comment. Same "extra Vite HTML entry" treatment as the others above.
         studio: 'src/adapters/browser-extension/ui/studio/index.html',
+        // Help page (docs/ROADMAP.md §11.6 item 9) — same "extra Vite HTML entry" treatment as the
+        // others above, opened the same way (chrome.tabs.create from the popup).
+        help: 'src/adapters/browser-extension/ui/help/index.html',
       },
     },
   },

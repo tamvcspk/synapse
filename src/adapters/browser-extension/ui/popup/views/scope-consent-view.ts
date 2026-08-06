@@ -23,6 +23,9 @@ export interface ScopeConsentViewProps {
 export interface ScopeConsentViewCallbacks {
   onApprove(): void;
   onDeny(): void;
+  /** Opens the Help page (docs/ROADMAP.md §11.6 item 9) scrolled to its "Scopes and consent"
+   * section — router.ts supplies the anchor, this view just needs a click target. */
+  onOpenHelp(): void;
 }
 
 export function renderScopeConsentView(
@@ -39,6 +42,7 @@ export function renderScopeConsentView(
     root,
     div(
       p(strong(props.moduleLabel ?? props.moduleId), ' requests:'),
+      p(small(button({ type: 'button', class: 'contrast outline', onclick: callbacks.onOpenHelp }, 'What do these mean?'))),
 
       enforced.length > 0
         ? div(
