@@ -1,343 +1,95 @@
 ---
 name: kernel-bootstrap
-description: Scaffold the minimal Synapse Kernel (Manifest Resolver, Service Injector, Execution Scheduler) in TypeScript for the Manifest V3 browser extension target, matching docs/design.md sections 3.A and 7. Use once, when the project has no src/kernel yet and the user wants to start writing the actual runtime instead of just modules.
+description: The Synapse Kernel's invariants — what the Core (Manifest Resolver, Service Injector, Execution Scheduler) is allowed to be, and the rules that must hold when changing src/kernel/ or the background composition root. Use when editing the Kernel, the Service factories, or background/index.ts, or when asked why the Kernel is shaped the way it is.
 ---
 
-# Kernel Bootstrap
+# Kernel invariants
 
-Scaffold the Kernel core described in `docs/design.md` — the *only* mandatory part of Synapse. It
-stays deliberately thin: it resolves a Module's `needs[]`, injects just those Services, and runs
-the Module. It must never grow AI/Decision-Engine logic itself — that belongs inside Modules.
+The Kernel is the only mandatory part of Synapse and is deliberately thin: it reads a Module's
+declarations, injects exactly the Services declared, and runs it. **It must never grow AI or
+decision-engine logic** — that belongs inside Modules.
 
-Synapse is a **Manifest V3 browser extension** (docs/design.md §7). This shapes the Kernel in two
-ways:
-1. The Kernel itself (`src/kernel/`) stays free of `chrome.*` — no such calls in
-   `module.ts`/`service-injector.ts`/`scheduler.ts`. Only the *Service implementations* (the
-   factories passed into the Kernel) touch `chrome.*`.
-2. The Kernel instance lives in the **background service worker**, which MV3 can kill and restart
-   between events at any time. Never rely on in-memory state surviving between invocations —
-   `Cache`/`Session State` implementations must read/write `chrome.storage`, not a plain `Map`.
+> **This is not a scaffolding skill.** The Kernel exists (`src/kernel/`) and has diverged from any
+> template. Read the real files; this skill records the rules that made them that shape. If you find
+> yourself creating `src/kernel/`, stop — you are in the wrong repo.
 
-This `chrome.*`-free Core is what docs/design.md §1 calls **Hexagonal Architecture**: the Kernel +
-`Module` contract is the Core, `AiService`/`CacheService`/`BusService` are the Ports, and the
-`chrome.*`-backed factories below are the (only) Adapter.
+## The five invariants
 
-**A second Adapter is ruled out — this shipped (docs/ROADMAP.md §11.1, docs/design.md §8).** An
-audit found ~0% of the browser-extension Adapter could ever port: every feature depends on
-`chrome.webRequest`, DNR, CDP, `chrome.userScripts`, Offscreen Documents, or a real web page.
-Synapse's domain *is* the browser. Hexagonal is retained for **testability and dependency
-discipline** — keeping `kernel/` and `shared/` provably free of `chrome.*`, which is what lets
-`npm test` run them in plain Node — **not** for portability; never justify a design choice by
-appealing to a future Adapter.
+1. **`src/kernel/` imports no `chrome.*`, no DOM, no I/O.** Only Service *implementations* — the
+   factories passed in from `background/index.ts` — touch `chrome.*`. The reason is **testability
+   and MAIN-world survivability**, both checkable on every commit; it is **not** portability. Never
+   justify a Kernel design choice by appealing to a hypothetical second host (see §4).
 
-Consequently there is **no `RuntimeEnv` type, no `Module.supportedEnvs`, and no
-`kernel/environment-guard.ts`.** Don't scaffold any of them, and don't add a `currentEnv` parameter
-to the Kernel constructor. A Module declares *capabilities* and *execution context*, never a host
-runtime.
+2. **The Kernel runs in the background service worker, which Chrome kills at will.** Never hold
+   critical state in memory across events. Anything that must survive goes through `chrome.storage`.
+   An in-memory flag tracking external state (e.g. "is this script registered?") *will* drift —
+   query the real source instead.
 
-## Guard
+3. **`needs` and `scopes` are different axes and must stay separate fields.**
+   `needs: 'ai' | 'cache' | 'bus'` is build-time DI deciding what lands in `ctx.services`.
+   `scopes` is permission, shown to the user, enforced in `rpc-handler.ts`.
+   `'net'` and `'dom'` are **not** capabilities — they resolved to no Service, so declaring them was
+   a silent no-op, and they were removed. `bus` can be a Capability but must never become a Scope.
 
-Check for `src/kernel/` first. If it already exists, stop and ask the user before touching it —
-this skill is for the initial bootstrap, not for re-scaffolding over an existing Kernel.
+4. **A throwing `run()` is caught and reported, never allowed to abort the pipeline or bus
+   dispatch.** This holds uniformly regardless of Module source — uploaded code has no compile-time
+   guarantee of correctness, and one bad Module must not take down the others. Callers should not
+   add a second layer of error handling around `kernel.run()` that duplicates this.
 
-**In this repo the Kernel exists and has since diverged from the templates below** — they are kept
-as the minimal shape, not as a description of the current code. Two differences that matter if you
-read them for reference: `Capability` is `'ai' | 'cache' | 'bus'` (`'net'`/`'dom'` were removed —
-they injected no Service, so declaring them was a silent no-op), and `ModuleContext` also carries
-`api: SynapseApi`, the public contract (`kernel/synapse-api.ts`, see `userscript-api`), which is
-built per-Module by an `api` factory on the injector. Permission lives on `Module.scopes`, not on
-`needs`.
+5. **Discovery order is not execution order.** A glob's iteration order is meaningless for
+   sequencing. If Modules must run in a specific order, that is a `Workflow` (`{id, steps: string[]}`,
+   `kernel/workflow.ts`) resolved explicitly — never inferred from a registry listing.
 
-## Files to create
+## Bus registration has a trap worth knowing
 
-### `src/kernel/module.ts` — the contract every Module implements
+`Kernel.run` splits Modules by exactly one condition: whether `needs` includes `'bus'`. A Module
+that listens on the Bus but forgets to declare it is never registered, so its messages fall into
+nothing — **and the write path may report success anyway** if the caller only treats an explicit
+`{ok:false}` as failure (a missing listener means no response at all, which is not `ok:false`).
+This shipped once and presented as "saving silently does nothing". Check the declaration first when
+a Bus-driven Module appears inert.
 
-```ts
-export type Capability = 'ai' | 'cache' | 'bus';
+## No dispatch listener without a concrete caller
 
-export interface ModuleContext {
-  services: Partial<{
-    ai: AiService;
-    cache: CacheService;
-    bus: BusService;
-  }>;
-}
+Do not add a generic `message.workflowId → kernel.run(...)` listener. One existed for months as
+`kernel.run([], message.input)` — a hardcoded empty array, `workflowId` read by nothing — before it
+was deleted. Worse, a listener that calls `sendResponse` unconditionally **wins the race** against
+every other listener for the same message (Chrome takes whichever lands first), which became a real
+bug once request/response relays existed. Wire a dispatch only when a concrete caller and a concrete
+Workflow exist, and always guard on a required field of its own message shape before touching
+`sendResponse`.
 
-export interface Module<In = unknown, Out = unknown> {
-  id: string;
-  needs?: Capability[];
-  run(input: In, ctx: ModuleContext): Promise<Out>;
-}
+## Service factories: write them when a Module declares the capability, not before
 
-export interface AiService {
-  ask(input: unknown): Promise<unknown>;
-}
+`ServiceInjector` instantiates lazily and only what is declared; a Module declaring nothing triggers
+no factory at all. That property is the point of "Progressive Complexity" — preserve it. The
+concrete `chrome.*`-backed implementations live in `background/services/`.
 
-export interface CacheService {
-  get(key: string): Promise<unknown | undefined>;
-  set(key: string, value: unknown): Promise<void>;
-}
+`background/index.ts` is the **composition root**: it constructs the Kernel, supplies factories,
+registers the RPC handler, and calls `chrome.userScripts.configureWorld(...)`. It owns wiring, never
+business logic.
 
-export interface BusService {
-  emit(event: string, payload: unknown): void;
-  on(event: string, handler: (payload: unknown) => void): void;
-}
+## The `chrome.userScripts.configureWorld` trap
 
-// Reported by the Scheduler when a Module's run() throws, instead of crashing the pipeline/bus.
-export interface ModuleFailure {
-  moduleId: string;
-  error: string;
-}
-```
+That call needs a **synchronous** `try/catch` around the property access *and* the call, not just a
+`.catch()` on the promise. When the user has not enabled "Allow user scripts", `chrome.userScripts`
+is `undefined` — so the throw happens on property access, before any `.catch()` can attach. An
+uncaught throw during service-worker top-level evaluation **discards every listener in the file**,
+including the Bus registration every Module depends on. This shipped and broke all messaging, not
+just uploaded-script support.
 
-### `src/kernel/service-injector.ts` — lazy, opt-in service instantiation
+## Never
 
-```ts
-import type { AiService, BusService, Capability, CacheService, ModuleContext } from './module';
+- **Never build a second Adapter** (`vscode`/`electron`/`node`), a runtime-env type, a
+  `supportedEnvs` field, or an Environment Guard. Audited and rejected — `docs/design.md` §8. If the
+  user raises it, say so plainly and confirm before doing any such work.
+- **Never let a Module import Kernel internals.** Modules import from `kernel/module` only, never
+  `service-injector`/`scheduler`.
+- **Never put a feature's domain types in `kernel/module.ts`.** That file is the generic contract
+  surface; a single feature's data shape belongs in `src/shared/` or beside its feature.
 
-export class ServiceInjector {
-  private ai?: AiService;
-  private cache?: CacheService;
-  private bus?: BusService;
+## See also
 
-  constructor(private factories: {
-    ai?: () => AiService;
-    cache?: () => CacheService;
-    bus?: () => BusService;
-  }) {}
-
-  resolve(needs: Capability[] = []): ModuleContext {
-    const services: ModuleContext['services'] = {};
-
-    if (needs.includes('ai')) {
-      services.ai = this.ai ??= this.requireFactory('ai', this.factories.ai)();
-    }
-    if (needs.includes('cache')) {
-      services.cache = this.cache ??= this.requireFactory('cache', this.factories.cache)();
-    }
-    if (needs.includes('bus')) {
-      services.bus = this.bus ??= this.requireFactory('bus', this.factories.bus)();
-    }
-
-    return { services };
-  }
-
-  private requireFactory<T>(name: string, factory?: () => T): () => T {
-    if (!factory) throw new Error(`No factory registered for capability "${name}"`);
-    return factory;
-  }
-}
-```
-
-Only the capabilities a Module declares get touched — a Module with `needs: []` never triggers
-any factory call.
-
-### `src/kernel/scheduler.ts` — sync pipeline vs bus dispatch
-
-```ts
-import type { Module, ModuleFailure } from './module';
-import type { ServiceInjector } from './service-injector';
-
-function toFailure(mod: Module, err: unknown): ModuleFailure {
-  return { moduleId: mod.id, error: err instanceof Error ? err.message : String(err) };
-}
-
-export class Scheduler {
-  constructor(private injector: ServiceInjector) {}
-
-  /**
-   * Direct pipeline: modules without 'bus' run in sequence, output feeds the next input.
-   * A throwing module is reported via onFailure and treated as a pass-through no-op (the
-   * previous value flows to the next module) rather than aborting the pipeline — this must
-   * hold uniformly regardless of Module source (bundled or uploaded, see the module-registry
-   * skill), since there's no compile-time guarantee for uploaded code.
-   */
-  async runPipeline(modules: Module[], initialInput: unknown, onFailure?: (f: ModuleFailure) => void): Promise<unknown> {
-    let value = initialInput;
-    for (const mod of modules) {
-      const ctx = this.injector.resolve(mod.needs);
-      try {
-        value = await mod.run(value, ctx);
-      } catch (err) {
-        onFailure?.(toFailure(mod, err));
-      }
-    }
-    return value;
-  }
-
-  /** Bus dispatch: modules declaring 'bus' get registered instead of called directly. */
-  registerOnBus(mod: Module, bus: { on: Function }, onFailure?: (f: ModuleFailure) => void): void {
-    const ctx = this.injector.resolve(mod.needs);
-    bus.on(mod.id, async (payload: unknown) => {
-      try {
-        await mod.run(payload, ctx);
-      } catch (err) {
-        onFailure?.(toFailure(mod, err));
-      }
-    });
-  }
-}
-```
-
-### `src/kernel/index.ts` — the Kernel entry point
-
-```ts
-import { ServiceInjector } from './service-injector';
-import { Scheduler } from './scheduler';
-import type { Module, ModuleFailure } from './module';
-
-export class Kernel {
-  private scheduler: Scheduler;
-
-  constructor(private injector: ServiceInjector) {
-    this.scheduler = new Scheduler(injector);
-  }
-
-  async run(modules: Module[], input: unknown, onFailure?: (f: ModuleFailure) => void): Promise<unknown> {
-    const [pipelineModules, busModules] = partition(modules, (m) => !m.needs?.includes('bus'));
-    for (const mod of busModules) {
-      const ctx = this.injector.resolve(mod.needs);
-      if (ctx.services.bus) this.scheduler.registerOnBus(mod, ctx.services.bus, onFailure);
-    }
-    return this.scheduler.runPipeline(pipelineModules, input, onFailure);
-  }
-}
-
-function partition<T>(arr: T[], pred: (x: T) => boolean): [T[], T[]] {
-  const yes: T[] = [], no: T[] = [];
-  for (const x of arr) (pred(x) ? yes : no).push(x);
-  return [yes, no];
-}
-```
-
-`onFailure` is optional and purely additive — omitting it preserves the original
-(pre-graceful-fail) contract for any caller that doesn't care about per-Module failure reporting.
-
-## Placement: background entry point + content-script relay
-
-The Kernel itself is platform-agnostic (`src/kernel/`), but it only ever *runs* inside a specific
-Adapter's background service worker. All browser-extension-specific code — including this
-entry point and the content-script relay — lives under `src/adapters/browser-extension/`, never
-directly under `src/`. Not to reserve room for a sibling Adapter (there won't be one, design.md §8)
-but because that nesting is what makes "does `kernel/` import `chrome.*`?" a question with a
-mechanical answer.
-
-### `src/adapters/browser-extension/background/index.ts` — where the Kernel actually lives
-
-```ts
-import { Kernel } from '../../../kernel';
-import { ServiceInjector } from '../../../kernel/service-injector';
-// import concrete factories once the user actually needs ai/cache/bus — see below
-
-const injector = new ServiceInjector({
-  // ai: () => chromeAiAdapter,
-  // cache: () => chromeStorageCache,
-  // bus: () => chromeRuntimeBus,
-});
-const kernel = new Kernel(injector);
-
-// Run whatever Modules this project actually has, e.g. the background-module set:
-void kernel.run(BACKGROUND_MODULES, undefined, (failure) => {
-  console.error(`Synapse: background module "${failure.moduleId}" failed`, failure.error);
-});
-```
-
-**Don't scaffold a generic `message.workflowId` → `kernel.run(...)` dispatch listener.** An earlier
-version of this skill did, and the result sat in `background/index.ts` for months as
-`kernel.run([], message.input)` — a hardcoded empty array, with `workflowId` read by nothing — until
-§11.1 deleted it. Worse, a listener that calls `sendResponse` unconditionally *wins the race*
-against every other listener for the same message (Chrome takes whichever `sendResponse` lands
-first), which turned into a real bug once request/response relays were added. Wire a dispatch only
-when there is a concrete caller and a concrete Workflow to dispatch to, and always guard it on a
-required field of its own message shape before touching `sendResponse`.
-
-If the user also wants Module activate/deactivate, uploaded modules, or a popup UI, that's the
-separate **`module-registry`** skill — it layers `registerRpcHandler(injector)` and
-`chrome.userScripts.configureWorld(...)` onto this same `background/index.ts`. Don't add those
-calls here unless asked; this skill only bootstraps the baseline Kernel.
-
-### `src/adapters/browser-extension/content-scripts/relay.ts` — thin relay for `dom`-declaring Modules
-
-Content scripts don't run the Kernel — they only host Modules that need `document`/`window`. A
-content-script Module still gets invoked *from* the background via messaging; the relay forwards
-the call and returns the result. Wrap the call in try/catch (a throwing Module must not leave the
-message channel hanging — same graceful-fail principle as the Scheduler above):
-
-```ts
-import type { Module } from '../../../kernel/module';
-
-export function registerDomModule(mod: Module) {
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message.moduleId !== mod.id) return; // not for us
-    (async () => {
-      try {
-        sendResponse(await mod.run(message.input, { services: {} }));
-      } catch (err) {
-        sendResponse({ error: err instanceof Error ? err.message : String(err) });
-      }
-    })();
-    return true;
-  });
-}
-```
-
-If the `module-registry` skill has already been applied, `registerDomModule` also gates on the
-persisted active flag (`module-registry/storage.ts`'s `isModuleActive`) before dispatching — check
-whether that file exists before assuming this bare version is current.
-
-A `dom` Module typically doesn't need `ai`/`cache`/`bus` *itself* — if it does, route through the
-background via `chrome.runtime.sendMessage` from inside `run()`, don't reimplement those services
-in the content-script context.
-
-## Reference Service implementations (background-only, wire in when actually needed)
-
-```ts
-// src/adapters/browser-extension/background/services/cache.ts
-import type { CacheService } from '../../../../kernel/module';
-
-export const chromeStorageCache: CacheService = {
-  async get(key) {
-    const result = await chrome.storage.local.get(key);
-    return result[key];
-  },
-  async set(key, value) {
-    await chrome.storage.local.set({ [key]: value });
-  },
-};
-```
-
-```ts
-// src/adapters/browser-extension/background/services/bus.ts
-import type { BusService } from '../../../../kernel/module';
-
-export const chromeRuntimeBus: BusService = {
-  emit(event, payload) {
-    chrome.runtime.sendMessage({ event, payload });
-  },
-  on(event, handler) {
-    chrome.runtime.onMessage.addListener((message) => {
-      if (message.event === event) handler(message.payload);
-    });
-  },
-};
-```
-
-Don't write these until a Module actually declares the corresponding capability — an empty
-`factories: {}` is the correct state for a project with only `net`-only Modules so far. When a
-factory does end up wrapping a specific third-party SDK (e.g. a particular AI provider's client),
-check the `doc-sync` skill's "Auto-invocation from other skills" checklist first — the same
-version-drift risk applies here as in any Module.
-
-## After scaffolding
-
-- Don't wire real `ai`/`cache`/`bus` factory implementations yet unless the user asks — leave
-  `Kernel` construction with factories the user supplies, so a Module-only project never needs to
-  configure services it doesn't use.
-- Point the user at the `module-scaffold` skill for creating Modules against this `Module` type,
-  and at the `module-registry` skill if they want auto-discovery, activate/deactivate, or
-  runtime-uploaded Modules (a separate, optional layer on top of this baseline Kernel).
-- Don't build a `vscode`/`electron`/`node` Adapter, factory, entry point, or runtime-env type even
-  if the user mentions one in passing — that direction was audited and rejected (docs/design.md §8),
-  not merely deferred. Say so and confirm explicitly before starting any work on a second Adapter.
-- Report which files were created; don't run a build/typecheck unless the project already has
-  `tsconfig.json`/tooling configured (check first — this may be the first TS code in the repo).
+- `docs/INDEX.md` — where everything lives · `docs/GLOSSARY.md` — what the nouns mean
+- `module-registry` skill — the upload/permission layer built on top of this Kernel
+- `module-scaffold` skill — creating a Module against these contracts

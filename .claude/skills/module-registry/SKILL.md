@@ -46,30 +46,32 @@ What that means concretely, since a lot of older wording elsewhere assumes other
   other script's calls went out under *that* script's `moduleId` and grants. The name now holds a
   stub that rejects with an explanation.
 
-## Direction of travel — §12 Script Studio (planned, not built)
+## Script lifecycle — Script Studio, shipped
 
-The registry's *permission* model is settled (above). Its **lifecycle** model is not, and
-docs/ROADMAP.md §12 is where that plan lives. Read it before touching upload, the popup list, or
-anything that stores per-script state — several things below are known-incomplete on purpose:
+Everything in this section is **built** (docs/CHANGELOG.md §12; full decision table in
+docs/design.md §13). Read design.md §13 before touching upload, the popup list, the Studio editor,
+or anything that stores per-script state. The load-bearing invariants:
 
-- An uploaded script has **no name of its own** until its first run reports one, so the popup shows
-  a raw uuid. §12.1 adds a `synapse:script-meta` record (file name + user-set label) and one
-  `resolveScriptLabel()` used everywhere — don't invent a second fallback chain locally.
-- There is **no delete path** (`deleteUploadedSource`/`clearScriptStorage` exist with no caller).
-  §12.1 makes one `deleteScript(id)` that clears all seven stores; a partial delete leaves ghosts.
-- Editing happens in a **Dashboard "Studio" tab**, never the popup, and a save re-registers the
-  script and re-hashes it. One subtlety worth not re-deriving: an edit made *in that editor* keeps
-  the existing grant (the user has reviewed the code by construction) — every other kind of source
-  change still resets it.
-- Steps: a plain script is normalized to a **one-step pipeline**, never a separate kind. **Source
-  code is the single source of truth for structure** — which steps exist and in what order. The UI
-  owns only enable/disable (`subState`), and its job for structure is *navigation*: clicking a step
-  opens the editor at that step's definition. Do not add a persisted order override; an earlier
-  draft did, and the four-branch merge rule it needed existed purely to reconcile a second source
-  of truth that shouldn't exist.
-- Bundled Modules stay listed but become **read-only with a Clone action**, and default to
-  inactive. Clone produces a new script **from a template**, never a copy of the bundled Module's
-  own source — see §12.4 for why, and for the migration trap in flipping that activation default.
+- **`resolveScriptLabel()` is the one display-name resolver** (4-tier fallback). Don't invent a
+  second fallback chain locally.
+- **`deleteScript(id)` clears every store in one call.** A partial delete leaves ghosts — never
+  hand-roll a subset of it.
+- **An edit made in Studio keeps the existing grant** (re-hashed to the new source); every *other*
+  kind of source change resets it. Re-prompting inside the editor is a hollow ritual — the user has
+  reviewed the code by construction.
+- **A plain script is a one-step pipeline, never a separate kind.** Source code is the single source
+  of truth for step structure and order; the UI owns only enable/disable (`subState`) and
+  *navigation* (clicking a step scrolls the editor to its definition). **Do not add a persisted
+  order override** — an earlier draft did, and the four-branch merge rule it needed existed purely
+  to reconcile a second source of truth that shouldn't exist.
+- **Bundled Modules are listed, read-only, default-inactive, with a Clone action** that produces a
+  script from a *template*, never a copy of the bundled source. Flipping the activation default has
+  a read-side/write-side trap: `chrome-module-registry.ts` (what the popup reads) and each Module's
+  own `isModuleActive(id, defaultActive)` call (what actually gates execution) must be changed
+  together, or the popup shows "off" while the feature keeps running.
+- **Dry Run** (`chrome.userScripts.execute()`) borrows the saved script's grant, or runs with none
+  for an unsaved one — no separate permission mechanism, and it must never emit
+  `synapse:manifest-report` (that would overwrite the confirmed report from the last real run).
 
 ## The pieces
 
@@ -82,7 +84,7 @@ anything that stores per-script state — several things below are known-incompl
 - `ui-schema.ts` — the Declarative UI Schema a `Module` optionally self-declares (`Module.uiSchema`,
   mirrored onto `RegistryEntry.uiSchema`): `UISchema = UICollectionSchema | UIActionSchema`,
   discriminated by `kind` (never a boolean `hasConfig`-style flag) — `'collection'` means a
-  persisted list with CRUD (drives the Dashboard's generic Management View, docs/ROADMAP.md #2.5),
+  persisted list with CRUD (drives the Dashboard's generic Management View, docs/CHANGELOG.md §2.5),
   `'action'` means an on-demand `run()` trigger with no persisted state (e.g.
   `reader-mode-converter`). Also `CollectionCommand<T>` — the generic
   `{op:'upsert'|'delete'|'sync', ...}` Bus wire shape any collection-schema Module's `run()` should
@@ -105,9 +107,11 @@ anything that stores per-script state — several things below are known-incompl
   iteration order (see below).
 
 **Adapter (`src/adapters/browser-extension/module-registry/`):**
-- `bundled-modules.ts` — `import.meta.glob('../content-scripts/modules/**/*.module.ts', { eager:
-  true })`, filtered through `validateModuleManifestShape` as a sanity check. This is what makes
-  `module-scaffold` no longer require manual registration for `dom` Modules.
+- `bundled-modules.ts` / `background-modules.ts` — the two auto-discovery globs over
+  `features/`, filtered through `validateModuleManifestShape` as a sanity check. This is what makes
+  `module-scaffold` no longer require manual registration. **The two patterns differ on purpose and
+  must not be unified** (one bundle vs. `all_frames`-scoped entries) — read the two files for the
+  authoritative patterns and the suffix rules; see `module-scaffold` for how to pick a filename.
 - `chrome-module-registry.ts` — the `ModuleRegistryService` implementation. Builds "bundled"
   entries from **both** `bundled-modules.ts` (`dom` Modules) and `background-modules.ts`
   (browser-specific non-`dom` Modules, e.g. `http-error-mocker`) — a Module needs a `RegistryEntry`
@@ -168,7 +172,7 @@ function: "given state, what's on screen"), `views/*.ts` (one file per view, eac
 reads/writes don't need messaging; only the RPC bridge to `USER_SCRIPT`-world code crosses a real
 isolation boundary. **No `'management'`/`'item-form'` view here anymore** — a Collection-schema
 Module's icon click opens the Dashboard in its own Tab (`chrome.tabs.create`) instead; this was a
-deliberate "no fallback" decision (docs/ROADMAP.md #2.5), not an oversight — don't add those view
+deliberate "no fallback" decision (docs/CHANGELOG.md §2.5), not an oversight — don't add those view
 kinds back into `router.ts` without re-confirming that decision with the user first. Rendered with
 **VanJS + Pico.css** (`popup.css` adds a handful of layout rules — fixed narrow width, row/list
 flex, `.form-actions` button alignment — on top of Pico's own button/input/nav/switch theming);
@@ -179,7 +183,7 @@ this was originally plain `createElement`/`innerHTML` but was converted to match
 row icon and scoped to a single `?moduleId=` query param — it has no module list of its own,
 that's still the popup's job. Hosts the Management View + Add/Edit form for any Collection-schema
 Module, built with **VanJS + Pico.css** instead of plain DOM (`main.ts`, `views/management-view.ts`,
-`views/item-form-view.ts`) — see docs/ROADMAP.md #2.5 for why Alpine.js was rejected (MV3's
+`views/item-form-view.ts`) — see docs/CHANGELOG.md §2.5 for why Alpine.js was rejected (MV3's
 `extension_pages` CSP blocks the `new Function()`-based directive evaluation Alpine's core relies
 on; VanJS is plain TypeScript function calls compiled once at build time, no runtime eval). Reads
 via `ui/module-data-sources.ts`'s auto-discovered `Module.listCollection`, writes via the same
@@ -247,7 +251,7 @@ style for its own add/edit form.)
   `render<Name>View(root, props, callbacks): void` convention (VanJS: `van.add(root, ...)` after
   `root.replaceChildren()`, not `innerHTML`) — never a `<dialog>` (see above). If it's a new action
   on an existing view, extend that view's callbacks + `RouterHandlers` and implement the handler in
-  `main.ts`. Both popup and Dashboard use VanJS + Pico.css now (docs/ROADMAP.md #2.5) — don't
+  `main.ts`. Both popup and Dashboard use VanJS + Pico.css now (docs/CHANGELOG.md §2.5) — don't
   introduce a *different* UI framework into either without the user explicitly asking; keep the two
   consistent with each other rather than letting one drift back to plain DOM or onto a third stack.
 - **New Collection-schema Module:** declare `uiSchema: {kind: 'collection', ...}` **and**

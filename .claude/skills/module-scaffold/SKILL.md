@@ -24,58 +24,69 @@ Ask (only what's missing from context):
    one; a bundled Module's declaration is auto-granted, so over-declaring here is invisible at run
    time and misleading in the popup.
 3. **Input/output shape** — rough idea of what `run()` receives and returns.
-4. **External dependency check** — if the module's purpose centers on a specific third-party
-   library/SDK/API (not a platform primitive like `fetch`/`chrome.*`), run the checklist in the
-   `doc-sync` skill's "Auto-invocation from other skills" section before writing the module body.
-   That skill owns the criteria for when a local KB is actually warranted and how to confirm with
-   the user before crawling — don't re-derive that logic here, just defer to it.
+4. **Feature folder** — which `features/<name>/` does this belong to (see Placement below)? If none
+   fits, the answer may be a new feature — check that its name would also work as a scope name.
+
+If the module leans on an unfamiliar third-party library and you want its docs pinned locally,
+the `doc-sync` skill can build one — it's available, not a required step. History says the gotchas
+that actually bite here are MV3 runtime behaviours, not API surface, and those live in
+`docs/LESSONS.md`; read that first.
 
 Never ask about a target runtime. There is no `supportedEnvs` field and no `RuntimeEnv` type — the
 browser extension is the only runtime Synapse targets, by decision after an audit, not by "not yet"
 (docs/design.md §8, docs/ROADMAP.md §11.1). If the user raises vscode/electron/node, say that
 plainly rather than scaffolding as if a Module could declare its way there.
 
-## Placement convention
+## Placement convention — the `features/` axis
 
-- **Background, and genuinely portable:** `src/modules/<kebab-case-name>.module.ts` — runs in the
-  background service worker. This location is Adapter-agnostic on purpose (docs/design.md §7
-  Project Structure): it depends only on `kernel/module` Ports, not on `chrome.*` — not even
-  transitively through an imported util — so it stays put even if a second Adapter is ever added.
-  If the module's logic would need to change for a hypothetical second Adapter, it isn't portable —
-  use the next option instead.
-- **Background, but browser-specific** (e.g. it orchestrates `chrome.scripting`, or otherwise calls
-  browser-extension-only infra even though it doesn't touch the page's DOM itself):
-  `src/adapters/browser-extension/background/modules/<kebab-case-name>/index.ts` — a folder with an
-  `index.ts` entry (plus any colocated support files the module needs, e.g. a MAIN-world
-  composition root — see the `main-world-interceptor` skill for that specific case). Still runs in
-  the background service worker; the folder-per-module shape exists because these modules tend to
-  need more than one file. Auto-discovered the same way as bundled content-script Modules (see
-  below), via a separate glob (`module-registry/background-modules.ts`) scoped to this folder.
-- **Needs the page's DOM:** `src/adapters/browser-extension/content-scripts/modules/<kebab-case-name>.module.ts`
-  — runs in the page context, which is specific to the browser-extension Adapter. Its `ctx.services`
-  is empty (Kernel Services are background-only); what it gets instead is `ctx.api`, the same
-  `synapseApi` an uploaded user script sees, relayed to background over RPC. Anything beyond that
-  surface is its own `chrome.runtime.sendMessage` round trip.
+**Everything lives under `src/adapters/browser-extension/features/<feature>/`.** There is no
+`src/modules/` and no `content-scripts/modules/` — both were removed when the feature axis landed
+(docs/CHANGELOG.md §11.5). Read `docs/INDEX.md` for the current feature list before picking a home.
 
-Create the relevant folder if it doesn't exist yet. If `src/kernel/` doesn't exist yet (Kernel not
-bootstrapped — see `kernel-bootstrap` skill), still scaffold the module against the
-`Module` shape below as a local type stub; don't block module creation on the Kernel
-existing.
+**Step 1 — pick the feature folder.** A new Module either joins an existing feature or starts a new
+one. Feature names map **1:1 onto permission scope names** (`features/media/` ↔ `media.*`) — that
+alignment is the reason the axis exists, so don't invent a feature name that couldn't also be a
+scope name.
 
-**If `src/adapters/browser-extension/module-registry/bundled-modules.ts` exists** (the
-`module-registry` skill has been applied), placing a `.module.ts` file in
-`content-scripts/modules/` is *all* that's needed — it's auto-discovered via
-`import.meta.glob` and auto-registered in `content-scripts/index.ts`. Do **not** manually add an
-import/`registerDomModule(...)` call anywhere; that file no longer hand-registers Modules and
-adding a duplicate registration would double-dispatch. The new Module also appears in the popup
-automatically, with its declared `scopes` auto-granted (bundled Modules are trusted build-time
-code — the grant is derived from the declaration on read, never persisted). Only fall back to the manual `registerDomModule(YourModule)` pattern described below if
-`bundled-modules.ts` doesn't exist yet.
+**Step 2 — pick the filename suffix, which is what actually decides discovery and execution
+context.** MV3 partitions code by context and each has different `chrome.*` availability, so the
+suffix is load-bearing, not decoration:
+
+| Suffix | Runs in | Auto-discovered as a Module? |
+|---|---|---|
+| `*.background.ts` | service worker | ✅ via `module-registry/background-modules.ts` |
+| `*.module.ts` | content script (ISOLATED) | ✅ via `module-registry/bundled-modules.ts` |
+| `*.content.ts` | content script (ISOLATED) | ❌ — support file, wired by hand |
+| `*.page.ts` | MAIN world of the real page | ❌ — no `chrome.*` at all |
+| `*.offscreen.ts` | Offscreen Document | ❌ — **only `chrome.runtime`** |
+| no suffix | more than one context | ❌ — a suffix here would lie |
+
+The two globs are **deliberately different** and must not be unified: the background one matches
+broadly (one service-worker bundle absorbs non-Module helpers harmlessly — they're filtered by
+`typeof record?.run === 'function'`), the content one matches only `*.module.ts` so that
+`all_frames`-scoped `*.content.ts` files don't get pulled into the wrong Vite entry. The authoritative
+patterns live in those two files — read them, don't trust a copy in prose.
+
+**Consequences of the suffix you pick:**
+
+- `*.background.ts` — full `chrome.*`. This is where a Module orchestrating `chrome.scripting`/
+  `declarativeNetRequest`/`chrome.debugger` belongs, even if it never touches page DOM.
+- `*.module.ts` — page DOM available; `ctx.services` is **empty** (Kernel Services are
+  background-only). What it gets instead is `ctx.api` (`synapseApi`), relayed to background over
+  RPC — the same surface an uploaded user script sees. Anything beyond that surface is its own
+  `chrome.runtime.sendMessage` round trip.
+
+**Dropping a correctly-suffixed file in a feature folder is all the wiring there is.** It's
+auto-discovered, auto-registered, and appears in the popup with its declared `scopes` auto-granted
+(bundled Modules are trusted build-time code — the grant is derived from the declaration on read,
+never persisted). Do **not** add a manual import or `registerDomModule(...)` call; the composition
+roots (`background/index.ts`, `content-scripts/index.ts`) no longer hand-register Modules, and a
+duplicate registration double-dispatches.
 
 ## Template — simple module (no `needs`, no `scopes`)
 
 ```ts
-import type { Module } from '../kernel/module';
+import type { Module } from '../../../../kernel/module';
 
 export const <Name>Module: Module<InputT, OutputT> = {
   id: '<kebab-case-name>',
@@ -89,7 +100,7 @@ export const <Name>Module: Module<InputT, OutputT> = {
 ## Template — module with capabilities (ai / cache / bus)
 
 ```ts
-import type { Module } from '../kernel/module';
+import type { Module } from '../../../../kernel/module';
 
 export const <Name>Module: Module<InputT, OutputT> = {
   id: '<kebab-case-name>',
@@ -113,28 +124,29 @@ what's declared, so reaching for an undeclared service is a bug, not a convenien
 
 ## Template — content-script module
 
-Nothing declares this — a Module is a content-script Module because its file lives under
-`content-scripts/modules/`, which is what `bundled-modules.ts` globs. (There used to be a
-`needs: ['dom']` marker; it injected no Service and is gone.)
+Nothing declares this — a Module is a content-script Module because its filename ends in
+`.module.ts` inside a `features/<feature>/` folder, which is what `bundled-modules.ts` globs.
+(There used to be a `needs: ['dom']` marker; it injected no Service and is gone.)
 
 ```ts
+// src/adapters/browser-extension/features/<feature>/<name>.module.ts
 import type { Module } from '../../../../kernel/module';
 
 export const <Name>Module: Module<InputT, OutputT> = {
   id: '<kebab-case-name>',
-  async run(input) {
+  async run(input, ctx) {
     // direct document/window access — this only runs as a content script
     const value = document.querySelector(input.selector)?.textContent;
+    // ctx.services is EMPTY here; ctx.api is the surface you get
+    await ctx.api.storage.set('last', value);
     return { value };
   },
 };
 ```
 
-If `content-scripts/modules/bundled-modules.ts` (glob auto-discovery) doesn't exist yet, register
-it manually with the content-script relay from `kernel-bootstrap` (`registerDomModule(...)`), not
-by calling it directly — the background Kernel invokes it via messaging, it never runs in-process
-with other Modules. If auto-discovery *does* exist (the `module-registry` skill has been applied),
-skip this — see the note above.
+Live reference: `features/reader-mode/reader-mode-converter.module.ts` — the only `.module.ts` in
+the repo today, and a Composite Module, so read it for the composed shape rather than as a minimal
+example.
 
 ## Rules
 

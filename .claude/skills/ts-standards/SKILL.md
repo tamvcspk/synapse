@@ -7,44 +7,29 @@ description: TypeScript conventions and best-practice defaults for Synapse (stri
 
 Synapse ships as a **browser extension (Manifest V3)** — see `docs/design.md` section 7. There is
 no Node.js runtime in production: nothing in `src/` may import Node-only APIs (`fs`, `path`,
-`process`, `child_process`, etc.), including Modules that only declare `net` — `net` means
-`fetch()` from an extension context, not a Node HTTP client.
+`process`, `child_process`, etc.). `fetch()` here means the extension context's `fetch`, never a
+Node HTTP client. (`@types/node` is a devDependency for `node:vm`/`node:fs` **in tests only**.)
 
-## Runtime & tooling assumptions (confirm before relying on these)
+## Toolchain — what is actually installed
 
-- **Target:** Manifest V3 browser extension — three entry points: `background` (service worker,
-  hosts the Kernel), `content-scripts` (for Modules declaring `dom`), `popup`/`options` (UI).
-- **Package manager:** pnpm, unless a lockfile for another one already exists.
-- **Bundler:** Vite with an MV3-aware plugin (e.g. `@crxjs/vite-plugin`), or plain esbuild with
-  separate entry points per context — whichever is already configured; don't assume a Node
-  build step runs at runtime, only at build time.
-- **Chrome types:** `@types/chrome` for every `chrome.*` API call — never `any`-cast extension
-  APIs.
-- **Schema validation (Schema-First principle in docs/design.md):** use `zod` to define Context Frame
-  and Bus message schemas — parse at the Bus boundary (`schema.parse(payload)`), not deep inside
-  Modules. This matters more here than in a typical app: Bus messages that cross the
-  background/content-script boundary go through `chrome.runtime` serialization, so validate
-  after deserialization, not just at the call site.
-  - **Exception:** validating a runtime-uploaded module's self-reported manifest (see the
-    `module-registry` skill) uses a hand-rolled checker (`kernel/manifest-validator.ts`), not
-    `zod` — that input is `unknown` from outside the build entirely (no `zod` dependency exists in
-    the project yet), and the check is small/stable enough not to justify adding one. If `zod`
-    does get added for Bus/Context Frame validation later, reconsider whether it's worth
-    consolidating.
-- **Lint/format:** ESLint + Prettier, no custom rule authoring until there's enough code to know
-  what actually needs enforcing.
+Read `package.json` for versions; this is the shape, not a wish list.
 
-If any of these conflict with a choice the user has already made elsewhere in the project, defer
-to the existing choice and flag the mismatch rather than silently overriding it.
+- **Target:** MV3 browser extension. Entry points: `background` (service worker, hosts the Kernel),
+  `content-scripts`, and several extension pages (`popup`, `dashboard`, `side-panel`, `studio`,
+  `help`, `review`, `offscreen`) — the pages beyond popup are **manual Rollup inputs** in
+  `vite.config.ts`, since no manifest field covers a page opened via `chrome.tabs.create`.
+- **Package manager: npm** (`package-lock.json`). Not pnpm/yarn.
+- **Bundler:** Vite + `@crxjs/vite-plugin`. Build only — no Node step at runtime.
+- **Chrome types:** `@types/chrome` for every `chrome.*` call — never `any`-cast extension APIs.
+  When the pinned types lag a shipped API, add a scoped `declare global` augmentation next to the
+  call site rather than casting.
+- **NOT installed, do not assume:** `zod`, ESLint, Prettier. Validation of untrusted input is
+  hand-rolled on purpose (`kernel/manifest-validator.ts`) — the input is `unknown` from outside the
+  build, and the check is small and stable enough not to justify a dependency. **Don't add one of
+  these without asking**; if `zod` ever does land for Bus/message schemas, revisit consolidating.
 
-## External library docs before implementation
-
-If a code plan under this skill introduces or touches a specific external library/SDK/API (beyond
-the toolchain assumptions above), evaluate the `doc-sync` skill's "Auto-invocation from other
-skills" checklist before writing implementation code against it — that skill owns the criteria for
-when a local KB (`kb/<library>/<version>/`) is warranted and how to confirm with the user first.
-Don't apply this to the stack already named above (chrome APIs, zod, ESLint/Prettier) — it's for
-new, version-sensitive dependencies entering the plan.
+If any of this conflicts with what's actually in `package.json`, `package.json` wins — say so rather
+than silently following this file.
 
 ## tsconfig baseline
 
@@ -64,10 +49,13 @@ new, version-sensitive dependencies entering the plan.
 }
 ```
 
-Note `"lib"` includes `DOM` project-wide for convenience, but that doesn't mean every Module may
-touch DOM globals — only Modules declaring `dom` (i.e. code meant to run as a content script)
-should actually reference `document`/`window`. Background-context code referencing DOM globals is
-a bug the type checker won't catch for you; catch it in review.
+Note `"lib"` includes `DOM` project-wide for convenience, but that doesn't mean every file may
+touch DOM globals. **Which context a file runs in is declared by its filename suffix**
+(`*.background.ts` / `*.content.ts` / `*.page.ts` / `*.offscreen.ts` — see `module-scaffold`), and
+a service-worker or Offscreen file referencing `document`/`window` is a bug the type checker will
+**not** catch. This has shipped for real: a bundler helper injected `document.head.appendChild`
+into the service-worker bundle and only surfaced at runtime (docs/LESSONS.md, "Bundler giả định môi
+trường có DOM"). Catch it in review, and grep `dist/` when in doubt.
 
 ## Conventions
 
@@ -112,18 +100,23 @@ a bug the type checker won't catch for you; catch it in review.
   — deliberately NOT `vite.config.ts`, whose crx plugin would otherwise drive a full MV3 build on
   every test run.
 - **Tests are co-located** as `<file>.test.ts` next to what they test, and collected by
-  `include: ['src/**/*.test.ts']`. Safe from the bundle: `bundled-modules.ts`/`background-modules.ts`
-  glob `*.module.ts` / `*/index.ts`, so a `.test.ts` is never reachable from an entry point.
+  `include: ['src/**/*.test.ts']`. Safe from the bundle: the auto-discovery globs match specific
+  context suffixes (`*.module.ts`, `*.background.ts`), so a `.test.ts` is never reachable from an
+  entry point.
 - **`environment: 'node'` is the default and should stay that way.** A test genuinely needing a DOM
   opts in per-file with a `// @vitest-environment jsdom` docblock. The moment the global default
   becomes browser-ish, a `src/shared/` file that accidentally reaches for `document` stops failing
   the way it should.
 - **What is worth testing, in order:** `src/shared/` (pure by definition — no excuse not to), then
   `src/kernel/` (contracts + wiring), then a Module's own pure helpers. Code that only exists to
-  call `chrome.*` is not unit-testable here and shouldn't be contorted into being so; that's what
-  the "chưa verify bằng browser thật" list in docs/ROADMAP.md is for.
-- Simple Modules (`needs: []` or `['net']`) are pure functions — test with plain unit tests, no
-  Kernel involved.
+  call `chrome.*` is not unit-testable here and shouldn't be contorted into being so; it goes on
+  the checklist in **`docs/TEST_PLAN.md`** instead, and if it's a `synapseApi` capability it also
+  ships a `docs/examples/test-<feature>.js` the user can run against real Chrome.
+- **Test the round trip, not the shape.** A test that asserts source *looks* right never catches
+  a context-boundary bug. The two costliest bugs in this repo's history (an RPC bridge that could
+  never return a result; messages routed to the wrong Chrome event) both survived review and unit
+  tests because nothing simulated *both ends* — see docs/CHANGELOG.md §11.3.
+- Simple Modules (no `needs`) are pure functions — test with plain unit tests, no Kernel involved.
 - Modules using `ai`/`cache`/`bus` — test by constructing a `ModuleContext` with fake services
   directly (no need for a full `ServiceInjector`/`Kernel` in unit tests); reserve
   Kernel-in-the-loop tests for integration-level checks of the pipeline/bus wiring itself (see

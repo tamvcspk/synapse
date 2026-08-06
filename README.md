@@ -1,234 +1,166 @@
 # Synapse
 
-**Personal automation & AI playground, built as a Manifest V3 browser extension.**
+**A userscript platform for the browser — Tampermonkey's shape, with a real permission model and real
+capabilities behind it.** Manifest V3 extension, TypeScript, no backend.
 
-Synapse is a minimalist framework for building modular tasks and agents that scale in complexity only as needed. Simple tasks (data fetching, processing) require zero AI/agentic overhead—complex tasks can leverage AI, event buses, and caching by explicitly declaring what they need.
+You write a `.js` file. It declares what it needs; the user grants it; the platform hands it an API
+that can do things a plain userscript cannot — capture an HLS stream, mock a request, use an API key
+it is never allowed to read.
 
-## Main Purpose
+```js
+__synapseModule = {
+  id: 'my-script',
+  scopes: [
+    'page.dom',
+    { scope: 'net.request', match: ['https://api.example.com/*'] },
+  ],
+  async run(input, ctx) {
+    const title = document.querySelector('h1')?.textContent ?? '';
+    const res = await ctx.api.net.request({ url: `https://api.example.com/log?t=${title}` });
+    ctx.api.ui.toast({ id: 'done', text: `Logged (${res.status})` });
+  },
+};
+```
 
-Synapse enables you to:
+Write it in the built-in Monaco editor, run it against the current tab without saving, and see which
+step failed — see [docs/user-scripts.md](docs/user-scripts.md) to actually get started.
 
-- **Write simple, single-purpose tasks** (e.g., crawl & chunk documentation, fetch data, transform content) as lightweight pure functions—no agentic machinery required.
-- **Scale gradually to complex AI workflows** (decision engines, multi-step agents, RAG) by adding capability declarations, without refactoring the core.
-- **Experiment with personal automation** (browser-based) using a clean, extensible architecture (Hexagonal Design).
-- **Avoid vendor lock-in** through an adapter-based runtime model: add support for VS Code, Electron, or Node later without rewriting your modules or core.
+## What it can do today
 
-### Architecture Highlights
+| | |
+|---|---|
+| **Scripts** | upload or author in-extension, rename/download/delete, edit with autocomplete from generated types, multi-step pipelines with per-step bypass, dry-run on the current tab |
+| **Permissions** | per-script scopes with a resource dimension (`action × domain`), namespaced storage, grants bound to a source hash, consent UI that separates real gates from disclosures |
+| **Capabilities** | cross-origin `fetch`, file save, request mocking, page `eval`, in-page UI (toast/badge/icon) with per-script quota, bundled libraries (Readability, Turndown, ZIP, HLS parser), reference-only secrets, thin LLM helper |
+| **Media** | detect video/audio/streams a page requests, download and remux HLS (including AES-128 and live capture), resume after a crash |
+| **Reference modules** | reader-mode converter, network sniffer, HTTP mocker — shipped read-only as working examples, each clonable into an editable template |
 
-- **Kernel:** A minimal, AI-agnostic core that resolves module manifests, injects services, and coordinates execution.
-- **Modules:** The smallest unit of work. Declare what you need (`needs: ['net', 'ai', 'cache']`), and the Kernel provisions only those services.
-- **Progressive Complexity:** Each module's infrastructure overhead matches its declared capabilities, not a global default.
-- **Hexagonal Architecture:** Core + Ports/Services (abstract interfaces) + Adapters (concrete implementations). Currently, only the browser extension adapter is implemented.
+## Architecture in one paragraph
 
-See [docs/design.md](docs/design.md) for full technical specification.
+A minimal, `chrome.*`-free **Kernel** (`src/kernel/`) resolves a Module's declarations and injects
+only the Services it asked for. Everything platform-specific lives under one **Adapter**
+(`src/adapters/browser-extension/`), sliced by **feature** rather than by layer. The public contract
+is `synapseApi` — one interface reachable over three transports (in-process, content-script RPC,
+and the uploaded-script shim), with `module-registry/rpc-handler.ts` as the single, fail-closed
+enforcement point.
+
+> **There is no second runtime adapter, and there will not be one.** VS Code / Electron / Node were
+> audited and rejected: ~0% of the feature surface could port, because every capability is a browser
+> capability. Hexagonal structure is kept for **testability and dependency discipline** — `kernel/`
+> and `shared/` stay provably free of `chrome.*`, which is checkable on every commit — never as a
+> portability promise. See [docs/design.md](docs/design.md) §8.
+
+## Documentation map
+
+Start with the one that matches your question.
+
+| You want | Read |
+|---|---|
+| To write a user script | [docs/user-scripts.md](docs/user-scripts.md) · [docs/api-inventory.md](docs/api-inventory.md) |
+| To find code | [docs/INDEX.md](docs/INDEX.md) (generated) |
+| What a term means | [docs/GLOSSARY.md](docs/GLOSSARY.md) |
+| Architecture and settled decisions | [docs/design.md](docs/design.md) |
+| What shipped, and which bugs were fixed | [docs/CHANGELOG.md](docs/CHANGELOG.md) |
+| Browser/MV3 gotchas already paid for | [docs/LESSONS.md](docs/LESSONS.md) |
+| What's next, and what's blocked | [docs/ROADMAP.md](docs/ROADMAP.md) |
+| What still needs testing in a real browser | [docs/TEST_PLAN.md](docs/TEST_PLAN.md) |
+| Rules for contributing (incl. AI agents) | [CLAUDE.md](CLAUDE.md) |
+
+A feature's own business rules live beside its code, in `features/<name>/.domain.md`.
 
 ---
 
 ## ⚠️ Disclaimer
 
-**DO NOT use Synapse in production or for illegal/unauthorized activities.**
+**Do not use Synapse in production or for illegal/unauthorized activities.**
 
-- **Experimental software:** This is a personal playground. Expect breaking changes, unfinished features, and minimal stability guarantees.
-- **No production readiness:** Not tested at scale, not hardened against security threats, not designed for multi-user or cloud deployment.
-- **Illegal activities prohibited:** Synapse must not be used for:
-  - Unauthorized automation of websites or services (violates terms of service).
-  - Credential theft, phishing, or social engineering.
-  - Scraping protected data or circumventing access controls.
-  - Interference with computer systems or networks.
-  - Any activity that violates local, regional, or international law.
-  - Impersonation, harassment, or malicious activity.
+- **Experimental software.** A personal playground: breaking changes, unfinished features, minimal
+  stability guarantees. Much of it has not been verified in a real browser — see
+  [docs/TEST_PLAN.md](docs/TEST_PLAN.md).
+- **Not production-ready.** Not tested at scale, not hardened, not designed for multi-user or cloud
+  deployment. Secrets are stored in plaintext at rest, deliberately and openly — read
+  `features/secrets/.domain.md` before putting a real credential in it.
+- **Prohibited uses:** unauthorized automation that violates a service's terms; credential theft,
+  phishing, or social engineering; scraping protected data or circumventing access controls;
+  interfering with computer systems or networks; impersonation or harassment; anything unlawful
+  where you live.
 
-**You are responsible for all use of this software.** Ensure your automation complies with applicable laws, terms of service, and ethical guidelines before deploying.
+**You are responsible for all use of this software.**
 
 ---
 
-## Setup & Development
+## Setup
 
-### Prerequisites
-
-- **Node.js 18+** (LTS recommended)
-- **npm 9+**
-- **A Chromium-based browser** (Chrome, Edge, Brave, etc.) for testing the extension locally
-
-### Installation
-
-1. **Clone or download the repository:**
-   ```bash
-   git clone <repository-url>
-   cd synapse
-   ```
-
-2. **Install dependencies:**
-   ```bash
-   npm install
-   ```
-
-3. **Type-check the code (optional but recommended):**
-   ```bash
-   npm run typecheck
-   ```
-
-### Development Workflow
-
-#### Start the Dev Server
+**Requires** Node.js 18+, npm 9+, and a Chromium-based browser.
 
 ```bash
-npm run dev
+npm install
+npm run dev          # Vite dev server, output in dist/browser-extension/
 ```
 
-This launches the Vite dev server with hot reload enabled. The bundled extension is output to `dist/browser-extension/`.
+Then load it: `chrome://extensions/` → enable **Developer mode** → **Load unpacked** →
+select `dist/browser-extension/`.
 
-#### Load the Extension in Your Browser
+**One required manual step:** open the extension's entry in `chrome://extensions/` and enable
+**"Allow user scripts"**. Without it `chrome.userScripts` is `undefined` and uploads fail. Chrome
+does not reliably restart the service worker when you flip it — if uploads still fail, use the
+**Reload extension** button in the error message, or restart the browser.
 
-**Chrome/Edge/Brave:**
+### Scripts
 
-1. Open your browser and navigate to `chrome://extensions/` (or `edge://extensions/`, etc.).
-2. Enable **Developer mode** (toggle in the top-right corner).
-3. Click **Load unpacked**.
-4. Select the `dist/browser-extension/` folder from this repository.
-5. The extension should now appear in your extensions list and toolbar.
+| Command | Purpose |
+|---|---|
+| `npm run dev` | Vite dev server with hot reload |
+| `npm run build` | Production build → `dist/browser-extension/` |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm test` | Vitest, once |
+| `npm test -- -u` | Same, updating generated snapshots (`docs/INDEX.md`, `docs/types/`, …) |
+| `npm run test:watch` | Vitest in watch mode |
 
-**Hot reload during development:**
-- Edit any TypeScript file in `src/`.
-- Vite automatically rebuilds; refresh the extension in the browser or toggle it off/on to see changes.
+Committing a change that adds or renames a source directory? Run `npm test -- -u` — `docs/INDEX.md`
+is generated and its snapshot test will otherwise fail.
 
-### Build for Production
-
-```bash
-npm run build
-```
-
-This bundles the extension optimized for production and outputs to `dist/browser-extension/`.
-
-**Next steps after building:**
-- Test thoroughly in your browser.
-- Do **not** distribute or deploy without reviewing the Disclaimer section above.
-
-### Project Structure
+### Project structure
 
 ```
 src/
-  kernel/                          # Core (no chrome.* — see docs/design.md §8)
-    index.ts
-    module.ts                      # Module contract, Service interfaces
-    service-injector.ts
-    scheduler.ts
-  modules/                         # Portable modules (no DOM access)
-  adapters/
-    browser-extension/             # Browser Extension Adapter
-      background/index.ts          # Kernel bootstrap (runs in service worker)
-      content-scripts/
-        index.ts
-        relay.ts                   # Messaging bridge
-        modules/
-          hello-alert.module.ts    # Example content-script module
-docs/
-  design.md                        # Full technical specification
-dist/                              # Build output (ignored in git)
+  kernel/                              # Core: Module contract, Services, Scheduler, scope catalog
+  shared/                              # Pure functions only — must survive a MAIN-world import
+  adapters/browser-extension/          # the only Adapter
+    background/                        # service-worker composition root
+    content-scripts/                   # content-script composition root + RPC client
+    features/<name>/                   # one folder per capability (+ its .domain.md)
+    module-registry/                   # discovery, uploads, the shim, permission enforcement
+    ui/                                # popup, dashboard, studio, side panel, help, review, offscreen
+    utils/                             # mechanism shared by 2+ features
+docs/                                  # see the documentation map above
 ```
 
-### Configuration Files
-
-- **`tsconfig.json`** – TypeScript compiler options (strict mode enabled).
-- **`vite.config.ts`** – Vite bundler config with `@crxjs/vite-plugin` for MV3 extension support.
-- **`manifest.config.ts`** – Browser extension manifest (Manifest V3).
-
----
-
-## Creating Your First Module
-
-### Simple Module (No AI, No Bus)
-
-A module that fetches data:
-
-```typescript
-// src/modules/my-fetcher.module.ts
-import { Module } from '../kernel/module';
-
-export const MyFetcher: Module = {
-  id: 'my-fetcher',
-  needs: ['net'],  // Only networking capability
-  run(input: { url: string }) {
-    const response = await fetch(input.url);
-    return response.json();
-  },
-};
-```
-
-### Complex Module (With AI & Bus)
-
-A module that uses AI:
-
-```typescript
-// src/modules/my-ai-agent.module.ts
-import { Module } from '../kernel/module';
-
-export const MyAiAgent: Module = {
-  id: 'my-ai-agent',
-  needs: ['ai', 'cache', 'bus'],  // Declare what you need
-  run(input, ctx) {
-    if (isSimple(input)) {
-      return applyRuleLogic(input);
-    }
-    // AI is lazily initialized by the Kernel
-    return ctx.services.ai.ask({
-      prompt: `Process: ${JSON.stringify(input)}`,
-    });
-  },
-};
-```
-
-See [docs/design.md](docs/design.md) for more examples and full API documentation.
-
----
-
-## Scripts
-
-| Command | Purpose |
-|---------|---------|
-| `npm run dev` | Start Vite dev server with hot reload |
-| `npm run dev:browser` | Alias for `npm run dev` |
-| `npm run build` | Build the extension for production |
-| `npm run build:browser` | Alias for `npm run build` |
-| `npm run typecheck` | Run TypeScript type checking (no emit) |
-| `npm test` | Run the Vitest unit suite once (`src/**/*.test.ts`) |
-| `npm run test:watch` | Same suite in watch mode |
+Filenames carry the execution context — `*.background.ts`, `*.content.ts`, `*.page.ts` (MAIN world),
+`*.offscreen.ts`. That suffix is also what auto-discovery matches, so it is load-bearing.
+Full map with file counts: [docs/INDEX.md](docs/INDEX.md).
 
 ---
 
 ## Troubleshooting
 
-**Extension doesn't load:**
-- Ensure `dist/browser-extension/` exists and contains `manifest.json`.
-- Try refreshing the extension or reloading it in `chrome://extensions/`.
-- Check the browser console (DevTools) for errors.
+**Extension won't load** — confirm `dist/browser-extension/manifest.json` exists; reload it in
+`chrome://extensions/`; check the service worker console (Details → Inspect views).
 
-**Hot reload isn't working:**
-- Kill the Vite dev server and restart with `npm run dev`.
-- Manually refresh the extension page in `chrome://extensions/`.
+**Uploading a script fails** — "Allow user scripts" is almost always the cause; see Setup.
 
-**Type errors during build:**
-- Run `npm run typecheck` to see all TypeScript errors.
-- Fix issues in your code and rebuild.
+**A script's API calls are rejected** — the error names the reason. Common: the scope was never
+granted, or it was granted for a different domain than the one being called. Grants also reset when
+a script's source changes outside the Studio editor.
 
-**Module not executing:**
-- Check the Kernel logs in the background service worker console (`chrome://extensions/` → Details → Inspect views → background page).
-- Ensure your module is registered in the Kernel bootstrap (see `src/adapters/browser-extension/background/index.ts`).
-- Verify the module's `needs[]` declaration matches its actual dependencies.
+**A script runs but nothing happens** — the three silent-failure classes are documented in
+[docs/user-scripts.md](docs/user-scripts.md): a function passed across the RPC boundary arrives as
+`undefined`, `<style>`/`style=""` gets dropped by the page's CSP, and changes only take effect on
+the page's next load, not immediately.
 
----
-
-## Next Steps
-
-1. **Read [docs/design.md](docs/design.md)** for the full architectural vision and technical spec.
-2. **Review [src/adapters/browser-extension/](src/adapters/browser-extension/)** to understand how the extension loads.
-3. **Create a module** using the examples above; start simple, add capabilities as needed.
-4. **Test locally** using the browser's DevTools (see Development Workflow).
-
----
+**Something in the extension "just doesn't work"** — check [docs/LESSONS.md](docs/LESSONS.md) before
+debugging from scratch; most MV3 silent failures here have already been paid for once.
 
 ## License
 
-This project is provided as-is for personal use. Respect the Disclaimer above and all applicable laws.
-
-**Questions or feedback?** Review [docs/design.md](docs/design.md) or open an issue.
+Provided as-is for personal use. Respect the Disclaimer and all applicable laws.

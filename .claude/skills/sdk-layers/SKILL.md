@@ -14,20 +14,19 @@ runtime concept — it doesn't touch the Kernel, `Module`, or `Capability` contr
 **Layer 1 — Global SDK: `src/shared/`**
 - Pure functions only. No DOM, no `chrome.*`, no I/O, no side effects, no imports from
   `src/adapters/`.
-- Importable from `src/kernel/`, `src/modules/`, any `src/adapters/<env>/`, and — the reason this
-  layer exists at all — from a MAIN-world page-injection payload (see the `main-world-interceptor`
+- Importable from `src/kernel/`, any `src/adapters/<env>/`, and — the reason this layer exists at
+  all — from a MAIN-world page-injection payload (`*.page.ts`, see the `main-world-interceptor`
   skill), which has zero `chrome.*` access and doesn't share a JS heap with the rest of the
   extension.
 
-**Layer 2 — Environment-Specific SDK: `src/adapters/<env>/utils/`**
-- Infra helpers that do the "dirty work" for one Adapter: DOM injection/registration, storage
-  wiring, messaging bridges, anything touching `chrome.*`/`vscode.*`/Node APIs.
-- Never imported by `src/kernel/` or `src/modules/` (the *portable* Modules folder) — same boundary
-  rule as everything else in `docs/design.md` §7's project structure. A second Adapter (§8, not
-  built yet) would get its own sibling `utils/` and share nothing with `browser-extension/utils/`
-  except the `Module`/Service contracts. Freely importable by Modules that live *inside* the
-  Adapter itself — `content-scripts/modules/*.module.ts` and `background/modules/<name>/index.ts`
-  — since those are already browser-specific and not claiming portability.
+**Layer 2 — Environment-Specific SDK: `src/adapters/browser-extension/utils/`**
+- Infra helpers that do the "dirty work" for the Adapter: DOM injection/registration, storage
+  wiring, messaging bridges, anything touching `chrome.*`.
+- Never imported by `src/kernel/` — same boundary rule as everything else in `docs/design.md` §7.
+  Freely importable by feature code (`features/<name>/**`), which is already browser-specific and
+  claims no portability.
+- **`utils/` holds only mechanism shared by ≥2 features.** Anything serving exactly one feature
+  belongs in that feature's folder, regardless of how generic it looks.
 
 ## The litmus test — read this before defaulting to "Global"
 
@@ -62,29 +61,25 @@ A single file that mixes both is a sign to split it: keep the generic mechanism 
 the policy to wherever the Module composes the two (see `main-world-interceptor`'s "composition
 root" pattern for a worked example of this split).
 
-## The third axis — `features/` (docs/ROADMAP.md §11, planned)
+## The third axis — `features/` (shipped, docs/CHANGELOG.md §11.5)
 
 The two layers above are a **vertical** split (how portable is this code?). They say nothing about
-the **horizontal** one (which feature does this code serve?), and that gap is measurable: the
-media detect→download feature is ~4.800 lines spread across 8 directories — 43% of the repo with
-no directory of its own.
+the **horizontal** one (which feature does this code serve?). That gap was measurable — the media
+detect→download feature was ~4.800 lines across 8 directories, 43% of the repo with no directory of
+its own — and it is now closed.
 
-Target shape once §11 Phase 4 lands: `utils/` keeps only mechanism, and all policy moves into
+Current shape: `utils/` keeps only mechanism; policy lives in
 `adapters/browser-extension/features/<name>/`, with `background/index.ts` and
 `content-scripts/index.ts` reduced to thin composition roots. Feature names map **1:1 onto
 permission scopes** (`features/media/` ↔ `media.*`, see `userscript-api`) — that alignment is the
-main reason to do it, not tidiness.
+main reason the axis exists, not tidiness. Read `docs/INDEX.md` for the live feature list.
 
-Known violation to fix first: `utils/download-engine.ts` is 1.355 lines of pure policy (it imports
-`parseM3u8`, knows HLS/live/turbo/remux/job lifecycle) sitting in Layer 2 — 41% of `utils/`. Until
-§11 Phase 1 splits it, don't cite it as an example of anything.
-
-**Mandatory if you move files into `features/`:** MV3 partitions code by execution context, and each
-context has different `chrome.*` availability — an Offscreen Document has **only** `chrome.runtime`
-(docs/LESSONS.md). Today the directory path carries that signal (`background/` vs
-`content-scripts/` vs `ui/offscreen/`). Feature-slicing destroys it, so it must be replaced by a
-filename convention: `*.background.ts`, `*.content.ts`, `*.offscreen.ts`, `*.page.ts`. Without that,
-the reorganization is a net regression.
+**Because feature-slicing destroyed the signal the directory path used to carry** (`background/` vs
+`content-scripts/` vs `ui/offscreen/` told you which `chrome.*` were available — an Offscreen
+Document has **only** `chrome.runtime`), that signal now lives in the **filename suffix**:
+`*.background.ts`, `*.content.ts`, `*.offscreen.ts`, `*.page.ts`; no suffix means the file
+genuinely runs in more than one context. This is not decoration — the suffix is also what the
+auto-discovery globs match. See `module-scaffold` for the full table.
 
 ## Don't do this
 
@@ -104,12 +99,14 @@ the reorganization is a net regression.
 
 ## Quick placement checklist
 
-1. Is it a `Module` (`id`/`needs`/`run()`)? → not this skill, see `module-scaffold`.
-2. Does it touch `chrome.*`/DOM/Node APIs, or do any I/O? → `src/adapters/<env>/utils/` — but first
-   ask the mechanism-vs-policy question above; if it's actually policy wearing an infra costume,
-   it belongs in the Module instead, not in `utils/`.
-3. Otherwise: will it be imported into a restrictive-environment bundle (MAIN-world payload today)?
-   → `src/shared/`.
-4. Otherwise: is it used by more than one Module/file already, not hypothetically? → `src/shared/`
-   is fine, but colocating with the single current caller until a second one appears is equally
-   valid — don't force it.
+1. Is it a `Module` (`id`/`run()`)? → not this skill, see `module-scaffold`.
+2. Pure (no `chrome.*`, no DOM, no I/O, no side effects)?
+   - **Yes** → `src/shared/`. Especially if a `*.page.ts` MAIN-world payload will import it.
+   - **No** → continue.
+3. Does it serve **exactly one** feature? → that feature's folder,
+   `features/<name>/`, with the right context suffix. This is the default — don't promote to
+   `utils/` on the grounds that it *looks* generic.
+4. Does it serve **≥2 features** and is it genuine mechanism (works the same if the domain type
+   beside it were swapped)? → `src/adapters/browser-extension/utils/`.
+5. Feels like (4) but knows what a domain type *means*? → it's policy wearing an infra costume:
+   `src/shared/` if pure, otherwise the owning feature.

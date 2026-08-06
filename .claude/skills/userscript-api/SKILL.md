@@ -97,30 +97,32 @@ hosting a script in an iframe whenever it doesn't truly need to attach to the pa
 
 ### Catalog
 
-`src/kernel/scopes.ts`'s `SCOPE_CATALOG` is the authority — this table is the *plan*, and the ✅
-column says how much of it is real. Don't add a planned row on sight; add it when the phase that
-owns the feature behind it arrives, so a scope never ships with nothing to gate.
+**`src/kernel/scopes.ts`'s `SCOPE_CATALOG` is the authority. Read it — do not trust any list of
+scope names written in prose, here or anywhere else.** An earlier version of this section carried a
+copy of the catalog and it drifted into six separate errors (a scope in the wrong enforcement class,
+three scopes that never existed, four shipped scopes missing) before anyone noticed, because nothing
+checks prose against code. That is the concrete reason for the rule in CLAUDE.md §2: facts readable
+from code are never duplicated into documentation.
 
-**Enforced:**
+What this skill owns is the *rules for shaping* an entry, not its contents:
 
-| Scope | Consent line | Built |
-|---|---|---|
-| `storage.rw` | Store this script's own data *(namespaced — cannot read other scripts')* | ✅ Phase 2 |
-| `ui.render` | Show UI on the page | Phase 3 |
-| `media.read` | See the media detected on this page | Phase 5 |
-| `media.download` ×match | Download media from **{domains}** | Phase 5 |
-| `net.observe` ×match | See requests this page sends to **{domains}** *(URLs may carry tokens)* | Phase 5 |
-| `net.mock` ×match | Block/modify requests to **{domains}** | Phase 5 |
-| `ai.ask` | Send data to an AI model | Phase 5 |
+- **Every scope carries `enforcement: 'enforced' | 'disclosed'`, `consentLine`, `description`,
+  `requiresMatch`.** The `consentLine` is what the user reads, so it must be answerable by a
+  technical user; `{domains}` in it is substituted from the grant's `match`.
+- **A scope's enforcement class is derived, never assumed.** Ask the ràng buộc-(C) question: *can
+  the script do this anyway without my API?* If yes it is Disclosed, no matter how dangerous it
+  sounds. This has been mispredicted at planning time more than once — classify at implementation
+  time, against the container the script actually runs in.
+- **Cap ~10 scopes**, asserted by `scopes.test.ts`. At the cap, a new capability must first be
+  checked for whether it fits inside an existing scope's resource dimension. Two shipped precedents:
+  a helper that opens no door its underlying scope hadn't already opened reuses that scope rather
+  than minting one; and a scope whose resource is already implied by another's `match` does not get
+  a second `match` list of its own (two lists for one fact is two things that can drift apart).
 
-**Disclosed** *(in the floating container only — Enforced in a sandboxed-iframe container):*
-`page.dom` (read/modify page content) ✅ and `page.fetch` (make its own network calls, subject to
-the page's CORS) ✅.
-
-Adding an entry means: a row in `SCOPE_CATALOG` (with `consentLine` + `description` +
-`requiresMatch`), its methods in `API_METHODS`, the method on `SynapseApi`, an implementation in
-`synapse-api-host.ts`, and the same method on the shim and `rpc-client.ts`. `npm test -- -u`
-regenerates the published `.d.ts`; nothing else needs touching for docs.
+Adding an entry means: a row in `SCOPE_CATALOG`, its methods in `API_METHODS`, the method on
+`SynapseApi`, an implementation in `synapse-api-host.ts`, and the same method on the shim and
+`rpc-client.ts`. `npm test -- -u` regenerates the published `.d.ts`; nothing else needs touching
+for docs.
 
 ### Rules
 

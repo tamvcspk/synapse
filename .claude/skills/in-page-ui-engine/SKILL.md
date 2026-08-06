@@ -93,8 +93,9 @@ expressed in the DOM and re-derived from it:
 - The host, zones and stylesheet are shared via `#synapse-ui-root`; whichever world arrives first
   creates what is missing and the other fills the gap (`data-styled`).
 - **Order comes from sorting owner ids**, never creation order — creation order across two worlds is
-  a race by definition. (Today that means uuid order for uploaded scripts; keying off a stable
-  display name waits on §12.1.)
+  a race by definition. Today that still means uuid order for uploaded scripts, which is stable but
+  meaningless to a user. Stable display names now exist (`resolveScriptLabel()`), so the open
+  improvement is to sort by label with `ownerId` as tie-break — see docs/ROADMAP.md Open Points.
 - The mute flag lives on a `data-hidden-owners` attribute, because USER_SCRIPT world has no
   `chrome.storage` and an async lookup would let a script draw before the flag arrived.
 

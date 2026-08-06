@@ -22,13 +22,18 @@ for picking a surface — it does not itself imply any surface exists in Synapse
 - Today: Module Registry list/toggle, and any Action-schema Module's `run()` that completes
   quickly (docs/design.md §7 Popup).
 
-### 2. Dashboard / New Tab (`ui/dashboard/`, opened via `chrome.tabs.create`)
-**Deep focus** — effectively unlimited space, no auto-close.
-- Use for: CRUD/Collection-schema management, settings, batch results, anything that benefits
-  from a table/form/wide layout, or any operation whose duration could exceed Popup's transient
-  lifetime.
-- Today: Management View, Steps view (composite-module bypass toggles), Review/ZIP page
-  (docs/design.md §7 Dashboard).
+### 2. Standalone tab (opened via `chrome.tabs.create`)
+**Deep focus** — effectively unlimited space, no auto-close. This is a *family* of pages, not one:
+`ui/dashboard/` (Collection-schema management + bundled Composite Module steps), `ui/studio/` (the
+Monaco script editor, its step sidebar and Dry Run console), `ui/review/` (reader-mode result +
+ZIP), `ui/help/` (offline docs).
+- Use for: CRUD, settings, code editing, batch results, anything wanting a table/form/wide layout,
+  or any operation whose duration could exceed the Popup's transient lifetime.
+- **Adding one is not free:** no manifest field covers a page opened via `chrome.tabs.create`, so a
+  new page must be added by hand as a Rollup input in `vite.config.ts`, and its path constant put
+  next to the existing `*-path.ts` files so the popup can link to it.
+- **Prefer extending an existing page over minting a new one.** Four already exist; a fifth is
+  justified only by a genuinely different task, not by a different data shape.
 
 ### 3. In-page Shadow-DOM overlay (content-script injection)
 **Contextual** — tied to a specific DOM element or point on the page, not the whole page.
@@ -39,8 +44,11 @@ for picking a surface — it does not itself imply any surface exists in Synapse
   `style=""` string — both are subject to the **host page's** `style-src` CSP and get silently
   dropped on strict sites, even from an isolated world. Use `adoptedStyleSheets` (real CSS text,
   not CSP-gated — verified Chrome 150, see `docs/LESSONS.md`) or direct CSSOM assignment.
+- **Space here is shared and allocated, not taken.** Multiple scripts inject into one page, so a
+  surface is requested from the compositor (`utils/ui-compositor.ts`) with a platform-assigned
+  owner id and a per-owner quota — never by appending a node yourself.
 - How to actually build one: `in-page-ui-engine` skill.
-- Today: `network-sniffer`'s anchored badge + toast fallback (docs/ROADMAP.md §4.2).
+- Today: the media badge/toast, and the two reader-mode trigger icons.
 
 ### 4. Side Panel (`chrome.sidePanel`)
 **Parallel and persistent** — stays open across tab navigation, doesn't cover page content.
@@ -78,10 +86,16 @@ for picking a surface — it does not itself imply any surface exists in Synapse
 ## Quick placement checklist
 
 1. Does the action need to reference a specific DOM element the user is looking at right now? →
-   in-page Shadow-DOM overlay (optionally as the trigger for a Side Panel — see `network-sniffer`).
+   in-page Shadow-DOM overlay (often as the *trigger* for a Side Panel, which is the shipped shape).
 2. Will it finish in a few seconds and not need the user to keep looking at the page? → Popup.
-3. Does it need a form, a table, unbounded space, or could it run long enough that Popup's
-   transient lifetime is a problem? → Dashboard (New Tab).
+3. Does it need a form, a table, an editor, unbounded space, or could it run long enough that the
+   Popup's transient lifetime is a problem? → a standalone tab — **extend an existing one** before
+   adding a fifth.
 4. Does it need multi-turn back-and-forth alongside the page, persisting across tab switches? →
-   Side Panel (built and shipped for `network-sniffer`, docs/ROADMAP.md §6 — reuse that kernel
-   wiring, §6.2, rather than redoing it for a second Module).
+   Side Panel. Reuse the existing wiring (one path per tab, content branches client-side) rather
+   than adding a second panel path.
+
+**A long-running job must not be owned by a surface that can vanish.** The Popup dies on click-away
+and a content script dies on navigation, so anything that outlives a few seconds needs its state in
+`chrome.storage` or the Offscreen Document, with the surface acting only as a view. Reader-mode's
+trigger was moved out of the Popup for exactly this reason.

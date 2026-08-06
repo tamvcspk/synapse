@@ -8,19 +8,27 @@ description: Build a Synapse Module that needs page-JS-level access — intercep
 Chrome content scripts run in the **ISOLATED** world: they can read/write the page's DOM, but
 `window.fetch`, `window.XMLHttpRequest`, and any other JS global they touch are the *extension's*
 copies, not the page's. Patching `window.fetch` there does nothing to requests the page's own JS
-makes. Reaching the page's real JS globals requires Chrome's separate **MAIN** world. Full worked
-example: `src/adapters/browser-extension/background/modules/http-error-mocker/` — read that before
-building a second use of this pattern.
+makes. Reaching the page's real JS globals requires Chrome's separate **MAIN** world.
 
-## Where the Module lives — read this before scaffolding
+Worked examples in the repo — read one before building a third use of this pattern:
+`features/http-mock/` (fetch/XHR interception) and `features/media/` (observe-only MSE/HLS hooks).
 
-A Module that needs this pattern is **browser-specific but not necessarily `dom`**: it orchestrates
-`chrome.scripting` (background-only) to get code into the page, so it can't be a portable
-`src/modules/` Module (that folder promises zero `chrome.*`, even transitively — see the
-`sdk-layers` skill). It also isn't a `content-scripts/modules/*.module.ts` Module unless it also
-needs ISOLATED-world DOM access itself. The business-logic half of this pattern belongs in
-**`src/adapters/browser-extension/background/modules/<name>/index.ts`**, `needs: ['bus']`, no `dom`
-— see `module-scaffold` for this placement option.
+## Where the code lives — read this before scaffolding
+
+This pattern always splits across **two execution contexts**, and the filename suffix is what
+declares which is which (see `module-scaffold`):
+
+- **The orchestrating Module → `features/<name>/<name>.background.ts`**, `needs: ['bus']`. It
+  drives `chrome.scripting`, which exists only in the background. It is browser-specific but *not*
+  a content-script Module — it never touches the page's DOM itself.
+- **The injected payload → `features/<name>/main-world-payload.page.ts`.** The `.page.ts` suffix
+  means MAIN world: **zero `chrome.*`**, no shared JS heap with the extension. It may import from
+  `src/shared/` (pure by definition) and from `utils/main-world/*`, nothing else.
+
+The payload is built as a standalone IIFE and referenced by path, not imported by the background
+file — check `vite.config.ts` and an existing `main-world-payload.page.ts` for the exact build
+incantation before writing a new one; getting the build query wrong fails silently at runtime
+(docs/LESSONS.md).
 
 ## Why not the obvious approaches
 
@@ -77,21 +85,21 @@ rule). All under `src/adapters/browser-extension/utils/`:**
 
 **Business — owned by the Module, in its own folder:**
 
-- `background/modules/<name>/index.ts` — the Module. Validates commands (delivered over the real
-  Bus — see `kernel-bootstrap`'s `chromeRuntimeBus` reference, now wired in `background/index.ts`),
-  persists via a colocated storage-CRUD file, and decides *when* to register/unregister the
-  MAIN-world script (via `main-world-injector.ts`) based on its own activation state — this
+- `features/<name>/<name>.background.ts` — the Module. Validates commands (delivered over the real
+  Bus), persists via a colocated `*-store.background.ts`, and decides *when* to register/unregister
+  the MAIN-world script (via `main-world-injector.ts`) based on its own activation state — this
   decision is business policy, never baked into the generic injector.
-- `background/modules/<name>/main-world-payload.ts` — the MAIN-world **composition root**. Owned by
-  the Module (colocated in its folder) even though it's a physically separate build entry — this is
-  where the generic mechanism (`installNetworkInterceptor`, `createMainWorldChannel`) gets wired to
-  business logic (matching/response-building functions from `src/shared/`, per `sdk-layers`'s
-  litmus test: they must survive being imported into a bundle with zero `chrome.*`). **Zero
-  `chrome.*` imports in this file** — it runs in MAIN world, which doesn't have any.
-- A small `constants.ts` (storage key, channel id, script id strings) colocated in the same folder,
-  imported by `index.ts`, `main-world-payload.ts`, *and* the `content-scripts/index.ts` relay call —
-  so the relay wiring doesn't have to import the whole background module (and its `chrome.scripting`
-  dependency) just to agree on a string.
+- `features/<name>/main-world-payload.page.ts` — the MAIN-world **composition root**. Colocated with
+  the feature even though it's a physically separate build entry. This is where generic mechanism
+  (`installNetworkInterceptor`, `createMainWorldChannel`) gets wired to business logic (matching /
+  response-building functions from `src/shared/`, per `sdk-layers`'s litmus test: they must survive
+  being imported into a bundle with zero `chrome.*`). **Zero `chrome.*` imports** — the `.page.ts`
+  suffix exists to make that violation obvious in review.
+- A small `constants.ts` (storage key, channel id, script id strings) colocated in the same feature
+  folder — **no suffix, because it is read from three contexts at once**: the background Module, the
+  MAIN-world payload, and the `content-scripts/index.ts` relay. That way the relay doesn't have to
+  import the whole background Module (and its `chrome.scripting` dependency) just to agree on a
+  string.
 
 ## Getting the payload's built path
 
