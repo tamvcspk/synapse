@@ -59,12 +59,15 @@ Chương trình chính, và là lý do tồn tại của phần lớn API còn t
 builtin (spike, chỉ dev)  →  trích xuất API  →  template script tái tạo  →  XOÁ builtin
 ```
 
-### B0. Gate dev-only ở build time
+### B0. Gate dev-only ở build time — 🛑 STALL, chờ B3
 
 - Builtin bị loại khỏi bundle release bằng **`import.meta.env.DEV`**, không phải bằng cờ runtime — cờ runtime vẫn để code đặc quyền nằm trong bundle của người dùng.
-- **Rủi ro phải chấp nhận và ghi rõ**: code chỉ chạy ở bản dev sẽ mục ruỗng vì không ai chạy nó ở release. Chấp nhận được với vai trò spike, nhưng đừng giả vờ nó vẫn là tính năng được bảo trì.
+- **Phát hiện (2026-08-08): filter mảng sau `import.meta.glob(..., { eager: true })` không đủ.** Eager glob sinh import tĩnh ở đầu module bất kể nhánh `if` bọc quanh kết quả — ES import không điều kiện hoá được. `network-sniffer.background.ts` có side-effect top-level (`ensureNetworkObserver(...)`), nên Rollup không tree-shake nổi dù kết quả bị lọc khỏi registry: code vẫn nằm trong bundle production, chỉ ẩn khỏi danh sách hiển thị.
+- **Cách đúng: gate bằng `import()` động ngay tại 2 composition root** (`background/index.ts`, `content-scripts/index.ts`), không gọi `import.meta.glob` trực tiếp ở đó — để Vite thay `import.meta.env.DEV` bằng literal `false` lúc build, biến nhánh chứa `import(...)` thành dead code chứng minh được, Rollup mới loại nổi cả `background-modules.ts`/`bundled-modules.ts` (và glob bên trong) khỏi output. **Chưa implement.**
+- **Cái giá:** cả 2 composition root phải chuyển sang top-level `await` (hợp lệ vì service worker đã khai `type: 'module'`).
+- **Lý do STALL — đảo ngược ghi chú cũ ("làm sớm, không phụ thuộc"):** bật gate trước khi có template thay thế nghĩa là bản release **mất sạch cả 3 builtin ngay lập tức**, không phải "mục ruỗng dần" như rủi ro cũ mô tả — vì hôm nay builtin vẫn là năng lực production DUY NHẤT, chưa template nào của B3 thay thế. B0 vì vậy chờ **từng builtin đạt template parity (B3)** rồi mới bật gate, trừ khi có quyết định rõ ràng chấp nhận đánh đổi "release tạm thời trống tính năng".
 - **Xong khi**: `npm run build` cho ra bundle không chứa 3 builtin; bản dev vẫn đủ để làm spike.
-- **Phụ thuộc**: không. **Làm sớm** — nó chốt định vị trước khi ai kịp thêm builtin thứ tư.
+- **Phụ thuộc**: B3 (đảo từ "không phụ thuộc").
 
 ### B1. `uiSchema` thống nhất cho MỌI bề mặt ← đây là phần lớn công việc
 
@@ -83,14 +86,12 @@ Khoảng cách đo được hôm nay:
 
 | Builtin | Script với tới | Còn thiếu |
 |---|---|---|
-| `http-error-mocker` | `fake-response` × `main-world` — **1 trong 6** tổ hợp | `block`, `rewrite-request`; mechanism `debugger`, `dnr` |
+| `http-error-mocker` | ✅ **Đủ parity** — `fake-response`/`rewrite-request`/`block` × `main-world`/`dnr`/`debugger`, xem B2a/B2b | file-upload body (`fakeResponseFile`/`rewriteBodyFile`), `hitCountLimit`, `requestMatchContains` — **cố ý bỏ**, không có khái niệm file-picker/typed-match-string hợp lý cho script API |
 | `network-sniffer` | `media.list/inspect/download/job/control` | **`page.hook`** (xem B2c) + **`net.observe`** dạng subscription; toggle turbo |
 | `iframe-unsandbox` | — | ✅ **KHAI TỬ — không cần API nào**, xem B2d |
 | `reader-mode-converter` | gần đủ (đã chứng minh bằng [test-lib-reader-mode.js](examples/test-lib-reader-mode.js)) | chỉ crawl-site, **cố ý bỏ** (policy nghiệp vụ) |
 
-**B2a — Quy tắc mở rộng `net.mock`, đã chốt:** script khai **ý định** (`block`/`rewrite`/`fake`), **platform vẫn chọn mechanism** — đúng nguyên tắc "phân quyền theo mục đích, không theo cơ chế" ([design.md §3.E](design.md#e-synapseapi-and-the-scope-model-the-public-contract)). Chi phí thật là platform phải tự giải ma trận ràng buộc (chọn mechanism rẻ nhất còn hỗ trợ được action đang xin), **không** phải thêm field `mechanism` cho script.
-
-**B2b — `debugger`, đã chốt: vẫn expose, sau một grant riêng.** Chrome đã tự có cơ chế cảnh báo không thể bỏ qua (banner "đang debug tab" hiện liên tục), và đối tượng người dùng hẹp + kỹ thuật. Consent line **phải nói thẳng về cái banner đó**.
+**B2a/B2b — mở rộng `net.mock` (`action` + `net.mock.debugger`), ✅ đã ship — xem [CHANGELOG.md §17](CHANGELOG.md#17-track-b2ab2b--netmock-nhận-action-blockrewrite-request-netmockdebugger-grant-riêng).** Tóm tắt quyết định còn ràng buộc thiết kế khác: script chỉ khai ý định, platform luôn chọn mechanism rẻ nhất còn hỗ trợ — không bao giờ thêm field `mechanism` cho script.
 
 **B2c — `page.hook` / `page.inject`: đăng ký code MAIN-world THƯỜNG TRÚ, chạy từ `document_start`, sau scope riêng.**
 
@@ -115,15 +116,11 @@ Hai nửa của module xử lý như sau:
 
 **Mất mát có chủ đích, ghi rõ:** ở frame bị sandbox tắt scripting, JS của trang không chạy ⇒ không có player để hook. Gỡ CSP ở đó không phải "thấy media" mà là **bật player của trang lên** — mục tiêu khác, không thuộc phạm vi Synapse. Media dạng `<video src>` thuần HTML vẫn phát hiện bình thường.
 
-**B2e — Catalog scope: bỏ trần đếm, thay bằng bất biến tài nguyên. Đã chốt.**
+**B2e — Catalog scope: bỏ trần đếm, thay bằng bất biến tài nguyên. ✅ Đã ship — xem [CHANGELOG.md §16](CHANGELOG.md#16-track-b2e--catalog-scope-bỏ-trần-đếm-thay-bằng-bất-biến-tài-nguyên).**
 
-Trần `ALL_SCOPES.length <= 10` (`scopes.test.ts`) **bị gỡ**. Lý do: nó đo sai chiều (số dòng user thấy phụ thuộc script khai bao nhiêu scope, không phụ thuộc catalog có bao nhiêu), và ở biên nó **ép gộp những năng lực khác bản chất vào một scope — tức ép consent UI nói dối**, đúng thứ nó sinh ra để ngăn.
+> **Bất biến còn hiệu lực:** mọi scope hoặc có `requiresMatch: true`, hoặc khai `unboundedReason` giải thích vì sao không bound được.
 
-Thay bằng bất biến kiểm được bằng máy:
-
-> **Mọi scope hoặc có `requiresMatch: true`, hoặc khai `unboundedReason` giải thích vì sao không bound được.**
-
-Hiện chỉ **3/10** scope có `requiresMatch` — nguyên tắc "grant là (hành động × tài nguyên)" mới hiện thực được 30%. Bất biến này sẽ tự lôi ra scope nào đang không bound (`media` là ứng viên rõ nhất).
+Hiện **4/11** scope có `requiresMatch` (thêm `net.mock.debugger` từ B2b) — nguyên tắc "grant là (hành động × tài nguyên)" hiện thực được ~36%. Bất biến này sẽ tự lôi ra scope nào đang không bound tiếp theo (`media` là ứng viên rõ nhất).
 
 **Nhóm để HIỂN THỊ, không bao giờ để CẤP PHÁT.** Consent UI được gom nhóm cho dễ đọc, nhưng dòng cha là **tiêu đề**, không phải checkbox — grant luôn ở mức lá. Gộp thành đơn vị cấp phát là tái tạo đúng bài toán `bus`.
 

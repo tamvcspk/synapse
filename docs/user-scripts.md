@@ -327,10 +327,10 @@ __synapseModule = {
 - **Size cap**: 10MB. Above that, generate the file server-side or split it — this call encodes
   synchronously, so a much larger file would block the extension's background for the whole call.
 
-### Faking network responses
+### Faking, blocking, or rewriting network requests
 
-`net.mock` answers matching requests with a canned response instead of letting them reach the
-network — for testing error handling, or working against an API that doesn't exist yet:
+`net.mock` answers matching requests with a canned response, fails them outright, or rewrites them
+before they go out — for testing error handling, or working against an API that doesn't exist yet:
 
 ```javascript
 __synapseModule = {
@@ -341,6 +341,7 @@ __synapseModule = {
       endpointPattern: 'https://api.example.com/users/*',
       fakeStatus: 200,
       fakeResponse: { users: [] },
+      // action defaults to 'fake-response' when omitted, same as before this field existed.
     });
     await ctx.api.net.mock.remove(id); // stop faking it
   },
@@ -350,20 +351,34 @@ __synapseModule = {
 - **`endpointPattern` needs a literal scheme and host** — `https://api.example.com/*` is fine,
   `*://*.example.com/*` is not. Only the path may use `*`, and it must fall under one of the
   `match` patterns this call was granted, the same (action × origin) check `net.request` does.
-- **Only fakes responses, for now.** There's no way to block a request or rewrite it before it goes
-  out from this API — those, and a rule visible in DevTools' Network tab, are still Management
-  View-only (the "HTTP Mock & Rewrite" panel), configured by hand.
+- **`action` picks WHAT the rule does — `'fake-response'` (default), `'rewrite-request'`, or
+  `'block'`.** You never pick HOW it's intercepted; the platform always resolves the cheapest
+  mechanism that can do it. `'block'` fails the request at the real network layer (not just a
+  rejected Promise). `'rewrite-request'` accepts `rewriteUrl`/`rewriteMethod`/`rewriteHeaders`/
+  `rewriteBody`, any subset — an omitted one keeps the original request's value.
+- **One combination needs an extra grant: `net.mock.debugger`.** Add `matchAnyResourceType: true`
+  alongside a `rewriteBody` when you need to rewrite a request NOT made via `fetch`/XHR — a bundled
+  `<script src>` or a large `<img>` served straight from an HTML tag, for example. That's the one
+  case `main-world`'s fetch/XHR patch can never see and `declarativeNetRequest` can never touch a
+  body for, so it's the only combination that reaches `chrome.debugger` — which means Chrome shows a
+  permanent "being debugged" banner on the tab for as long as the rule is active. Every other `action`
+  (including `block`) only ever needs `net.mock` itself.
 - **`.list()`/`.remove()` only ever see your own script's rules** — never another script's, and
   never one a person set up by hand in the Management View.
-- **It only ever intercepts the PAGE's own `fetch`/`XMLHttpRequest` — never yours.** The rule works
-  by patching `window.fetch`/XHR in the page's MAIN world. Your script runs in a *separate* world
-  (USER_SCRIPT) that shares the page's DOM but not its JS globals, so **your own script calling
-  `fetch(...)` is calling the real, unpatched one** — it just reaches the real network (and can hit
-  a real CORS error for a cross-origin URL, the same as any ordinary page script would). This isn't
-  a bug to work around — if you want to see the fake response yourself, either read it off the page
-  after the page's own code fetches it, or check it manually from the page's own DevTools console
-  (not your script's). `ctx.api.net.request` is unrelated to all of this too — a separate call under
-  the extension's own identity, never intercepted by a `net.mock` rule either way.
+- **`fake-response` and most `rewrite-request` calls only ever intercept the PAGE's own
+  `fetch`/`XMLHttpRequest` — never yours.** They work by patching `window.fetch`/XHR in the page's
+  MAIN world. Your script runs in a *separate* world (USER_SCRIPT) that shares the page's DOM but not
+  its JS globals, so **your own script calling `fetch(...)` is calling the real, unpatched one** — it
+  just reaches the real network (and can hit a real CORS error for a cross-origin URL, the same as
+  any ordinary page script would). This isn't a bug to work around — if you want to see a
+  `fake-response` yourself, either read it off the page after the page's own code fetches it, or
+  check it manually from the page's own DevTools console (not your script's). `ctx.api.net.request`
+  is unrelated to all of this too — a separate call under the extension's own identity, never
+  intercepted by a `net.mock` rule either way. `block` and any `rewrite-request` that needs
+  `net.mock.debugger` DO reach every resource type, page script included — see above.
+- **File uploads, `hitCountLimit`, and body-content matching are Management View-only.** Those need
+  a file picker or a typed match string that has no equivalent shape for a script call — configure
+  them by hand in the "HTTP Mock & Rewrite" panel instead.
 
 ### Detecting, inspecting and downloading media
 

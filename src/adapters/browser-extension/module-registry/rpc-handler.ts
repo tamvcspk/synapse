@@ -9,6 +9,7 @@ import type {
 } from '../../../kernel/rpc';
 import { SCOPE_CATALOG, grantsAllow, isMatchExemptMethod, resourceUrlForCall, scopeForApiMethod } from '../../../kernel/scopes';
 import type { SynapseApi, SynapseScopeGrant } from '../../../kernel/synapse-api';
+import { chooseMechanismForScriptRule } from '../../../shared/http-mock';
 import { hashScriptSource } from '../../../shared/source-hash';
 import { getActivationMap, getGrantedScopes, getSubStateMap, getUploadedSources, setManifestReport } from './storage';
 import { createSynapseApi } from './synapse-api-host';
@@ -265,6 +266,30 @@ async function handleRpc(req: RpcRequest, trustedScopes: TrustedScopeMap, sender
             `Scope "secrets.use" is not granted for module "${req.moduleId}" — required to reference a secret by name in ai.ask`,
           );
         }
+      }
+    }
+
+    // net.mock's extra `net.mock.debugger` gate (docs/ROADMAP.md Track B2b) — same shape of
+    // argument-conditional check as secrets.use above, for the same reason: whether this call needs
+    // it depends on THIS call's own options, not on `mock.add`'s fixed catalog scope. Runs
+    // `chooseMechanismForScriptRule` — the exact same pure function `net-mock-host.ts`'s
+    // `performMockAdd` will call to build the rule — so the mechanism this gate checks against can
+    // never drift from the mechanism that actually gets persisted; net-mock-host.ts trusts this
+    // check already happened and never re-verifies it (rpc-handler.ts is the one enforce point,
+    // §3.4). `net.mock.debugger` reuses net.mock's own `resourceUrl` (already resolved above) since
+    // it gates the SAME origin, not a second independent one.
+    if (req.namespace === 'net' && req.method === 'mock.add') {
+      const options = req.args[0] as { action?: unknown; rewriteBody?: unknown; matchAnyResourceType?: unknown } | undefined;
+      const action = options?.action === 'rewrite-request' || options?.action === 'block' ? options.action : 'fake-response';
+      const mechanism = chooseMechanismForScriptRule(action, {
+        rewriteBody: options?.rewriteBody,
+        matchAnyResourceType: options?.matchAnyResourceType === true,
+      });
+      if (mechanism === 'debugger' && !grantsAllow(granted, 'net.mock.debugger', resourceUrl)) {
+        return fail(
+          `Scope "net.mock.debugger" is required in addition to "net.mock" for module "${req.moduleId}" — ` +
+            'this rule\'s action + hints resolve to the debugger mechanism',
+        );
       }
     }
 

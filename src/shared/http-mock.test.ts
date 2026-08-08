@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildFakeResponseInit,
   buildRewriteOverrides,
+  chooseMechanismForScriptRule,
   endpointPatternToRegexSource,
   getAction,
   getMechanism,
@@ -33,6 +34,41 @@ describe('getMechanism / getAction — back-compat for configs persisted before 
   it('returns the stored value when present', () => {
     expect(getMechanism(config({ mechanism: 'dnr' }))).toBe('dnr');
     expect(getAction(config({ action: 'block', mechanism: 'dnr' }))).toBe('block');
+  });
+});
+
+describe('chooseMechanismForScriptRule — docs/ROADMAP.md Track B2b: the platform picks, the script only declares intent', () => {
+  it('always picks main-world for fake-response, unchanged from v1', () => {
+    expect(chooseMechanismForScriptRule('fake-response', {})).toBe('main-world');
+    expect(chooseMechanismForScriptRule('fake-response', { matchAnyResourceType: true })).toBe('main-world');
+  });
+
+  it('always picks dnr for block — it already catches every resource type, same coverage as debugger, no banner', () => {
+    expect(chooseMechanismForScriptRule('block', {})).toBe('dnr');
+    expect(chooseMechanismForScriptRule('block', { matchAnyResourceType: true })).toBe('dnr');
+  });
+
+  describe('rewrite-request', () => {
+    it('picks main-world when rewriting a body — cheapest mechanism that can rewrite a body at all', () => {
+      expect(chooseMechanismForScriptRule('rewrite-request', { rewriteBody: 'new body' })).toBe('main-world');
+    });
+
+    it('picks debugger ONLY when a body rewrite must also reach non-fetch/XHR resources — the one gap main-world/dnr cannot cover', () => {
+      expect(chooseMechanismForScriptRule('rewrite-request', { rewriteBody: 'new body', matchAnyResourceType: true })).toBe('debugger');
+    });
+
+    it('picks dnr for a resourceType-wide rewrite with no body (url/method/headers only)', () => {
+      expect(chooseMechanismForScriptRule('rewrite-request', { matchAnyResourceType: true })).toBe('dnr');
+    });
+
+    it('picks main-world by default when neither a body nor cross-resource-type matching is requested', () => {
+      expect(chooseMechanismForScriptRule('rewrite-request', {})).toBe('main-world');
+    });
+
+    it('treats an empty-string rewriteBody the same as no body at all', () => {
+      expect(chooseMechanismForScriptRule('rewrite-request', { rewriteBody: '' })).toBe('main-world');
+      expect(chooseMechanismForScriptRule('rewrite-request', { rewriteBody: '', matchAnyResourceType: true })).toBe('dnr');
+    });
   });
 });
 

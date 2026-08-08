@@ -34,7 +34,7 @@
  * deliberately absent and can never become a scope: `bus.emit(moduleId, …)` reaches every bundled
  * Module's own listener, which is a god-capability no consent prompt can describe honestly.
  */
-export type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch' | 'ui.render' | 'net.request' | 'files.save' | 'net.mock' | 'media' | 'page.eval' | 'secrets.use';
+export type SynapseScope = 'storage.rw' | 'page.dom' | 'page.fetch' | 'ui.render' | 'net.request' | 'files.save' | 'net.mock' | 'net.mock.debugger' | 'media' | 'page.eval' | 'secrets.use';
 
 /**
  * One entry in a script's `scopes` declaration. `match` is the resource dimension: a grant is
@@ -164,37 +164,68 @@ export interface SynapseNetResponse {
 export interface SynapseMockRuleOptions {
   endpointPattern: string;
   method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'ALL';
-  /** HTTP status to answer with. Defaults to 200. */
+  /** What the rule does once it matches (docs/ROADMAP.md Track B2a/B2b) — the platform still picks
+   * *how* (`chooseMechanismForScriptRule`, shared/http-mock.ts), this only ever declares intent.
+   * Defaults to `'fake-response'`, the only action v1 (pre-Track-B2) had. */
+  action?: 'fake-response' | 'rewrite-request' | 'block';
+  /** Only meaningful for `action: 'fake-response'`. HTTP status to answer with. Defaults to 200. */
   fakeStatus?: number;
-  /** The response body. A string is sent as-is; anything else is JSON-serialized. */
+  /** Only meaningful for `action: 'fake-response'`. A string is sent as-is; anything else is
+   * JSON-serialized. */
   fakeResponse?: unknown;
-  /** Answers this many milliseconds late, to test loading states. */
+  /** Only meaningful for `action: 'rewrite-request'`. Overrides the request's URL before it is sent.
+   * Omitted fields keep the original request's value. */
+  rewriteUrl?: string;
+  /** Only meaningful for `action: 'rewrite-request'`. */
+  rewriteMethod?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  /** Only meaningful for `action: 'rewrite-request'`. Merged into the outgoing request's headers. */
+  rewriteHeaders?: Record<string, string>;
+  /** Only meaningful for `action: 'rewrite-request'`. Overrides the request body. Setting this is
+   * what can push the resolved mechanism to `'debugger'` when combined with `matchAnyResourceType`
+   * — see that field's own doc comment. */
+  rewriteBody?: string;
+  /** Only meaningful for `action: 'rewrite-request'` or `'block'`. Declares that this rule must also
+   * catch requests NOT made via `fetch`/XHR (an `<img>`/`<script>` tag, for example) — `'block'`
+   * already gets this for free from `'dnr'`, no extra grant needed; for `'rewrite-request'` WITH
+   * `rewriteBody` set, this is the one combination only the `debugger` mechanism can do, which
+   * additionally requires the `net.mock.debugger` scope to be granted. Omit (or leave `false`) to
+   * stay scoped to `fetch`/XHR-originated requests only, the cheaper and more common case. */
+  matchAnyResourceType?: boolean;
+  /** Only meaningful for `action: 'fake-response'`. Answers this many milliseconds late, to test
+   * loading states. */
   delayMs?: number;
 }
 
 /** What `mock.list()` returns for one of this script's own rules — the same fields `add` accepted,
- * echoed back with the id it was assigned and its mechanism/action fixed for v1 (always a
- * MAIN-world fake-response, docs/api-inventory.md §3.2 — see `SynapseNetMockApi`'s doc comment). */
+ * echoed back with the id it was assigned (docs/ROADMAP.md Track B2b — no longer fixed to
+ * fake-response/main-world, `action` reflects what was actually declared). */
 export interface SynapseMockRule {
   id: string;
   endpointPattern: string;
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'ALL';
-  fakeStatus: number;
+  action: 'fake-response' | 'rewrite-request' | 'block';
+  fakeStatus?: number;
   fakeResponse?: unknown;
+  rewriteUrl?: string;
+  rewriteMethod?: string;
+  rewriteHeaders?: Record<string, string>;
+  rewriteBody?: string;
   delayMs?: number;
 }
 
 /**
- * Fakes matching requests instead of letting them reach the network — for testing error handling
- * or working against an API that doesn't exist yet. Scope: `net.mock`, always carries `match`.
+ * Fakes, rewrites, or blocks matching requests instead of letting them reach the network unchanged
+ * — for testing error handling or working against an API that doesn't exist yet. Scope: `net.mock`,
+ * always carries `match`.
  *
- * **v1 is deliberately narrow**: only `action: 'fake-response'`, and the interception mechanism is
- * always the platform's cheapest choice (a MAIN-world `fetch`/`XMLHttpRequest` patch — no DevTools
- * "being debugged" banner, no `chrome.declarativeNetRequest` rule budget spent). A script declares
- * *what* it wants (the endpoint, the fake response); it never picks *how* that's intercepted — see
- * docs/api-inventory.md §3.2 for why. Blocking/rewriting a real request, or a rule visible in the
- * Network tab, is only available today through the Management View's own "HTTP Mock & Rewrite"
- * panel, by hand.
+ * A script declares *what* it wants via `action` (docs/ROADMAP.md Track B2a/B2b); it never picks
+ * *how* that's intercepted — the platform always resolves the cheapest mechanism able to do the job
+ * (`chooseMechanismForScriptRule`, shared/http-mock.ts): `'fake-response'` and most `'rewrite-request'`
+ * calls never leave a MAIN-world `fetch`/`XMLHttpRequest` patch (no DevTools "being debugged" banner);
+ * `'block'` always resolves to `chrome.declarativeNetRequest` (native, no banner, catches every
+ * resource type). The ONE combination that reaches `chrome.debugger` — a `'rewrite-request'` with
+ * `rewriteBody` AND `matchAnyResourceType` both set — additionally requires the `net.mock.debugger`
+ * scope to be granted; every other call here only ever needs `net.mock` itself.
  */
 export interface SynapseNetMockApi {
   add(options: SynapseMockRuleOptions): Promise<{ id: string }>;

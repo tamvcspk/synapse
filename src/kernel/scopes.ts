@@ -38,6 +38,12 @@ export interface ScopeDefinition {
   /** Whether a grant of this scope is meaningless without a resource dimension (§11.3 constraint
    * B). No scope needs it yet; the network-touching scopes of Phase 5 will. */
   requiresMatch: boolean;
+  /** Required when `requiresMatch` is false (docs/ROADMAP.md Track B2e): why this scope has no
+   * resource dimension to bind `match` to. Replaces the old catalog-size cap (`ALL_SCOPES.length
+   * <= 10`), which measured the wrong axis — it capped how many scopes exist, not whether each one
+   * is honestly all-or-nothing. `scopes.test.ts` enforces `requiresMatch || unboundedReason` on
+   * every entry, so a new scope can't silently skip declaring which one applies. */
+  unboundedReason?: string;
 }
 
 export const SCOPE_CATALOG: Record<SynapseScope, ScopeDefinition> = {
@@ -49,6 +55,7 @@ export const SCOPE_CATALOG: Record<SynapseScope, ScopeDefinition> = {
       'Read and write a key/value store private to this script. Keys are namespaced by the ' +
       'platform: this script cannot see another script\'s data, nor the extension\'s own settings.',
     requiresMatch: false,
+    unboundedReason: 'The store is already isolated per-script by the platform namespace, not by origin — there is no site to bind `match` to.',
   },
   'page.dom': {
     scope: 'page.dom',
@@ -60,6 +67,7 @@ export const SCOPE_CATALOG: Record<SynapseScope, ScopeDefinition> = {
       'this is granted. It becomes genuinely enforced only for scripts hosted in a sandboxed frame ' +
       '(docs/ROADMAP.md §11.8), which have no page DOM at all.',
     requiresMatch: false,
+    unboundedReason: 'Disclosed, not a gate — a script already has this on whatever page it runs on, so there is no denial `match` could meaningfully narrow.',
   },
   'ui.render': {
     scope: 'ui.render',
@@ -73,6 +81,7 @@ export const SCOPE_CATALOG: Record<SynapseScope, ScopeDefinition> = {
       'a real gate for scripts hosted in a sandboxed frame (docs/ROADMAP.md §11.8), which have no ' +
       'page DOM to draw on at all.',
     requiresMatch: false,
+    unboundedReason: 'Disclosed, not a gate — same reasoning as `page.dom`: refusing it by site protects nobody since the script already shares that page.',
   },
   'page.fetch': {
     scope: 'page.fetch',
@@ -83,6 +92,7 @@ export const SCOPE_CATALOG: Record<SynapseScope, ScopeDefinition> = {
       'Disclosed for the same reason as `page.dom` — the script already has these globals. It is ' +
       'NOT the same as making requests under the extension\'s identity, which `net.request` grants.',
     requiresMatch: false,
+    unboundedReason: 'Disclosed, not a gate — the script already has `fetch`/`XMLHttpRequest` on whatever page it runs on, subject to that page\'s own CORS, regardless of `match`.',
   },
   'net.request': {
     scope: 'net.request',
@@ -104,6 +114,7 @@ export const SCOPE_CATALOG: Record<SynapseScope, ScopeDefinition> = {
       'close on its own. No resource dimension: unlike `net.request`, a written file cannot itself ' +
       'exfiltrate anything, so there is no origin to scope it to.',
     requiresMatch: false,
+    unboundedReason: 'A file written to disk cannot itself exfiltrate anything the way a network request or an eval can — there is no origin for `match` to bound.',
   },
   'net.mock': {
     scope: 'net.mock',
@@ -115,6 +126,26 @@ export const SCOPE_CATALOG: Record<SynapseScope, ScopeDefinition> = {
       '(docs/api-inventory.md §3.2). v1 only ever fakes a response (no block/rewrite) and always ' +
       'runs under the cheapest mechanism (a MAIN-world fetch/XHR patch, no DevTools "being debugged" ' +
       'banner) — a script cannot request `debugger` or `dnr` directly.',
+    requiresMatch: true,
+  },
+  'net.mock.debugger': {
+    scope: 'net.mock.debugger',
+    enforcement: 'enforced',
+    consentLine: 'Intercept requests to {domains} at the real network layer — Chrome will show a permanent "being debugged" banner on affected tabs',
+    description:
+      'Required in ADDITION to `net.mock` for the one combination `main-world`/`dnr` cannot cover: ' +
+      'rewriting the BODY of a request not initiated by `fetch`/XHR — a real, common case, not a ' +
+      'theoretical one: mocking a bundled `<script src>` (e.g. swapping in a patched build) or a ' +
+      'large `<img>` served straight from an HTML tag both need this, since neither is a `fetch`/XHR ' +
+      'call `main-world`\'s patch would ever see, and `dnr` cannot touch a request body at all ' +
+      '(docs/ROADMAP.md Track B2b). `net.mock.add` never asks for this directly — the platform ' +
+      'reaches for the `debugger` mechanism only when the declared `action`/hints leave no cheaper ' +
+      'mechanism able to do the job (`chooseMechanismForScriptRule`, shared/http-mock.ts), and ' +
+      '`rpc-handler.ts` runs that exact same decision before dispatch to require this grant. Chrome ' +
+      'shows an unmissable "being debugged" banner for as long as any rule using it is active — the ' +
+      'consent line must say so, never just "network access". Reuses `net.mock`\'s own match ' +
+      "dimension: a script that already declared `net.mock` for an origin only needs this AS WELL to " +
+      'unlock the debugger-only combination there, not a second, independent origin list.',
     requiresMatch: true,
   },
   media: {
@@ -129,6 +160,7 @@ export const SCOPE_CATALOG: Record<SynapseScope, ScopeDefinition> = {
       'wants to download). No `match` dimension - unlike `net.request`/`net.mock`, this is ' +
       'all-or-nothing, the same posture the Side Panel already takes toward everything it detects.',
     requiresMatch: false,
+    unboundedReason: 'Detection is tab-wide by nature (the network sniffer watches everything the tab loads) — splitting it by origin would not match what the Side Panel itself already shows unscoped.',
   },
   'page.eval': {
     scope: 'page.eval',
@@ -161,6 +193,7 @@ export const SCOPE_CATALOG: Record<SynapseScope, ScopeDefinition> = {
       "to `net.request`'s own grant and to the secret's binding — a third, independent match list " +
       'on this scope would just be a second place for the same fact to drift out of sync.',
     requiresMatch: false,
+    unboundedReason: "The resource dimension already lives on net.request's own grant and on the secret's own host binding — a third match list here would just drift out of sync with those.",
   },
 };
 

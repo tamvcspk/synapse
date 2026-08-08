@@ -87,6 +87,55 @@ describe('performMockAdd', () => {
     expect(saveSpy).not.toHaveBeenCalled();
   });
 
+  it('docs/ROADMAP.md Track B2b: action "block" resolves to mechanism "dnr" — no debugger banner needed', async () => {
+    const store = fakeStore();
+
+    await performMockAdd('script-a', { endpointPattern: 'https://api.example.com/*', action: 'block' }, store);
+
+    const [config] = await store.list();
+    expect(config).toMatchObject({ action: 'block', mechanism: 'dnr' });
+    expect(config).not.toHaveProperty('fakeStatus');
+  });
+
+  it('action "rewrite-request" with a body resolves to mechanism "main-world"', async () => {
+    const store = fakeStore();
+
+    await performMockAdd(
+      'script-a',
+      { endpointPattern: 'https://api.example.com/*', action: 'rewrite-request', rewriteUrl: 'https://api.example.com/v2', rewriteBody: 'new body' },
+      store,
+    );
+
+    const [config] = await store.list();
+    expect(config).toMatchObject({ action: 'rewrite-request', mechanism: 'main-world', rewriteUrl: 'https://api.example.com/v2', rewriteBody: 'new body' });
+  });
+
+  it('action "rewrite-request" with a body AND matchAnyResourceType resolves to mechanism "debugger" — the one grant-gated combo', async () => {
+    const store = fakeStore();
+
+    await performMockAdd(
+      'script-a',
+      { endpointPattern: 'https://api.example.com/*', action: 'rewrite-request', rewriteBody: 'new body', matchAnyResourceType: true },
+      store,
+    );
+
+    const [config] = await store.list();
+    expect(config).toMatchObject({ mechanism: 'debugger' });
+  });
+
+  it('serializes rewriteHeaders (a plain object over the wire) into the JSON-text form MockConfig stores', async () => {
+    const store = fakeStore();
+
+    await performMockAdd(
+      'script-a',
+      { endpointPattern: 'https://api.example.com/*', action: 'rewrite-request', rewriteHeaders: { 'X-Foo': 'bar' } },
+      store,
+    );
+
+    const [config] = await store.list();
+    expect(config).toMatchObject({ rewriteHeaders: JSON.stringify({ 'X-Foo': 'bar' }) });
+  });
+
   it('appends to existing rules rather than replacing them, and resyncs interception once', async () => {
     const existing: MockConfig = {
       id: 'existing',
@@ -182,7 +231,56 @@ describe('performMockList', () => {
 
     const result = await performMockList('script-a', store);
 
-    expect(result).toEqual([{ id: 'r1', endpointPattern: 'https://api.example.com/*', method: 'POST', fakeStatus: 503, fakeResponse: { ok: false }, delayMs: 100 }]);
+    expect(result).toEqual([
+      { id: 'r1', endpointPattern: 'https://api.example.com/*', method: 'POST', action: 'fake-response', fakeStatus: 503, fakeResponse: { ok: false }, delayMs: 100 },
+    ]);
+  });
+
+  it('projects a rewrite-request rule with its rewrite fields, parsing rewriteHeaders back into an object', async () => {
+    const rewrite: MockConfig = {
+      id: 'r1',
+      endpointPattern: 'https://api.example.com/*',
+      method: 'ALL',
+      mechanism: 'main-world',
+      action: 'rewrite-request',
+      rewriteUrl: 'https://api.example.com/v2',
+      rewriteHeaders: JSON.stringify({ 'X-Foo': 'bar' }),
+      rewriteBody: 'new body',
+      active: true,
+      ownerModuleId: 'script-a',
+    };
+    const store = fakeStore([rewrite]);
+
+    const result = await performMockList('script-a', store);
+
+    expect(result).toEqual([
+      {
+        id: 'r1',
+        endpointPattern: 'https://api.example.com/*',
+        method: 'ALL',
+        action: 'rewrite-request',
+        rewriteUrl: 'https://api.example.com/v2',
+        rewriteHeaders: { 'X-Foo': 'bar' },
+        rewriteBody: 'new body',
+      },
+    ]);
+  });
+
+  it('projects a block rule with no extra fields at all', async () => {
+    const block: MockConfig = {
+      id: 'r1',
+      endpointPattern: 'https://api.example.com/*',
+      method: 'ALL',
+      mechanism: 'dnr',
+      action: 'block',
+      active: true,
+      ownerModuleId: 'script-a',
+    };
+    const store = fakeStore([block]);
+
+    const result = await performMockList('script-a', store);
+
+    expect(result).toEqual([{ id: 'r1', endpointPattern: 'https://api.example.com/*', method: 'ALL', action: 'block' }]);
   });
 
   it('returns an empty list, not an error, when the script has no rules', async () => {

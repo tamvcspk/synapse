@@ -13,9 +13,14 @@ import {
   ungrantedScopes,
 } from './scopes';
 
-describe('scope catalog invariants (docs/ROADMAP.md §11.3)', () => {
-  it('caps the catalog at ~10 scopes — past that users click Allow on everything', () => {
-    expect(ALL_SCOPES.length).toBeLessThanOrEqual(10);
+describe('scope catalog invariants (docs/ROADMAP.md §11.3, Track B2e)', () => {
+  it('gives every scope either requiresMatch or an unboundedReason explaining why not (Track B2e)', () => {
+    for (const scope of ALL_SCOPES) {
+      const def = SCOPE_CATALOG[scope];
+      if (def.requiresMatch) continue;
+      expect(def.unboundedReason, `scope "${scope}" has neither requiresMatch nor unboundedReason`).toBeTruthy();
+      expect(def.unboundedReason!.length).toBeGreaterThan(0);
+    }
   });
 
   it('gives every scope a consent line and a description (constraint E — the doc generator’s source)', () => {
@@ -242,6 +247,19 @@ describe('ai.ask — reuses net.request\'s scope rather than adding an 11th (doc
     const url = resourceUrlForCall('ai', 'ask', [{ provider: 'openai' }]);
     expect(grantsAllow([grant], 'net.request', url)).toBe(true);
     expect(grantsAllow([grant], 'net.request', 'http://localhost:11434/api/chat')).toBe(false);
+  });
+});
+
+describe('net.mock.debugger — docs/ROADMAP.md Track B2b, the extra grant for the one debugger-only combo', () => {
+  it('is enforced, requiresMatch, and its consent line names the "being debugged" banner explicitly', () => {
+    expect(SCOPE_CATALOG['net.mock.debugger'].enforcement).toBe('enforced');
+    expect(SCOPE_CATALOG['net.mock.debugger'].requiresMatch).toBe(true);
+    expect(SCOPE_CATALOG['net.mock.debugger'].consentLine.toLowerCase()).toContain('debug');
+  });
+
+  it('is a real, addressable scope name', () => {
+    expect(isSynapseScope('net.mock.debugger')).toBe(true);
+    expect(ALL_SCOPES).toContain('net.mock.debugger');
   });
 });
 

@@ -389,7 +389,7 @@ export interface FakeResponseInit {
  * whatever else was configured correctly). Shared by `responseHeaders` and `rewriteHeaders` — same
  * free-text-that-happens-to-be-JSON convention `fakeResponse` already uses, rather than inventing
  * a dedicated "key-value list" UIFieldDef type for just these fields. */
-function parseHeadersJson(text: string | undefined): Record<string, string> | undefined {
+export function parseHeadersJson(text: string | undefined): Record<string, string> | undefined {
   if (!text) return undefined;
   try {
     const parsed: unknown = JSON.parse(text);
@@ -451,6 +451,37 @@ export function buildRewriteOverrides(config: MockConfig): RewriteOverrides {
         ? { body: config.rewriteBody }
         : {}),
   };
+}
+
+/**
+ * Chooses the cheapest mechanism that can honour a script-declared `net.mock` intent
+ * (docs/ROADMAP.md Track B2a/B2b) — the script only declares `action` (+ these two hints), it never
+ * names a mechanism itself (`net-mock-host.ts`'s `performMockAdd` calls this instead of accepting one).
+ * `rpc-handler.ts` calls this SAME function, on the SAME args, before dispatch — so it can require
+ * the extra `net.mock.debugger` grant exactly when (and only when) this resolves to `'debugger'`,
+ * without duplicating the decision logic at the one place allowed to enforce it (§3.4).
+ *
+ * - `'block'`: always `'dnr'` — it already catches every resource type (utils/dnr-network-rules.ts's
+ *   `ALL_RESOURCE_TYPES` default exists FOR this parity with `'debugger'`), at no banner cost.
+ * - `'rewrite-request'`: `'main-world'` is enough whenever a body is being rewritten (only mechanism
+ *   besides `'debugger'` that can touch a request body at all) OR neither hint applies. `'dnr'` covers
+ *   a rewrite that must reach every resource type but touches no body (redirect + header-modify, no
+ *   body access needed). `'debugger'` is reached ONLY for the one combination neither of those two can
+ *   cover: rewriting a body on a request `main-world`'s fetch/XHR patch would never see in the first
+ *   place (an `<img>`/`<script>` tag, for example) — the sole reason `net.mock.debugger` exists.
+ * - `'fake-response'`: unchanged from v1, always `'main-world'`.
+ */
+export function chooseMechanismForScriptRule(
+  action: Action,
+  hints: { rewriteBody?: unknown; matchAnyResourceType?: boolean },
+): Mechanism {
+  if (action === 'block') return 'dnr';
+  if (action === 'rewrite-request') {
+    const hasBody = typeof hints.rewriteBody === 'string' && hints.rewriteBody.length > 0;
+    if (hasBody) return hints.matchAnyResourceType ? 'debugger' : 'main-world';
+    return hints.matchAnyResourceType ? 'dnr' : 'main-world';
+  }
+  return 'main-world';
 }
 
 /** True when at least one config in the list would actually intercept something under `mechanism`. */

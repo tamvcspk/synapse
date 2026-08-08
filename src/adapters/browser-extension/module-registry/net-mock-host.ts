@@ -1,4 +1,4 @@
-import { DEFAULT_MECHANISM, validateMockConfig, type MockConfig } from '../../../shared/http-mock';
+import { chooseMechanismForScriptRule, parseHeadersJson, validateMockConfig, type MockConfig } from '../../../shared/http-mock';
 import type { SynapseMockRule, SynapseMockRuleOptions } from '../../../kernel/synapse-api';
 import { chromeStorageCache } from '../background/services/cache';
 import { syncRegistration } from '../features/http-mock/http-error-mocker.background';
@@ -12,11 +12,13 @@ import { getMockConfigs, setMockConfigs } from '../features/http-mock/mock-confi
  * ACTIVE config in that one collection regardless of who wrote it, so a script's rule is real the
  * moment it's saved, no new delivery mechanism needed.
  *
- * Deliberately narrow for v1, matching `SynapseNetMockApi`'s own doc comment:
- * - Only `action: 'fake-response'`, `mechanism: 'main-world'` — the platform picks the mechanism,
- *   never the script (docs/api-inventory.md §3.2's "mechanism do platform chọn, không do script
- *   khai"); `main-world` is the cheapest (no `debugger` banner, no DNR rule budget) and the only
- *   one every `fake-response` config already supports unconditionally.
+ * `action` is a script-declared intent (docs/ROADMAP.md Track B2a/B2b); `mechanism` is always
+ * resolved here via `chooseMechanismForScriptRule`, never taken from `options` — the platform picks
+ * the mechanism, the script never does (docs/api-inventory.md §3.2's "mechanism do platform chọn,
+ * không do script khai"). `rpc-handler.ts` runs that exact same resolution, on the exact same
+ * options, BEFORE this function is ever called, to decide whether the extra `net.mock.debugger`
+ * grant is required — this function trusts that check already happened and never re-verifies it.
+ *
  * - `ownerModuleId` (shared/http-mock.ts) is what isolates one script's rules from another's AND
  *   from the user's own hand-authored ones — `.remove()`/`.list()` filter by it, never by `id`
  *   alone. The resource-dimension (`match`) check that gates WHICH origins a script may add a rule
@@ -58,10 +60,20 @@ function toSynapseMockRule(config: MockConfig): SynapseMockRule {
     id: config.id,
     endpointPattern: config.endpointPattern,
     method: config.method,
-    fakeStatus: config.fakeStatus ?? 200,
+    action: config.action,
   };
-  if (config.fakeResponse !== undefined) rule.fakeResponse = config.fakeResponse;
-  if (config.delayMs !== undefined) rule.delayMs = config.delayMs;
+  if (config.action === 'fake-response') {
+    rule.fakeStatus = config.fakeStatus ?? 200;
+    if (config.fakeResponse !== undefined) rule.fakeResponse = config.fakeResponse;
+    if (config.delayMs !== undefined) rule.delayMs = config.delayMs;
+  }
+  if (config.action === 'rewrite-request') {
+    if (config.rewriteUrl !== undefined) rule.rewriteUrl = config.rewriteUrl;
+    if (config.rewriteMethod !== undefined) rule.rewriteMethod = config.rewriteMethod;
+    const headers = parseHeadersJson(config.rewriteHeaders);
+    if (headers !== undefined) rule.rewriteHeaders = headers;
+    if (config.rewriteBody !== undefined) rule.rewriteBody = config.rewriteBody;
+  }
   return rule;
 }
 
@@ -74,22 +86,35 @@ export async function performMockAdd(
     throw new Error('mock.add: "endpointPattern" is required');
   }
 
-  // mechanism/action are fixed, never taken from options — see this file's own header comment on
-  // why the platform picks them. Built as Record<string,unknown> rather than a literal so an absent
-  // fakeResponse/delayMs is OMITTED, not set to `undefined` (this project's exactOptionalPropertyTypes
-  // convention, same as net-request-host.ts's requestInit).
+  // mechanism is never taken from options — see this file's own header comment on why the platform
+  // picks it. Built as Record<string,unknown> rather than a literal so an absent field is OMITTED,
+  // not set to `undefined` (this project's exactOptionalPropertyTypes convention, same as
+  // net-request-host.ts's requestInit).
+  const action = options.action ?? 'fake-response';
+  const mechanism = chooseMechanismForScriptRule(action, {
+    ...(options.rewriteBody !== undefined ? { rewriteBody: options.rewriteBody } : {}),
+    ...(options.matchAnyResourceType !== undefined ? { matchAnyResourceType: options.matchAnyResourceType } : {}),
+  });
   const candidate: Record<string, unknown> = {
     id: crypto.randomUUID(),
     endpointPattern: options.endpointPattern,
     method: options.method ?? 'ALL',
-    mechanism: DEFAULT_MECHANISM,
-    action: 'fake-response',
-    fakeStatus: options.fakeStatus ?? 200,
+    mechanism,
+    action,
     active: true,
     ownerModuleId: moduleId,
   };
-  if (options.fakeResponse !== undefined) candidate.fakeResponse = options.fakeResponse;
-  if (options.delayMs !== undefined) candidate.delayMs = options.delayMs;
+  if (action === 'fake-response') {
+    candidate.fakeStatus = options.fakeStatus ?? 200;
+    if (options.fakeResponse !== undefined) candidate.fakeResponse = options.fakeResponse;
+    if (options.delayMs !== undefined) candidate.delayMs = options.delayMs;
+  }
+  if (action === 'rewrite-request') {
+    if (options.rewriteUrl !== undefined) candidate.rewriteUrl = options.rewriteUrl;
+    if (options.rewriteMethod !== undefined) candidate.rewriteMethod = options.rewriteMethod;
+    if (options.rewriteHeaders !== undefined) candidate.rewriteHeaders = JSON.stringify(options.rewriteHeaders);
+    if (options.rewriteBody !== undefined) candidate.rewriteBody = options.rewriteBody;
+  }
 
   // Reuses the SAME validator the Management View's form submits through — fakeStatus range,
   // method enum, etc. all get checked here for free, never re-implemented.
