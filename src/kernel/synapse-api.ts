@@ -49,16 +49,35 @@ export interface SynapseScopeGrant {
   match?: string[];
 }
 
-/** Per-script key/value storage. Keys are namespaced to the calling script by the platform and
- * there is no way for a key to escape that namespace — see `scopes.ts` for why that is the
- * precondition of the whole permission model rather than a nicety. Scope: `storage.rw`. */
-export interface SynapseStorageApi {
+/** Plain key/value operations, shared shape across all three storage lifetimes below — they differ
+ * only in when the platform evicts the keys, never in the read/write surface. */
+export interface SynapseKeyValueApi {
   /** Resolves to `undefined` when this script has never written `key`. */
   get(key: string): Promise<unknown>;
   set(key: string, value: unknown): Promise<void>;
   remove(key: string): Promise<void>;
   /** Every key this script has written, without the internal namespace prefix. */
   keys(): Promise<string[]>;
+}
+
+/** Per-script key/value storage. Keys are namespaced to the calling script by the platform and
+ * there is no way for a key to escape that namespace — see `scopes.ts` for why that is the
+ * precondition of the whole permission model rather than a nicety. Scope: `storage.rw` for all
+ * three sub-namespaces below (docs/ROADMAP.md Track A2) — they differ in *lifetime*, not in
+ * *permission*, so no new scope was minted for `session`/`tab`.
+ *
+ * The root object itself (`get`/`set`/`remove`/`keys`) is the **permanent** lifetime — never
+ * evicted by the platform, until the script itself calls `remove()` or is deleted. Kept flat
+ * (not nested under e.g. `.local`) for backward compatibility: this is the original v1 shape. */
+export interface SynapseStorageApi extends SynapseKeyValueApi {
+  /** Dies when the calling tab CLOSES — survives navigation/reload within that tab. Only usable
+   * from code attached to a real tab (a dom Module or an uploaded script); a background Module has
+   * no tab of its own and gets a stub whose every method rejects, same posture as `page`/`ui`. */
+  tab: SynapseKeyValueApi;
+  /** Dies on the calling tab's next navigation commit, **including a reload of the same URL** —
+   * the same "navigation" lifetime the platform's own detected-media list uses internally
+   * (docs/ROADMAP.md Track A1). Same tab-only restriction and stub behavior as `tab` above. */
+  session: SynapseKeyValueApi;
 }
 
 /**

@@ -62,7 +62,14 @@ function unavailableSynapseApi(moduleId: string): SynapseApi {
     throw new Error(message);
   };
   return {
-    storage: { get: fail, set: fail, remove: fail, keys: fail },
+    storage: {
+      get: fail,
+      set: fail,
+      remove: fail,
+      keys: fail,
+      tab: { get: fail, set: fail, remove: fail, keys: fail },
+      session: { get: fail, set: fail, remove: fail, keys: fail },
+    },
     ui: { toast: failSync, icon: failSync, badge: failSync, dismiss: failSync, clear: failSync },
     net: { request: fail, mock: { add: fail, remove: fail, list: fail } },
     files: { save: fail },

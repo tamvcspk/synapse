@@ -19,6 +19,7 @@ import { resolveHookWinnerForSlot } from '../module-registry/pipeline-hook-store
 import { getManifestReports, getScriptMetaMap } from '../module-registry/storage';
 import { resolveScriptLabel } from '../../../shared/resolve-script-label';
 import { PIPELINE_HOOK_WINNER_QUERY_MESSAGE_TYPE } from '../../../shared/pipeline-hook-bridge';
+import { installStorageGcAlarm } from './storage-gc';
 // import a concrete ai factory once a Module actually declares it — see kernel-bootstrap skill
 
 const injector = new ServiceInjector({
@@ -270,6 +271,12 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
     .catch(() => {});
 });
 chrome.tabs.onRemoved.addListener((tabId) => disabledSidePanelTabs.delete(tabId));
+
+// docs/ROADMAP.md Track A3 — installs the periodic TTL/GC sweep (orphaned download-job checkpoints,
+// stale review blobs). Called unconditionally at startup, same "idempotent, re-install every worker
+// wake" posture as every other listener in this file — chrome.alarms.create replaces rather than
+// duplicates an alarm of the same name.
+installStorageGcAlarm();
 
 // The `workflowId` message dispatch that used to live here is DELETED, not implemented
 // (docs/ROADMAP.md §11.1). It had been scaffolding since day one — `kernel.run([], ...)` with a

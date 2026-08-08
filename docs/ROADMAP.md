@@ -26,7 +26,7 @@ Một playground cung cấp builtin như một lớp đặc quyền vĩnh viễn
 
 | Track | Nội dung | Trạng thái |
 |---|---|---|
-| **A** | State Lifetime — permanent / tab / navigation | 📋 Sẵn sàng, không phụ thuộc gì |
+| **A** | State Lifetime — permanent / tab / navigation | ✅ A1/A2/A3 đã ship + xác nhận đủ (xem CHANGELOG) — còn lại: UI TTL của A3 (chặn bởi D5) |
 | **B** | Nghỉ hưu builtin (đường găng) — dev-only gate → uiSchema thống nhất → API parity → xoá | 📋 Chương trình chính |
 | **C** | Pipeline flow control — state machine tuyến tính | 📋 Sẵn sàng |
 | **D** | Power-user control surface (§13) | 📋 Sẵn sàng, độc lập |
@@ -43,39 +43,11 @@ Nợ tồn đọng cần nhớ: [TEST_PLAN.md](TEST_PLAN.md) có ~20 mục đã 
 
 # Track A — State Lifetime
 
-**Vấn đề đang thấy được hằng ngày:** reload một trang, danh sách media của Media Sniffer **không xoá mà cứ dồn thêm**, trong khi link cũ đã hết hạn (signed URL). Side Panel thì reset state mỗi lần chuyển tab.
+A1 (media list navigation-scoped), A2 (`synapseApi.storage.session`/`.tab`), A3 (TTL/GC backend) **đã ship và xác nhận đủ bằng Chrome thật** — xem [CHANGELOG.md §13](CHANGELOG.md#13-track-a1--media-list-navigation-scoped)/[§14](CHANGELOG.md#14-track-a2--synapseapistoragesessiontab)/[§15](CHANGELOG.md#15-track-a3--ttl--gc-cho-state-permanent). "Side Panel state theo tab" (nghi vấn của A1) cũng đã xác nhận **hoạt động đúng sẵn, không cần vá gì** — xem CHANGELOG §13. Một việc còn mở:
 
-Gốc chung: **state hiện không có khái niệm vòng đời.** Mọi thứ đổ vào `chrome.storage.local` (vĩnh viễn) rồi lọc lại lúc đọc.
+### UI chỉnh TTL cho A3
 
-### A1. Ba lifetime, thành khái niệm hạng nhất của Kernel
-
-| Lifetime | Chết khi | Ví dụ thật |
-|---|---|---|
-| **permanent** | không bao giờ (tới khi user xoá) | download job/checkpoint, grant, secret, mock rule |
-| **tab** | tab đóng | Side Panel đang xem tab nào, turbo toggle |
-| **navigation** | mỗi lần commit navigation, **kể cả reload cùng URL** | danh sách media đã phát hiện |
-
-- Media list chuyển sang **navigation** — đây là bản vá thật cho bug "dồn link cũ". Khoá theo `tabId` + navigation commit, không phải theo `tabUrl` (reload cùng URL không đổi `tabUrl`, đó chính là lý do bug tồn tại).
-- Side Panel state chuyển sang **tab** — vá `[§6.4]`.
-- **Xong khi**: reload trang → list media chỉ còn link của lượt load hiện tại; chuyển tab đi rồi quay lại → Side Panel giữ đúng state của tab đó; download job vẫn sống qua cả hai.
-- **Phụ thuộc**: không.
-
-### A2. `synapseApi.storage` phản ánh đúng 3 lifetime
-
-Platform có 3 lifetime mà script chỉ có 1 thì script lại thành công dân hạng hai — đúng thứ Track B tồn tại để xoá.
-
-- Thêm `storage.session` / `storage.tab` cạnh `storage.local` hiện có, **cùng namespace `script:<moduleId>:` và cùng scope `storage.rw`** — đây là chiều *vòng đời*, không phải chiều *quyền*, nên không sinh scope mới.
-- **Xong khi**: một script lưu state theo tab, chuyển tab rồi quay lại vẫn đọc đúng; state `session` biến mất sau navigation mà không cần script tự dọn.
-- **Phụ thuộc**: A1.
-
-### A3. TTL / GC cho state permanent
-
-Gộp vào đây vì cùng là bài toán vòng đời — trước đây là Open Point riêng.
-
-- Sweep định kỳ qua `chrome.alarms` (service worker không sống đủ lâu để `setTimeout` dài hạn). TTL mặc định đề xuất **7 ngày**.
-- Áp cho: Review session (IndexedDB blob), và `DownloadJobCheckpoint` **mồ côi** — checkpoint mà `DetectedMedia` gốc đã bị evict hiện không còn bề mặt UI nào để resume HAY dọn, nên sống mãi.
-- **Ship được phần backend trước với TTL hardcode.** Phần UI chỉnh TTL bị chặn bởi "chưa có trang Settings toàn cục" — xem D5.
-- **Phụ thuộc**: không (nhưng làm sau A1 thì gọn hơn).
+TTL 7 ngày hiện hardcode ở backend (đã ship). UI cho user tự chỉnh **bị chặn** bởi "chưa có trang Settings toàn cục" — xem D5. Không phải việc phải làm ngay, chỉ là chưa có nơi đặt.
 
 ---
 
@@ -242,6 +214,11 @@ Chỉ còn những thứ **thật sự chưa quyết được** hoặc **không 
 - **[§7.3-open] Anchor badge MSE/HLS vẫn không ổn định sau 3 vòng vá dựa trên đọc code** ([CHANGELOG.md](CHANGELOG.md#73a-hls-bug-thật--3-vòng-vá-vấn-đề-vẫn-còn)). Detection + download vẫn đúng (đi qua webRequest, độc lập); chỉ badge neo vào `<video>` là sai. **Việc tiếp theo BẮT BUỘC là instrument + debug một lượt trên trang thật**, không phải bản vá thứ 4. Escape hatch cho user đã có: `pipeline.hook('media.correlate-url', …)`.
 - **[Badge anchoring] Badge vẽ lệch vị trí trên bilibili.tv, đúng vị trí trên trang khác.** Khác nguyên nhân với 3 bug trên (đó là sai *tín hiệu tương quan*; đây là tìm đúng URL rồi nhưng *neo toạ độ* sai). Nghi CSS trang (`transform`/`zoom` trên `<html>`/`<body>`) phá giả định `position:fixed` của `ui-compositor.ts`. **Có thể tái hiện được bằng Playwright + CDP trên một trang tự dựng có CSS đó** — đây là ứng viên đóng được mà không cần user.
 - **[§10.2] Ad-filter cho stream trực tiếp** — cần ca thật để hoàn thiện logic bắt link trước. Đã biết: 3 nguồn phát hiện bất đồng về `initiator` (không phải bug).
+- **[B2d follow-up] Side Panel không liệt kê ổn định media khi nhiều frame cùng báo gần như đồng thời — đã khoanh vùng, chưa tìm root cause.** Đo trên `iframe-sandbox-test-page.cjs` (5 frame A–E, mỗi frame giờ có `<video>` riêng — xem LESSONS.md): số video hiện lên trong Side Panel đổi giữa các lần load trang (khi 3, khi 1 — không ổn định ở 5). **Đã loại được 2 tầng**: anchor/badge trên trang hiện ĐỦ cho mọi frame (per-frame detection + in-page UI đúng), injection/detection tự nó cũng đã xác nhận đúng (B2d chính nó đã đóng, xem LESSONS.md). Nghĩa là mất mát nằm cụ thể ở đường report → relay → Side Panel list, không phải ở tầng detect hay badge. Nghi race/overwrite khi nhiều report tới gần như đồng thời (vd state keyed sai theo tabId thay vì theo frame, hoặc dedupe nhầm) — **CHƯA rõ mất ở đâu, không đoán trước khi instrument thật.**
+- **[Media Sniffer] `.m4s` vẫn lọt vào danh sách dù `media-url-matcher.ts` khai đã loại trừ.** Quan sát trên trang thật (2026-08-08): segment DASH `.m4s` xuất hiện trong list, trong khi `classifyMediaUrl`/comment của file đều nói `.m4s` bị loại cùng `.ts`. Chưa rõ lọt qua đường nào (URL-extension check, hay content-type/magic-bytes rescue path nào đó classify nhầm) — cần instrument thật trước khi vá, không đoán.
+- **[Media Sniffer] Live stream không bắt được dạng segment tên `_part1.mp4` (LL-HLS partial segment).** `isSegmentOfKnownStream`'s heuristic (stem-prefix cùng thư mục với playlist) không nhận diện được tên dạng này — **chưa rõ playlist nằm ở đâu trong case cụ thể này**, cần tìm hiểu thêm trước khi sửa heuristic.
+- **[Media Sniffer] `resolution` biến mất khỏi một số playlist — nghi regression.** Trước đây `variant.resolution`/`entry.resolution` hiện đúng cho `playlist.m3u8`, giờ một số playlist không còn hiện dù list vẫn hoạt động bình thường; một số playlist khác vẫn hiện đúng. Chưa xác định do đổi gì gần đây hay do khác biệt giữa các playlist thật (thiếu tag `#EXT-X-STREAM-INF`'s `RESOLUTION` ở nguồn) — cần so sánh 1 playlist còn hiện đúng với 1 playlist không hiện.
+- **[Media Sniffer] Tên file tải về là "playlist.m3u8" khi không detect được tên có ý nghĩa — đề xuất fallback lấy title trang.** `output-naming.ts`'s `fileNameFromUrl` chỉ lấy path segment cuối của URL; khi URL là `.../playlist.m3u8` không mang tên gì hữu ích, file tải về tên vô nghĩa. Đề xuất: fallback sang tiêu đề video/trang (`document.title` hay tương đương) khi tên rút từ URL không đủ thông tin — giống cách trình duyệt Coc Coc đặt tên file tải video. Chưa thiết kế: lấy title ở đâu (content-script có DOM, nhưng job chạy trong Offscreen Document không có) và cách truyền title đó sang job lúc bắt đầu tải.
 
 ### Nợ kỹ thuật đã chấp nhận — không định sửa
 
@@ -252,6 +229,7 @@ Chỉ còn những thứ **thật sự chưa quyết được** hoặc **không 
 - **[§8] Offscreen Document idle timeout** — đã chốt hướng (tự đóng sau ~60s không còn job), chưa implement. **Điều kiện bắt buộc**: không job nào ngoài `done`/`error`/`cancelled` — đóng giữa `paused` mất `JobControl` trong RAM (turbo và live không có checkpoint, mất trắng).
 - **[Kiến trúc UI] Pub/Sub State Manager tập trung — vẫn KHÔNG phải quyết định làm.** Mỗi view tự fetch, không có store broadcast khi state đổi nơi khác. **Chưa có case đau cụ thể** — cần bằng chứng desync nhìn thấy được trong sử dụng thật trước khi cân nhắc. Lưu ý Track A có thể làm nhu cầu này rõ hơn hoặc biến mất.
 - **[§11.4] Thứ tự icon theo `ownerId` (uuid) — ổn định nhưng vô nghĩa với user.** Muốn sắp theo tên thì label phải nướng vào shim lúc register (USER_SCRIPT world không có `chrome.storage`), **nghĩa là đổi tên script sẽ không đổi thứ tự cho tới lần register kế** — trừ khi rename kéo theo re-register. Đó là một quyết định, không phải một dòng code.
+- **[Track A2] Không dom Module bundled nào gọi được method có scope.** Lộ ra khi verify A2's dom-Module RPC transport (`content-scripts/rpc-client.ts`): `background/index.ts`'s `trustedScopes` chỉ build từ `BACKGROUND_MODULES`, cố ý bỏ qua `BUNDLED_MODULES` — import nó thật để lấy `scopes` sẽ kéo `@mozilla/readability`+Turndown (qua `reader-mode-converter`) vào bundle service worker cho một map hiện đang **luôn rỗng** (chưa dom Module nào khai `scopes`). Test tạm bằng cách wire tay 1 dòng `trustedScopes['reader-mode-converter'] = [...]`, đã revert ngay sau khi xác nhận `storage.tab`/`storage.session` hoạt động đúng qua transport này — không phải fix chính thức. **Không riêng Track A2**: chặn NGANG mọi scope khác (`net.request`, `files.save`, `media.*`...) nếu một dom Module bundled tương lai cần khai bất kỳ scope nào. Cần thiết kế cách lấy `id`+`scopes` mà không kéo theo runtime code nặng (vd manifest tách riêng, hoặc content-script tự báo cáo) — xử lý khi Track B có dom Module thật cần scope, không phải bây giờ.
 
 ### Rủi ro mở
 

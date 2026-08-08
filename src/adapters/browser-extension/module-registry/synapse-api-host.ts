@@ -132,7 +132,7 @@ function pipelineApiFor(moduleId: string): PipelineApiInternal {
 
 export function createSynapseApi(moduleId: string, context: SynapseApiContext = {}): SynapseApi {
   return {
-    storage: createScriptStorage(moduleId),
+    storage: createScriptStorage(moduleId, context.tabId),
     ui: backgroundUiStub(),
     net: {
       request: performNetRequest,

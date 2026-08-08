@@ -38,3 +38,26 @@ export async function removeDownloadJobCheckpoint(jobId: string): Promise<void> 
   const existing = await listDownloadJobCheckpoints();
   await chrome.storage.local.set({ [STORAGE_KEY]: existing.filter((c) => c.jobId !== jobId) });
 }
+
+/** docs/ROADMAP.md Track A3 — pure set-difference: a checkpoint's `jobId` IS the id of the
+ * `DetectedMedia` entry it resumes (`ui/side-panel/main.ts`'s `checkpoints.find((c) => c.jobId ===
+ * item.id)`), so a checkpoint whose id isn't in `detectedMediaIds` has no `DetectedMedia` left to
+ * resume OR to be cleaned up alongside — evicted (e.g. by `MAX_DETECTED_ITEMS`, or Track A1's
+ * navigation eviction) with the checkpoint left behind, no UI surface pointing at it anymore.
+ * Extracted as a pure function so the actual decision is testable without `chrome.storage`
+ * (`sweepOrphanedCheckpoints` below is the untested chrome.storage-touching orchestration). */
+export function orphanedCheckpointIds(checkpoints: DownloadJobCheckpoint[], detectedMediaIds: ReadonlySet<string>): string[] {
+  return checkpoints.filter((c) => !detectedMediaIds.has(c.jobId)).map((c) => c.jobId);
+}
+
+/** docs/ROADMAP.md Track A3 — called periodically from `background/storage-gc.ts`'s
+ * `chrome.alarms` sweep. Takes `detectedMediaIds` as a Set the caller already has in hand (it needs
+ * the full `DetectedMedia[]` for its OWN sweep pass too), rather than importing `listDetectedMedia`
+ * here and re-fetching — keeps this file's existing "no cross-feature import" shape unchanged. */
+export async function sweepOrphanedCheckpoints(detectedMediaIds: ReadonlySet<string>): Promise<string[]> {
+  const checkpoints = await listDownloadJobCheckpoints();
+  const orphaned = orphanedCheckpointIds(checkpoints, detectedMediaIds);
+  if (orphaned.length === 0) return orphaned;
+  await chrome.storage.local.set({ [STORAGE_KEY]: checkpoints.filter((c) => !orphaned.includes(c.jobId)) });
+  return orphaned;
+}

@@ -371,6 +371,18 @@ const synapseApi = {
     set: function (key, value) { return __synapseCall('storage', 'set', [key, value]); },
     remove: function (key) { return __synapseCall('storage', 'remove', [key]); },
     keys: function () { return __synapseCall('storage', 'keys', []); },
+    tab: {
+      get: function (key) { return __synapseCall('storage', 'tab.get', [key]); },
+      set: function (key, value) { return __synapseCall('storage', 'tab.set', [key, value]); },
+      remove: function (key) { return __synapseCall('storage', 'tab.remove', [key]); },
+      keys: function () { return __synapseCall('storage', 'tab.keys', []); },
+    },
+    session: {
+      get: function (key) { return __synapseCall('storage', 'session.get', [key]); },
+      set: function (key, value) { return __synapseCall('storage', 'session.set', [key, value]); },
+      remove: function (key) { return __synapseCall('storage', 'session.remove', [key]); },
+      keys: function () { return __synapseCall('storage', 'session.keys', []); },
+    },
   },
   ui: __synapseUi,
   net: {
@@ -434,6 +446,18 @@ if (!globalThis.synapseApi) {
       set: __synapseWrongHandle,
       remove: __synapseWrongHandle,
       keys: __synapseWrongHandle,
+      tab: {
+        get: __synapseWrongHandle,
+        set: __synapseWrongHandle,
+        remove: __synapseWrongHandle,
+        keys: __synapseWrongHandle,
+      },
+      session: {
+        get: __synapseWrongHandle,
+        set: __synapseWrongHandle,
+        remove: __synapseWrongHandle,
+        keys: __synapseWrongHandle,
+      },
     },
     ui: {
       toast: __synapseWrongHandleSync,

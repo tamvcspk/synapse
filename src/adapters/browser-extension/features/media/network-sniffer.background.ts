@@ -389,7 +389,7 @@ async function inspectStreamEntry(entry: DetectedMedia, cache: CacheService = ch
  * entries being invisible to the Side Panel's per-tab scoping (docs/ROADMAP.md §6.3/§6.4): `pageUrl`
  * alone is the reporting FRAME's own origin, not the tab's top-level one, and the two disagree
  * exactly for a nested/cross-origin iframe — the case §10.4 was opened for. */
-async function persistDetectedMedia(url: string, pageUrl: string | undefined, tabUrl: string | undefined, cache: CacheService): Promise<void> {
+async function persistDetectedMedia(url: string, pageUrl: string | undefined, tabUrl: string | undefined, tabId: number | undefined, cache: CacheService): Promise<void> {
   if (isJunkRequest(url, pageUrl)) return;
   const kind = classifyMediaUrl(url);
   if (!kind) return;
@@ -400,6 +400,7 @@ async function persistDetectedMedia(url: string, pageUrl: string | undefined, ta
     detectedAt: new Date().toISOString(),
     ...(pageUrl ? { pageUrl } : {}),
     ...(tabUrl !== undefined ? { tabUrl } : {}),
+    ...(tabId !== undefined ? { tabId } : {}),
     ...(looksLikeSignedUrl(url) ? { expiring: true } : {}),
   };
   if (await addDetectedMedia(media, cache) && kind === 'stream') {
@@ -428,7 +429,7 @@ chrome.runtime.onMessage.addListener((message: { event?: string; payload?: Repor
     // "never trust the shim to self-limit" posture rpc-handler.ts already documents.
     if (!(await isModuleActive('network-sniffer', false))) return;
     for (const item of items) {
-      await persistDetectedMedia(item.url, item.pageUrl, sender.tab?.url, chromeStorageCache);
+      await persistDetectedMedia(item.url, item.pageUrl, sender.tab?.url, sender.tab?.id, chromeStorageCache);
     }
   })();
 });
@@ -445,7 +446,7 @@ chrome.runtime.onMessage.addListener((message: { event?: string; payload?: Repor
   const { url, pageUrl } = message.payload;
   void (async () => {
     if (!(await isModuleActive('network-sniffer', false))) return;
-    await persistDetectedMedia(url, pageUrl, sender.tab?.url, chromeStorageCache);
+    await persistDetectedMedia(url, pageUrl, sender.tab?.url, sender.tab?.id, chromeStorageCache);
   })();
 });
 
@@ -653,6 +654,10 @@ function handleObservedRequest(req: ObservedRequest): void {
       detectedAt: new Date().toISOString(),
       ...(req.initiator ? { pageUrl: req.initiator } : {}),
       ...(tabUrl !== undefined ? { tabUrl } : {}),
+      // `-1` is chrome.webRequest's own "no tab" sentinel (a page's own Service-Worker-proxied
+      // fetch — see EXTENSION_ORIGIN's doc comment above) — not a real tab, so left off rather than
+      // stored as a value clearDetectedMediaForTab could never match.
+      ...(req.tabId >= 0 ? { tabId: req.tabId } : {}),
       ...(thirdParty !== undefined ? { thirdParty } : {}),
       ...(looksLikeSignedUrl(req.url) ? { expiring: true } : {}),
       // docs/ROADMAP.md #7.1 — only the webRequest source ever has the original request's own headers

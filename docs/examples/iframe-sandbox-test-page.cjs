@@ -28,6 +28,11 @@
  * extension injection path itself. What is unverified is whether Chrome CHOOSES to match a
  * content script into an opaque-origin sandboxed frame -- a policy question, not a capability one.
  * With network-sniffer active, frames B/D should still report their <video> elements.
+ *
+ * Each frame now serves a real `<video src>` pointing at a same-origin `/media/<label>.mp4` (a
+ * tiny non-playable stub, just enough to trigger both DOM detection and a webRequest hit) -- an
+ * earlier version of this harness had no <video> at all, so a "frame didn't report" result was
+ * not distinguishable from "there was nothing to detect."
  */
 const http = require('node:http');
 
@@ -37,11 +42,15 @@ const framePage = (label) => `<!doctype html>
 <html><head><title>frame-${label}-initial</title></head>
 <body>
   <h1 id="marker">frame ${label}</h1>
+  <video src="/media/${label}.mp4" controls></video>
   <script>
     window.__pageJsRan = true;
     document.title = 'frame-${label}-JS-RAN';
   </script>
 </body></html>`;
+
+// Minimal stub bytes -- enough for a webRequest hit and a real HTTP response; not a playable file.
+const FAKE_MP4_BYTES = Buffer.from('00000018667479706d703432000000006d703432', 'hex');
 
 const parentPage = `<!doctype html>
 <html><head><title>csp-sandbox-harness</title></head>
@@ -89,6 +98,12 @@ const server = http.createServer((req, res) => {
       'content-security-policy': 'sandbox allow-scripts',
     });
     return res.end(framePage('E'));
+  }
+
+  const mediaMatch = /^\/media\/([A-E])\.mp4$/.exec(url);
+  if (mediaMatch) {
+    res.writeHead(200, { 'content-type': 'video/mp4' });
+    return res.end(FAKE_MP4_BYTES);
   }
 
   res.writeHead(404).end('not found');

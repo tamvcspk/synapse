@@ -13,6 +13,8 @@
  * payload would need a new push-based relay through the background, not a blob-store change.
  */
 
+import { isExpired } from '../../../shared/ttl';
+
 const DB_NAME = 'synapse-blobs';
 const DB_VERSION = 1;
 const STORE_NAME = 'blobs';
@@ -21,6 +23,11 @@ export interface StoredBlob {
   mimeType: string;
   fileName: string;
   bytes: ArrayBuffer;
+  /** docs/ROADMAP.md Track A3 — stamped by `putBlob` itself (never caller-supplied), so every blob
+   * this store has ever written carries one for free. Only `sweepStaleReviewBlobs` below reads it —
+   * an http-mock fake-response-file blob is tied to a saved `MockConfig` rule's own lifecycle
+   * (deleted when the rule is deleted/replaced, see `deleteBlob`'s call sites), never TTL'd by age. */
+  createdAt: number;
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -36,12 +43,15 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-export async function putBlob(id: string, blob: StoredBlob): Promise<void> {
+/** `createdAt` is stamped here, never accepted from the caller — every existing call site
+ * (`item-form-view.ts`, `review-handoff.ts`) predates it and none should have to start passing a
+ * timestamp just to keep compiling. */
+export async function putBlob(id: string, blob: Omit<StoredBlob, 'createdAt'>): Promise<void> {
   const db = await openDb();
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
-      tx.objectStore(STORE_NAME).put(blob, id);
+      tx.objectStore(STORE_NAME).put({ ...blob, createdAt: Date.now() } satisfies StoredBlob, id);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error as Error);
     });
@@ -76,6 +86,54 @@ export async function deleteBlob(id: string): Promise<void> {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error as Error);
     });
+  } finally {
+    db.close();
+  }
+}
+
+const REVIEW_BLOB_ID_PREFIX = 'review:';
+
+/**
+ * docs/ROADMAP.md Track A3 — evicts `review:*` blobs (`review-handoff.ts`'s `storeReviewFiles`)
+ * older than `maxAgeMs`, called periodically from `background/storage-gc.ts`'s `chrome.alarms`
+ * sweep. Scoped to the `review:` prefix ONLY: this object store also holds http-mock's uploaded
+ * fake-response files (bare-uuid ids, see `item-form-view.ts`), which are tied to a saved
+ * `MockConfig` rule's own lifecycle and must never be swept by age — that's what `deleteBlob`'s
+ * explicit call sites are for.
+ *
+ * A review blob with no `chrome.storage.session` entry pointing at it anymore (cleared by Chrome on
+ * browser restart — see `publishReviewSession`) is exactly the orphan this exists for: nothing will
+ * ever call `getBlob`/`deleteBlob` for it again otherwise. A pre-existing blob with no `createdAt`
+ * (written before this field existed) is treated as already expired (`?? 0`) rather than kept
+ * forever with no way to ever become eligible.
+ */
+/** Returns how many blobs were actually deleted — the caller (`background/storage-gc.ts`) logs it,
+ * so "the sweep ran and found nothing eligible" is distinguishable from "the sweep never ran" when
+ * verifying this by hand (there is otherwise no other observable effect on a no-op sweep). */
+export async function sweepStaleReviewBlobs(maxAgeMs: number, now: number = Date.now()): Promise<number> {
+  const db = await openDb();
+  try {
+    let deleted = 0;
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const cursorReq = store.openCursor();
+      cursorReq.onsuccess = () => {
+        const cursor = cursorReq.result;
+        if (!cursor) return; // done — resolved by tx.oncomplete below
+        const id = cursor.primaryKey as string;
+        const blob = cursor.value as StoredBlob;
+        if (id.startsWith(REVIEW_BLOB_ID_PREFIX) && isExpired(blob.createdAt ?? 0, maxAgeMs, now)) {
+          cursor.delete();
+          deleted++;
+        }
+        cursor.continue();
+      };
+      cursorReq.onerror = () => reject(cursorReq.error as Error);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error as Error);
+    });
+    return deleted;
   } finally {
     db.close();
   }

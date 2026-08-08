@@ -152,6 +152,38 @@ script's data, and you cannot reach the extension's own records — every key yo
 inside your namespace, so `storage.get('synapse:grants')` reads *your* `'synapse:grants'` key
 (almost certainly `undefined`) and never the extension's.
 
+### Storage has three lifetimes, not just one
+
+`storage.get/set/remove/keys` (above) is **permanent** — it survives forever, until you `remove()`
+it yourself. Two more namespaces sit beside it, same scope (`storage.rw`, no extra permission),
+same four operations, different eviction:
+
+- **`storage.tab.*`** — dies when the tab your script is running in *closes*. Survives navigation
+  and reload within that tab.
+- **`storage.session.*`** — dies on the tab's *next navigation*, including a reload of the exact
+  same URL. Use this for "state for the page I'm currently looking at" that shouldn't silently pile
+  up across reloads — you never have to clean it up yourself.
+
+```javascript
+__synapseModule = {
+  id: 'view-counter',
+  scopes: ['storage.rw'],
+  async run(input, ctx) {
+    // Survives a reload of this exact page — resets only when you actually navigate away.
+    const viewsThisLoad = ((await ctx.api.storage.session.get('views')) ?? 0) + 1;
+    await ctx.api.storage.session.set('views', viewsThisLoad);
+
+    // Survives navigating around the same tab — resets only when the tab itself closes.
+    const tabsSeen = ((await ctx.api.storage.tab.get('visited')) ?? 0) + 1;
+    await ctx.api.storage.tab.set('visited', tabsSeen);
+  },
+};
+```
+
+Both are only usable from code attached to a real tab (a dom Module or an uploaded script) — a
+background Module has no tab of its own, and calling either throws a clear error explaining why,
+rather than silently doing nothing.
+
 ### Cross-origin requests under the extension's identity
 
 `page.fetch` (disclosed) is just `fetch`/`XMLHttpRequest` from the page — subject to the page's own

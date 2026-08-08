@@ -29,6 +29,14 @@ export interface DetectedMedia {
    * all. Still absent when the tab's url genuinely couldn't be read (chrome:// page, tab closed
    * between detection and lookup, or the message didn't originate from a tab). */
   tabUrl?: string;
+  /** docs/ROADMAP.md Track A1 — the numeric tab this request was observed on, used ONLY
+   * to evict this entry when that tab navigates (`clearDetectedMediaForTab` below), never for
+   * display (`tabUrl` is what the Side Panel/Dashboard show). Absent when the source couldn't
+   * attribute a real tab (`chrome.webRequest`'s `tabId: -1` for a page's own Service-Worker-proxied
+   * fetch, or a `chrome.runtime.MessageSender` with no `sender.tab`) — such an entry has no
+   * navigation to be scoped to and is deliberately left uncleared, same "best-effort, don't guess"
+   * posture as `tabUrl` itself. */
+  tabId?: number;
   /** docs/ROADMAP.md #7.4 — best-effort signal that this URL's query string carries a signed/expiry
    * key (S3-style presigned URL, CDN token-auth, etc.) — see shared/signed-url-detector.ts. A LABEL,
    * not a filter (same reasoning as `thirdParty` above): a legitimate video being served behind a
@@ -97,6 +105,21 @@ export async function addDetectedMedia(media: DetectedMedia, cache: CacheService
 export async function removeDetectedMedia(id: string, cache: CacheService = chromeStorageCache): Promise<void> {
   const existing = await listDetectedMedia(cache);
   await cache.set(DETECTED_MEDIA_STORAGE_KEY, existing.filter((m) => m.id !== id));
+}
+
+/**
+ * docs/ROADMAP.md Track A1 — the actual fix for "reload a page and the media list just keeps
+ * growing instead of resetting": called from `state-lifetime.background.ts`'s
+ * `chrome.webNavigation.onCommitted` listener on every top-level navigation commit for `tabId`,
+ * INCLUDING a reload of the exact same URL (the bug `chrome.tabs.onUpdated`'s `changeInfo.url`
+ * can't see, since a same-URL reload never changes it). Only entries carrying this tab's numeric
+ * `tabId` are removed — an entry with no `tabId` (unattributed request) has no navigation to be
+ * scoped to and is left alone, same as `tabId`'s own doc comment above.
+ */
+export async function clearDetectedMediaForTab(tabId: number, cache: CacheService = chromeStorageCache): Promise<void> {
+  const existing = await listDetectedMedia(cache);
+  const remaining = existing.filter((m) => m.tabId !== tabId);
+  if (remaining.length !== existing.length) await cache.set(DETECTED_MEDIA_STORAGE_KEY, remaining);
 }
 
 /**

@@ -72,7 +72,15 @@ export default defineManifest({
   // utils/offscreen-manager.ts) — gives the background service worker a DOM/Worker/WebAssembly
   // context outside any visible Tab, so ffmpeg.wasm and Cancel/Pause/Resume survive a user
   // accidentally closing whatever Tab they're looking at.
-  permissions: ['storage', 'userScripts', 'scripting', 'debugger', 'declarativeNetRequest', 'webRequest', 'downloads', 'sidePanel', 'offscreen'],
+  // 'webNavigation' backs network-sniffer's navigation-scoped detected-media list (docs/ROADMAP.md
+  // Track A1/A2, features/media/state-lifetime.background.ts) — chrome.tabs.onUpdated's
+  // changeInfo.url does NOT fire on a same-URL reload, so it can't detect "user reloaded this page"
+  // at all; chrome.webNavigation.onCommitted does, which is the whole point (evict stale entries
+  // from a page load whose signed URLs already expired).
+  // 'alarms' backs the periodic TTL/GC sweep (docs/ROADMAP.md Track A3, background/storage-gc.ts) —
+  // a service worker can be killed at any time, so a multi-day `setTimeout` cannot survive to fire;
+  // chrome.alarms persists across restarts.
+  permissions: ['storage', 'userScripts', 'scripting', 'debugger', 'declarativeNetRequest', 'webRequest', 'webNavigation', 'alarms', 'downloads', 'sidePanel', 'offscreen'],
   // chrome.scripting.registerContentScripts (used for the MAIN-world interceptor) needs its own
   // host permission grant — a static content_scripts.matches entry doesn't satisfy it, even though
   // both show the same install-time warning. Without this, registerContentScripts resolves with no

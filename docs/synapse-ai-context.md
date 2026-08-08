@@ -161,6 +161,38 @@ script's data, and you cannot reach the extension's own records — every key yo
 inside your namespace, so `storage.get('synapse:grants')` reads *your* `'synapse:grants'` key
 (almost certainly `undefined`) and never the extension's.
 
+### Storage has three lifetimes, not just one
+
+`storage.get/set/remove/keys` (above) is **permanent** — it survives forever, until you `remove()`
+it yourself. Two more namespaces sit beside it, same scope (`storage.rw`, no extra permission),
+same four operations, different eviction:
+
+- **`storage.tab.*`** — dies when the tab your script is running in *closes*. Survives navigation
+  and reload within that tab.
+- **`storage.session.*`** — dies on the tab's *next navigation*, including a reload of the exact
+  same URL. Use this for "state for the page I'm currently looking at" that shouldn't silently pile
+  up across reloads — you never have to clean it up yourself.
+
+```javascript
+__synapseModule = {
+  id: 'view-counter',
+  scopes: ['storage.rw'],
+  async run(input, ctx) {
+    // Survives a reload of this exact page — resets only when you actually navigate away.
+    const viewsThisLoad = ((await ctx.api.storage.session.get('views')) ?? 0) + 1;
+    await ctx.api.storage.session.set('views', viewsThisLoad);
+
+    // Survives navigating around the same tab — resets only when the tab itself closes.
+    const tabsSeen = ((await ctx.api.storage.tab.get('visited')) ?? 0) + 1;
+    await ctx.api.storage.tab.set('visited', tabsSeen);
+  },
+};
+```
+
+Both are only usable from code attached to a real tab (a dom Module or an uploaded script) — a
+background Module has no tab of its own, and calling either throws a clear error explaining why,
+rather than silently doing nothing.
+
 ### Cross-origin requests under the extension's identity
 
 `page.fetch` (disclosed) is just `fetch`/`XMLHttpRequest` from the page — subject to the page's own
@@ -704,6 +736,24 @@ method, with the same descriptions the in-extension consent screen shows.
  *   Delete one key.
  * - `synapseApi.storage.keys(): Promise<string[]>` — requires `storage.rw`.
  *   List every key this script has written, without the internal namespace prefix.
+ * - `synapseApi.storage.get(key: string): Promise<unknown>` — requires `storage.rw`.
+ *   Read one of this script's own tab-scoped keys. Resolves to `undefined` when unset.
+ * - `synapseApi.storage.set(key: string, value: unknown): Promise<void>` — requires `storage.rw`.
+ *   Write one tab-scoped key — evicted when the calling tab closes, survives navigation within
+ *   it.
+ * - `synapseApi.storage.remove(key: string): Promise<void>` — requires `storage.rw`.
+ *   Delete one tab-scoped key.
+ * - `synapseApi.storage.keys(): Promise<string[]>` — requires `storage.rw`.
+ *   List this script's own tab-scoped keys for the calling tab.
+ * - `synapseApi.storage.get(key: string): Promise<unknown>` — requires `storage.rw`.
+ *   Read one of this script's own session-scoped keys. Resolves to `undefined` when unset.
+ * - `synapseApi.storage.set(key: string, value: unknown): Promise<void>` — requires `storage.rw`.
+ *   Write one session-scoped key — evicted on the calling tab's next navigation commit,
+ *   including a same-URL reload.
+ * - `synapseApi.storage.remove(key: string): Promise<void>` — requires `storage.rw`.
+ *   Delete one session-scoped key.
+ * - `synapseApi.storage.keys(): Promise<string[]>` — requires `storage.rw`.
+ *   List this script's own session-scoped keys for the calling tab.
  * - `synapseApi.ui.toast(options: { id, message, actionLabel?, onAction? }): boolean` — requires `ui.render` (runs in your own world — synchronous).
  *   Show a card bottom-right; reusing an id updates it in place. Returns false if refused (rate
  *   limit, quota, or the user muted this script's UI).
@@ -811,16 +861,35 @@ interface SynapseScopeGrant {
   match?: string[];
 }
 
-/** Per-script key/value storage. Keys are namespaced to the calling script by the platform and
- * there is no way for a key to escape that namespace — see `scopes.ts` for why that is the
- * precondition of the whole permission model rather than a nicety. Scope: `storage.rw`. */
-interface SynapseStorageApi {
+/** Plain key/value operations, shared shape across all three storage lifetimes below — they differ
+ * only in when the platform evicts the keys, never in the read/write surface. */
+interface SynapseKeyValueApi {
   /** Resolves to `undefined` when this script has never written `key`. */
   get(key: string): Promise<unknown>;
   set(key: string, value: unknown): Promise<void>;
   remove(key: string): Promise<void>;
   /** Every key this script has written, without the internal namespace prefix. */
   keys(): Promise<string[]>;
+}
+
+/** Per-script key/value storage. Keys are namespaced to the calling script by the platform and
+ * there is no way for a key to escape that namespace — see `scopes.ts` for why that is the
+ * precondition of the whole permission model rather than a nicety. Scope: `storage.rw` for all
+ * three sub-namespaces below (docs/ROADMAP.md Track A2) — they differ in *lifetime*, not in
+ * *permission*, so no new scope was minted for `session`/`tab`.
+ *
+ * The root object itself (`get`/`set`/`remove`/`keys`) is the **permanent** lifetime — never
+ * evicted by the platform, until the script itself calls `remove()` or is deleted. Kept flat
+ * (not nested under e.g. `.local`) for backward compatibility: this is the original v1 shape. */
+interface SynapseStorageApi extends SynapseKeyValueApi {
+  /** Dies when the calling tab CLOSES — survives navigation/reload within that tab. Only usable
+   * from code attached to a real tab (a dom Module or an uploaded script); a background Module has
+   * no tab of its own and gets a stub whose every method rejects, same posture as `page`/`ui`. */
+  tab: SynapseKeyValueApi;
+  /** Dies on the calling tab's next navigation commit, **including a reload of the same URL** —
+   * the same "navigation" lifetime the platform's own detected-media list uses internally
+   * (docs/ROADMAP.md Track A1). Same tab-only restriction and stub behavior as `tab` above. */
+  session: SynapseKeyValueApi;
 }
 
 /**

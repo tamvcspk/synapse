@@ -8,13 +8,8 @@ Mọi việc đã implement (typecheck/test/build sạch) nhưng chưa được 
 
 ---
 
-## Kiến trúc — cần xác nhận bằng extension THẬT
-
-- **[B2d] Content script có được Chrome match vào iframe opaque-origin (sandboxed) không?** Đã đo bằng CDP `Page.createIsolatedWorld` rằng injection **hoạt động** trong frame bị `CSP: sandbox` (xem [LESSONS.md](LESSONS.md)) — nhưng đó là *khả năng*, không phải *policy*. Thứ chưa xác nhận: Chrome có **chọn** inject một content script đã đăng ký (`all_frames: true`) vào frame đó hay không. **Đây là tiền đề của quyết định khai tử `iframe-unsandbox`** — nếu sai thì mất mát lớn hơn đã ghi. Cách test: `node docs/examples/iframe-sandbox-test-page.cjs`, bật Network Sniffer, mở `http://localhost:8899/` → frame B và D có báo `<video>` của chúng không.
-
 ## Userscript Platform (§11 ROADMAP)
 
-- **[§11.5] Phase 4 (trục `features/`)** — phần `http-mock` ĐÃ xác nhận (§2.6.2: cả 3 mechanism chạy đúng ở vị trí file mới). Phần `media`/`reader-mode` CHƯA: 2 icon nổi network-sniffer+reader-mode không đè lẫn nhau khi cùng hiện trên 1 trang; Side Panel vẫn list được media sau khi `store.ts` đổi chỗ; network-sniffer's MAIN-world payload vẫn tiêm đúng; reader-mode-converter vẫn chạy đúng ở `features/reader-mode/`.
 - **[§11.6] `net.request`** — happy path + từ chối theo `match` ĐÃ xác nhận. Còn lại: response nhị phân lớn (`responseType:'arraybuffer'`) round-trip đúng qua base64 không hỏng byte; timeout 120s thật sự abort request treo; gọi từ dom Module (content-script RPC) chưa thử — mới verify qua đường user-script.
 - **[§11.6] `files.save`** — toàn bộ đường chưa chạy qua Chrome thật: `chrome.downloads.download()` với URL `data:` (không phải `blob:`) ghi đúng file ở kích thước gần cap 10MB; `filename` có subfolder tự tạo thư mục con; `conflictAction` mặc định (uniquify) không đổi tên gây bất ngờ; `saveAs:true` mở đúng dialog.
 - **[§11.6] `media`** — `list`/`inspect`/`download`/`job` cốt lõi ĐÃ xác nhận. Còn lại: `job()` polling bắt kịp tiến độ khi Side Panel CŨNG đang mở nghe cùng broadcast; snapshot Map mất sau reload extension (không âm thầm giữ state cũ); `control(jobId, ...)` từ script tác động đúng lên job do Side Panel khởi động và ngược lại (chưa thử chiều chéo); download một `variants[]` cụ thể tới nhánh `'done'` (mới xác nhận nhánh `'error'`).
@@ -50,3 +45,4 @@ Baseline: engine tải (§8.1–8.5) và Side Panel (§6) đã qua nhiều vòng
 - **§8.2 (Turbo)** Ghi OPFS đồng thời theo offset ra đúng byte; `AbortController`-huỷ fetch dọn sạch; tỉ lệ probe HEAD/Range nhận đúng server hỗ trợ range trên CDN thật.
 - **§8.10** `'pausing'`→`'paused'` không bao giờ kẹt dưới tải mạng thật; bấm Download lại ngay sau Cancel luôn là job hoàn toàn mới.
 - **§8.12** Cốt lõi ĐÃ xác nhận (reload extension mid-download → Resume → file phát được). Còn lại: `commit()`'s chi phí O(kích thước file) có gây chậm thấy rõ trên stream nhiều GB với interval 20s (mới test vài trăm MB); nhiều vòng crash-resume LIÊN TIẾP trên cùng 1 job chưa thử; `sweepStaleOpfsRuns`'s `keepRunIds` dưới nhiều checkpoint cùng lúc chưa thử.
+

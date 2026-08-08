@@ -94,6 +94,18 @@ export function buildDomModuleApi(moduleId: string): SynapseApi {
       set: (key, value) => call(moduleId, 'storage', 'set', [key, value]).then(() => undefined),
       remove: (key) => call(moduleId, 'storage', 'remove', [key]).then(() => undefined),
       keys: () => call(moduleId, 'storage', 'keys', []) as Promise<string[]>,
+      tab: {
+        get: (key) => call(moduleId, 'storage', 'tab.get', [key]),
+        set: (key, value) => call(moduleId, 'storage', 'tab.set', [key, value]).then(() => undefined),
+        remove: (key) => call(moduleId, 'storage', 'tab.remove', [key]).then(() => undefined),
+        keys: () => call(moduleId, 'storage', 'tab.keys', []) as Promise<string[]>,
+      },
+      session: {
+        get: (key) => call(moduleId, 'storage', 'session.get', [key]),
+        set: (key, value) => call(moduleId, 'storage', 'session.set', [key, value]).then(() => undefined),
+        remove: (key) => call(moduleId, 'storage', 'session.remove', [key]).then(() => undefined),
+        keys: () => call(moduleId, 'storage', 'session.keys', []) as Promise<string[]>,
+      },
     },
     ui: createUiSurface(moduleId),
     net: {
