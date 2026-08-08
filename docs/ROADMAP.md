@@ -112,20 +112,61 @@ Khoảng cách đo được hôm nay:
 | Builtin | Script với tới | Còn thiếu |
 |---|---|---|
 | `http-error-mocker` | `fake-response` × `main-world` — **1 trong 6** tổ hợp | `block`, `rewrite-request`; mechanism `debugger`, `dnr` |
-| `network-sniffer` | `media.list/inspect/download/job/control` | **`net.observe` dạng subscription** (2/3 nguồn phát hiện); toggle turbo |
-| `iframe-unsandbox` | — | strip CSP header qua DNR |
+| `network-sniffer` | `media.list/inspect/download/job/control` | **`page.hook`** (xem B2c) + **`net.observe`** dạng subscription; toggle turbo |
+| `iframe-unsandbox` | — | ✅ **KHAI TỬ — không cần API nào**, xem B2d |
 | `reader-mode-converter` | gần đủ (đã chứng minh bằng [test-lib-reader-mode.js](examples/test-lib-reader-mode.js)) | chỉ crawl-site, **cố ý bỏ** (policy nghiệp vụ) |
 
-**Quy tắc mở rộng `net.mock`, đã chốt:** script khai **ý định** (`block`/`rewrite`/`fake`), **platform vẫn chọn mechanism** — đúng nguyên tắc "phân quyền theo mục đích, không theo cơ chế" ([design.md §3.E](design.md#e-synapseapi-and-the-scope-model-the-public-contract)). Chi phí thật là platform phải tự giải ma trận ràng buộc (chọn mechanism rẻ nhất còn hỗ trợ được action đang xin), **không** phải thêm một field `mechanism` cho script.
+**B2a — Quy tắc mở rộng `net.mock`, đã chốt:** script khai **ý định** (`block`/`rewrite`/`fake`), **platform vẫn chọn mechanism** — đúng nguyên tắc "phân quyền theo mục đích, không theo cơ chế" ([design.md §3.E](design.md#e-synapseapi-and-the-scope-model-the-public-contract)). Chi phí thật là platform phải tự giải ma trận ràng buộc (chọn mechanism rẻ nhất còn hỗ trợ được action đang xin), **không** phải thêm field `mechanism` cho script.
 
-**Ngoại lệ đã chốt cho `debugger`:** vẫn expose, nhưng sau **một grant riêng, đặc trưng**. Lý do chấp nhận được: Chrome đã tự có cơ chế cảnh báo (banner "đang debug tab" hiện liên tục, user không thể không thấy), và đối tượng người dùng của Synapse hẹp + kỹ thuật. Consent line phải nói thẳng về cái banner đó.
+**B2b — `debugger`, đã chốt: vẫn expose, sau một grant riêng.** Chrome đã tự có cơ chế cảnh báo không thể bỏ qua (banner "đang debug tab" hiện liên tục), và đối tượng người dùng hẹp + kỹ thuật. Consent line **phải nói thẳng về cái banner đó**.
 
-**`iframe-unsandbox` là API nguy hiểm nhất trong danh sách** — nó gỡ CSP của trang. Quyết định *expose hay khai tử* phải làm tường minh, không để trôi.
+**B2c — `page.hook` / `page.inject`: đăng ký code MAIN-world THƯỜNG TRÚ, chạy từ `document_start`, sau scope riêng.**
+
+Đây là khoảng cách **về thời điểm, không phải về quyền**: builtin đăng ký payload MAIN-world thường trú nên hook được `window.Hls`/`MediaSource`/`window.fetch` **trước khi JS trang chạy**; script chỉ có `page.eval` one-shot, luôn **trễ**. Không có mục này thì 2/3 builtin không tái tạo được — bằng bất kỳ số lượng API nào khác.
+
+Lợi ích kèm theo: đăng ký tĩnh **không dính `unsafe-eval`** (Chrome inject như script thật), nên nó **vá luôn** giới hạn CSP mà `page.eval` đang mắc.
+
+Ba ràng buộc phải làm đúng ngay từ đầu:
+1. **`sourceHash` phải phủ cả code được inject.** Nếu payload lưu rời mà hash chỉ tính trên source script, script **đổi code MAIN-world mà không phải xin lại quyền** — lỗ mở by construction.
+2. **Hook không gọi được `ctx.api`** (MAIN world không có `chrome.*`). Tác giả viết **hai nửa** nối bằng `CustomEvent` — đúng khuôn `utils/main-world/event-channel.ts`. Chi phí ergonomics thật, phải ghi rõ trong docs.
+3. **Thứ tự giữa nhiều script cùng hook một global** phải **tất định**, không theo thứ tự đăng ký (luật đã lặp lần thứ năm trong repo này).
+
+Kèm: `deleteScript(id)` hiện dọn 7 store — unregister hook thành cái thứ 8.
+
+**B2d — `iframe-unsandbox`: KHAI TỬ. Đã có bằng chứng thực nghiệm, không còn là câu hỏi mở.**
+
+Đo thật 2026-08-06 ([LESSONS.md](LESSONS.md), harness [`iframe-sandbox-test-page.cjs`](examples/iframe-sandbox-test-page.cjs)): **sandbox chặn script của TRANG nhưng không chặn injection của extension** — cả MAIN lẫn ISOLATED world đều chạy trong frame bị `CSP: sandbox` header, DOM với tới được, `CustomEvent` bắc cầu được. Nên kiến trúc pub/sub **đã** với tới các frame đó mà không cần gỡ CSP.
+
+Hai nửa của module xử lý như sau:
+- **Nửa DOM** (gỡ attribute `sandbox`): script có `page.dom` (Disclosed) **đã làm được hôm nay** — `removeAttribute('sandbox')` + reload frame.
+- **Nửa network** (DNR strip CSP): **xoá.** Ngoài việc không cần, nó còn **không thể thu hẹp được**: DNR điều kiện hoá được theo *tên* header nhưng không theo *giá trị*, nên luật buộc phải blanket — gỡ CSP khỏi **mọi** `sub_frame` trên **mọi** site. Đó là một quyền **không có chiều tài nguyên nào**, tức không khai nổi `unboundedReason` trung thực theo bất biến mới ở B2e.
+
+**Mất mát có chủ đích, ghi rõ:** ở frame bị sandbox tắt scripting, JS của trang không chạy ⇒ không có player để hook. Gỡ CSP ở đó không phải "thấy media" mà là **bật player của trang lên** — mục tiêu khác, không thuộc phạm vi Synapse. Media dạng `<video src>` thuần HTML vẫn phát hiện bình thường.
+
+**B2e — Catalog scope: bỏ trần đếm, thay bằng bất biến tài nguyên. Đã chốt.**
+
+Trần `ALL_SCOPES.length <= 10` (`scopes.test.ts`) **bị gỡ**. Lý do: nó đo sai chiều (số dòng user thấy phụ thuộc script khai bao nhiêu scope, không phụ thuộc catalog có bao nhiêu), và ở biên nó **ép gộp những năng lực khác bản chất vào một scope — tức ép consent UI nói dối**, đúng thứ nó sinh ra để ngăn.
+
+Thay bằng bất biến kiểm được bằng máy:
+
+> **Mọi scope hoặc có `requiresMatch: true`, hoặc khai `unboundedReason` giải thích vì sao không bound được.**
+
+Hiện chỉ **3/10** scope có `requiresMatch` — nguyên tắc "grant là (hành động × tài nguyên)" mới hiện thực được 30%. Bất biến này sẽ tự lôi ra scope nào đang không bound (`media` là ứng viên rõ nhất).
+
+**Nhóm để HIỂN THỊ, không bao giờ để CẤP PHÁT.** Consent UI được gom nhóm cho dễ đọc, nhưng dòng cha là **tiêu đề**, không phải checkbox — grant luôn ở mức lá. Gộp thành đơn vị cấp phát là tái tạo đúng bài toán `bus`.
 
 **Nguyên tắc nghiệm thu:** nghỉ hưu builtin **≠** mọi năng lực builtin đều thành API. Năng lực nào quyết định **không** expose thì ghi vào note của builtin đó như một mất mát có chủ đích — không im lặng bỏ.
 
 - **Xong khi**: mỗi builtin có một dòng trạng thái parity trung thực; mọi năng lực hoặc đã có API, hoặc đã ghi rõ là bị khai tử.
-- **Phụ thuộc**: **catalog scope phải chốt trước** (xem Open Points) — `debugger` grant là scope thứ 11, mà trần tự đặt là ~10.
+- **Phụ thuộc**: B2e (bất biến scope) làm trước — nó gỡ nút thắt cho `debugger` grant và `page.hook` scope.
+
+### B2f. `ui.menuCommand` — parity với `GM_registerMenuCommand`
+
+- **Cơ chế bắt buộc là pub/sub**, không phải tuỳ chọn: callback là function, không qua nổi structured clone. Dùng lại đúng khuôn `pipeline.hook` (đăng ký cục bộ trong world của script, chỉ dữ liệu tuần tự hoá đi qua, gọi lại bằng `CustomEvent`).
+- **Nằm trong namespace `ui.*`, KHÔNG tạo scope mới** — nó là UI, nhận closure, cần quota, và `ui.*` đã là `transport: 'in-world'`. Giảm luôn áp lực catalog.
+- **Bề mặt đã chốt: `chrome.contextMenus`** (không phải popup) — sát `GM_registerMenuCommand` nhất. **Cạm bẫy phải xử lý**: menu item bị xoá khi service worker restart, nên phải dựng lại từ state persist, không giữ trong RAM.
+- **Vòng đời là tab + navigation** ⇒ đây là consumer đầu tiên rất tự nhiên của **Track A**. Làm sau A1 thì lifetime có sẵn; làm trước thì phải tự chế cơ chế dọn rồi vứt đi.
+- **Phụ thuộc**: A1 (nên), không cứng.
 
 ### B3. Template đạt parity → xoá builtin
 
@@ -195,11 +236,6 @@ Hiện **không có** — Dashboard scoped per-`moduleId`. Đang chặn phần U
 ## Khu vực Open Points
 
 Chỉ còn những thứ **thật sự chưa quyết được** hoặc **không hành động được**. Mọi mục đã chuyển thành phase nằm ở các Track phía trên.
-
-### Chặn Track khác — cần quyết sớm
-
-- **[Catalog scope] ~13 mục đề xuất vs trần tự đặt ~10 ([api-inventory.md §5](api-inventory.md)) — chưa chốt, và nay đã CHẶN B2.** Grant riêng cho `debugger` (đã chốt là sẽ có) là scope thứ 11. Hướng gộp đã chọn: **giảm chiều số lượng bằng chiều tài nguyên** (`×match` giới hạn thiệt hại tốt hơn chẻ nhỏ scope). Hai quyết định gộp còn tranh cãi: `media.read`+`media.download` gộp làm một; `tabs.open` bỏ hẳn khỏi v1.
-- **[`iframe-unsandbox`] Expose hay khai tử — chưa quyết.** Nó gỡ CSP của trang, là API nguy hiểm nhất trong danh sách B2. Không để trôi: quyết tường minh, và nếu khai tử thì ghi vào note như mất mát có chủ đích.
 
 ### Cần debug trên trang thật — không vá thêm bằng giả thuyết
 

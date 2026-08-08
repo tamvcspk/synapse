@@ -62,6 +62,26 @@ Sổ tay các gotcha/bài học kỹ thuật rút ra khi implement Synapse — k
 - **`FileSystemDirectoryHandle.keys()`/`values()`/`entries()` thiếu trong `lib.dom.d.ts` bundled của TypeScript** dù mọi trình duyệt hỗ trợ OPFS đều có — cần tự `declare global` augment.
 - **Resume sau crash: không tin mù checkpoint đã lưu.** Phải đối chiếu `file.size` THẬT trên đĩa với checkpoint (`lastConfirmedByteOffset`) — nhỏ hơn thì checkpoint sai (lưu sớm hơn ghi thật), lớn hơn/bằng thì `truncate()` về đúng offset trước khi ghi tiếp (đuôi file có thể là byte dở dang của segment đang ghi lúc crash, không đảm bảo toàn vẹn).
 
+## Sandbox chặn script của TRANG, không chặn injection của extension
+
+**Đo thật 2026-08-06** (Chrome qua Playwright + CDP, harness: [`docs/examples/iframe-sandbox-test-page.cjs`](examples/iframe-sandbox-test-page.cjs)). Câu hỏi: một iframe bị sandbox — qua attribute `sandbox` hoặc qua response header `Content-Security-Policy: sandbox` — có còn cho extension inject code vào không?
+
+| Frame | JS của trang chạy? | Inject MAIN | Inject ISOLATED | `CustomEvent` |
+|---|---|---|---|---|
+| control | ✅ | ✅ | ✅ | ✅ |
+| `<iframe sandbox>` (không `allow-scripts`) | ❌ | ✅ | ✅ | ✅ |
+| `<iframe sandbox="allow-scripts">` | ✅ | ✅ | ✅ | ✅ |
+| header `CSP: sandbox` | ❌ | ✅ | ✅ | ✅ |
+| header `CSP: sandbox allow-scripts` | ✅ | ✅ | ✅ | ✅ |
+
+Kết luận: **sandbox tắt scripting của chính document đó, nhưng KHÔNG chặn code extension tiêm vào** — cả hai world đều chạy, DOM với tới được, và cầu `CustomEvent` giữa ISOLATED↔MAIN vẫn hoạt động. Hai world vẫn cô lập đúng (`window` riêng).
+
+**Hệ quả đã dùng để quyết định:** không cần gỡ CSP/sandbox để "nhìn vào" một iframe. Đây là căn cứ khai tử `iframe-unsandbox` (luật DNR strip CSP toàn cục). Và lưu ý điều dễ hiểu ngược: ở frame bị chặn scripting, **JS của trang không chạy nên không có player, không có `fetch`/`Hls` để hook** — gỡ CSP ở đó không phải để "thấy media" mà là để **bật player của trang lên**, một mục tiêu khác hẳn. Media dạng `<video src>` thuần HTML vẫn load và DOM-observer vẫn thấy bình thường.
+
+**Giới hạn của phép đo:** dùng CDP `Page.createIsolatedWorld` — đúng primitive Chrome hiện thực content script, nhưng không phải chính đường inject của extension. Thứ chưa xác nhận là Chrome có **chọn** match một content script vào frame opaque-origin hay không (câu hỏi *policy*, không phải *khả năng*). Xem `docs/TEST_PLAN.md`.
+
+**Chi tiết kỹ thuật đáng nhớ:** frame sandboxed thành **OOPIF** (out-of-process), nên `Page.getFrameTree` trên target cha **không liệt kê chúng** — phải lấy CDP session riêng cho từng frame (`context.newCDPSession(frame)`). Ai debug frame mà thấy "chỉ có 1 iframe" thì đây là lý do.
+
 ## Chrome extension UI injection vào trang bất kỳ
 
 - **CSS qua `<style>` tag hoặc `style=""` string bị `style-src` CSP CỦA TRANG chi phối** — Chrome âm thầm bỏ qua, không lỗi gì hiện ra, **kể cả khi node được tạo từ ISOLATED world và cắm vào Shadow DOM**. Cô lập world không cứu được: `style-src` áp theo document, không theo world.

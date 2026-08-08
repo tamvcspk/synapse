@@ -8,6 +8,10 @@ Mọi việc đã implement (typecheck/test/build sạch) nhưng chưa được 
 
 ---
 
+## Kiến trúc — cần xác nhận bằng extension THẬT
+
+- **[B2d] Content script có được Chrome match vào iframe opaque-origin (sandboxed) không?** Đã đo bằng CDP `Page.createIsolatedWorld` rằng injection **hoạt động** trong frame bị `CSP: sandbox` (xem [LESSONS.md](LESSONS.md)) — nhưng đó là *khả năng*, không phải *policy*. Thứ chưa xác nhận: Chrome có **chọn** inject một content script đã đăng ký (`all_frames: true`) vào frame đó hay không. **Đây là tiền đề của quyết định khai tử `iframe-unsandbox`** — nếu sai thì mất mát lớn hơn đã ghi. Cách test: `node docs/examples/iframe-sandbox-test-page.cjs`, bật Network Sniffer, mở `http://localhost:8899/` → frame B và D có báo `<video>` của chúng không.
+
 ## Userscript Platform (§11 ROADMAP)
 
 - **[§11.5] Phase 4 (trục `features/`)** — phần `http-mock` ĐÃ xác nhận (§2.6.2: cả 3 mechanism chạy đúng ở vị trí file mới). Phần `media`/`reader-mode` CHƯA: 2 icon nổi network-sniffer+reader-mode không đè lẫn nhau khi cùng hiện trên 1 trang; Side Panel vẫn list được media sau khi `store.ts` đổi chỗ; network-sniffer's MAIN-world payload vẫn tiêm đúng; reader-mode-converter vẫn chạy đúng ở `features/reader-mode/`.
